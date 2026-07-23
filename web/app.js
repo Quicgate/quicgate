@@ -233,6 +233,10 @@ function renderHosts() {
 
     const tdActions = document.createElement('td');
     tdActions.style.textAlign = 'right';
+    const btnLogs = document.createElement('button');
+    btnLogs.className = 'btn btn--ghost btn--sm';
+    btnLogs.textContent = 'Logs';
+    btnLogs.addEventListener('click', () => openHostLogs(h));
     const btnEdit = document.createElement('button');
     btnEdit.className = 'btn btn--secondary btn--sm';
     btnEdit.textContent = 'Edit';
@@ -247,7 +251,8 @@ function renderHosts() {
       refresh();
       refreshCerts();
     });
-    tdActions.append(btnEdit, btnDel);
+    btnEdit.style.marginLeft = '8px';
+    tdActions.append(btnLogs, btnEdit, btnDel);
 
     tr.append(tdDomains, tdUpstream, tdTLS, tdAccess, tdEnabled, tdActions);
     body.appendChild(tr);
@@ -947,10 +952,24 @@ $('profile-pw-form').addEventListener('submit', async (e) => {
 
 let logCache = [];
 async function refreshLogs() {
-  logCache = await api('GET', '/api/logs?n=500').catch(() => []);
+  // System page shows only traffic that matched no configured host.
+  logCache = await api('GET', '/api/logs?n=500&general=1').catch(() => []);
   renderLogs();
 }
 $('logs-filter').addEventListener('input', renderLogs);
+
+function logRow(e, withHost) {
+  const tr = document.createElement('tr');
+  const cls = e.status >= 400 ? 'badge--danger' : 'badge--success';
+  tr.innerHTML =
+    `<td class="domain">${e.ts ? new Date(e.ts).toLocaleTimeString() : ''}</td>` +
+    `<td class="domain">${e.client_ip || ''}</td>` +
+    (withHost ? `<td class="domain">${e.host || ''}</td>` : '') +
+    `<td class="domain">${e.method || ''} ${e.path || ''}</td>` +
+    `<td><span class="badge ${cls}">${e.status || ''}</span></td>` +
+    `<td class="domain">${e.dur_ms ?? ''}</td>`;
+  return tr;
+}
 
 function renderLogs() {
   const q = $('logs-filter').value.trim().toLowerCase();
@@ -960,20 +979,40 @@ function renderLogs() {
   const body = $('logs-body');
   body.innerHTML = '';
   $('logs-empty').hidden = logs.length > 0;
-  for (const e of logs) {
-    const tr = document.createElement('tr');
-    const cls = e.status >= 500 ? 'badge--danger' : e.status >= 400 ? 'badge--danger' : 'badge--success';
-    tr.innerHTML =
-      `<td class="domain">${e.ts ? new Date(e.ts).toLocaleTimeString() : ''}</td>` +
-      `<td class="domain">${e.client_ip || ''}</td>` +
-      `<td class="domain">${e.host || ''}</td>` +
-      `<td class="domain">${e.method || ''} ${e.path || ''}</td>` +
-      `<td><span class="badge ${cls}">${e.status || ''}</span></td>` +
-      `<td class="domain">${e.dur_ms ?? ''}</td>`;
-    body.appendChild(tr);
-  }
+  for (const e of logs) body.appendChild(logRow(e, true));
 }
 $('btn-logs-refresh').addEventListener('click', refreshLogs);
+
+// ---- per-host access log modal ----
+let hostLogCache = [];
+let hostLogDomain = '';
+async function refreshHostLogs() {
+  hostLogCache = await api('GET', `/api/logs?n=300&host=${encodeURIComponent(hostLogDomain)}`).catch(() => []);
+  renderHostLogs();
+}
+function renderHostLogs() {
+  const q = $('hostlog-filter').value.trim().toLowerCase();
+  const logs = q
+    ? hostLogCache.filter((e) => `${e.client_ip} ${e.path} ${e.status}`.toLowerCase().includes(q))
+    : hostLogCache;
+  const body = $('hostlog-body');
+  body.innerHTML = '';
+  $('hostlog-empty').hidden = logs.length > 0;
+  for (const e of logs) body.appendChild(logRow(e, false));
+}
+function openHostLogs(h) {
+  hostLogDomain = h.domains[0];
+  $('hostlog-title').textContent = `Access log: ${hostLogDomain}`;
+  $('hostlog-filter').value = '';
+  $('hostlog-modal').hidden = false;
+  refreshHostLogs();
+}
+$('hostlog-filter').addEventListener('input', renderHostLogs);
+$('hostlog-refresh').addEventListener('click', refreshHostLogs);
+$('hostlog-close').addEventListener('click', () => { $('hostlog-modal').hidden = true; });
+$('hostlog-modal').addEventListener('click', (e) => {
+  if (e.target === $('hostlog-modal')) $('hostlog-modal').hidden = true;
+});
 
 async function refreshEffConfig() {
   const routes = (await api('GET', '/api/config').catch(() => [])) || [];

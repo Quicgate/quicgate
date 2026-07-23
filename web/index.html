@@ -82,7 +82,7 @@
         <div id="hosts-empty" class="empty" hidden>No proxy hosts yet. Add the first one.</div>
       </div>
 
-      <div class="card" style="margin-top:var(--sp-6)">
+      <div class="card">
         <div class="card-head"><h2>Certificates</h2><button id="btn-certs-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
         <table class="table" id="certs-table">
           <thead><tr><th>Domain</th><th>Status</th><th>Expires</th></tr></thead>
@@ -124,7 +124,7 @@
 
     <div id="page-system" hidden>
       <div class="card">
-        <div class="card-head"><h2>Access log</h2><button id="btn-logs-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
+        <div class="card-head"><h2>System log <em class="hs-muted" style="font-size:var(--fs-xs)">(traffic not matching any host; per-host logs are on each proxy host)</em></h2><button id="btn-logs-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
         <input id="logs-filter" class="search" type="search" placeholder="Filter by host, client IP, path or status...">
         <table class="table" id="logs-table">
           <thead><tr><th>Time</th><th>Client</th><th>Host</th><th>Request</th><th>Status</th><th>ms</th></tr></thead>
@@ -278,6 +278,25 @@
       </div>
     </div>
   </main>
+</div>
+
+<!-- per-host access log modal -->
+<div id="hostlog-modal" class="modal-backdrop" hidden>
+  <div class="modal card" style="width:min(1100px,100%)">
+    <div class="card-head">
+      <h2 id="hostlog-title">Logs</h2>
+      <div style="display:flex;gap:var(--sp-2)">
+        <button id="hostlog-refresh" class="btn btn--ghost btn--sm">Refresh</button>
+        <button id="hostlog-close" class="btn btn--ghost btn--sm">&times;</button>
+      </div>
+    </div>
+    <input id="hostlog-filter" class="search" type="search" placeholder="Filter by client IP, path or status...">
+    <table class="table" id="hostlog-table">
+      <thead><tr><th>Time</th><th>Client</th><th>Request</th><th>Status</th><th>ms</th></tr></thead>
+      <tbody id="hostlog-body"></tbody>
+    </table>
+    <div id="hostlog-empty" class="empty" hidden>No log entries for this host yet.</div>
+  </div>
 </div>
 
 <!-- access list modal -->

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/pquerna/otp/totp"
 
@@ -114,17 +115,55 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			n = parsed
 		}
 	}
+	// host=<domain> keeps only that host's traffic; general=1 keeps only
+	// traffic that does not belong to any configured host (scanners, raw-IP
+	// hits) so the System page shows the noise and each host shows its own.
+	wantHost := strings.ToLower(r.URL.Query().Get("host"))
+	general := r.URL.Query().Get("general") == "1"
+	var known map[string]bool
+	if general {
+		known = map[string]bool{}
+		if hosts, err := s.store.ListHosts(); err == nil {
+			for _, h := range hosts {
+				for _, d := range h.Domains {
+					known[strings.ToLower(d)] = true
+				}
+			}
+		}
+	}
+	matches := func(line []byte) bool {
+		if wantHost == "" && !general {
+			return true
+		}
+		var e struct {
+			Host string `json:"host"`
+		}
+		if json.Unmarshal(line, &e) != nil {
+			return false
+		}
+		h := strings.ToLower(e.Host)
+		if i := strings.LastIndex(h, ":"); i > 0 && !strings.Contains(h[i:], "]") {
+			h = h[:i]
+		}
+		if wantHost != "" {
+			return h == wantHost
+		}
+		return !known[h]
+	}
 	f, err := os.Open(filepath.Join(s.dataDir, "logs", "access.log"))
 	if err != nil {
 		writeJSON(w, http.StatusOK, []any{})
 		return
 	}
 	defer f.Close()
-	// Ring buffer of the last n JSON lines.
+	// Ring buffer of the last n matching JSON lines.
 	ring := make([]json.RawMessage, 0, n)
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
+		if !matches(sc.Bytes()) {
+			continue
+		}
 		line := append([]byte(nil), sc.Bytes()...)
 		if len(ring) < n {
 			ring = append(ring, line)
