@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>quicgate</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="huisstijl.css">
 <link rel="stylesheet" href="app.css">
 </head>
@@ -43,7 +44,10 @@
 <div id="view-app" hidden>
   <header class="topbar">
     <div class="topbar__brand">
-      <span class="hs-kicker">quicgate</span>
+      <span class="brand-lockup">
+        <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><rect x="2" y="2" width="60" height="60" rx="14" fill="#161a23"/><g fill="none" stroke="#a3e635" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="17" x2="18" y2="47"/><polyline points="28,16 41,32 28,48"/><polyline points="39,16 52,32 39,48"/></g></svg>
+        <span class="brand-name">quic<span class="brand-accent">gate</span></span>
+      </span>
       <nav class="pagenav" id="pagenav">
         <button class="pagelink is-active" data-page="hosts">Proxy Hosts</button>
         <button class="pagelink" data-page="access">Access Lists</button>

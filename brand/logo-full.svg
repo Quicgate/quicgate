@@ -1,0 +1,18 @@
+<svg viewBox="0 0 760 220" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>@import url('https://fonts.googleapis.com/css2?family=Geist:wght@800&amp;display=swap');
+    .wm{font-family:'Geist','Segoe UI',system-ui,sans-serif;font-weight:800;}</style>
+  </defs>
+  <g transform="translate(6,4) scale(0.80)">
+    <rect x="16" y="16" width="224" height="224" rx="52" fill="#161a23" stroke="#2f4417" stroke-width="3"/>
+    <rect x="17" y="17" width="222" height="110" rx="51" fill="#ffffff" opacity="0.03"/>
+    <g fill="none" stroke="#a3e635" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="70" y1="82" x2="70" y2="174"/>
+      <polyline points="110,82 155,128 110,174"/>
+      <polyline points="151,82 196,128 151,174"/>
+    </g>
+  </g>
+  <text x="228" y="140" class="wm" font-size="104" letter-spacing="-4">
+    <tspan fill="#161a14">quic</tspan><tspan fill="#6aa80f">gate</tspan>
+  </text>
+</svg>

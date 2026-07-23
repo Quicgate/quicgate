@@ -27,7 +27,11 @@ body { background: var(--c-bg); color: var(--c-text); font-family: var(--font-bo
   padding: var(--sp-4) var(--sp-6); border-bottom: 1px solid var(--c-border);
   background: var(--c-bg-2);
 }
-.topbar__brand { display: flex; align-items: baseline; gap: var(--sp-4); }
+.topbar__brand { display: flex; align-items: center; gap: var(--sp-4); }
+.brand-lockup { display: inline-flex; align-items: center; gap: var(--sp-2); }
+.brand-mark { width: 26px; height: 26px; display: block; }
+.brand-name { font-family: var(--font-display); font-weight: var(--fw-black); letter-spacing: var(--ls-tight); font-size: var(--fs-lg); color: var(--c-text); }
+.brand-accent { color: var(--c-accent); }
 .pagenav { display: flex; gap: var(--sp-1); }
 .pagelink {
   background: none; border: none; color: var(--c-text-muted); font: inherit;
