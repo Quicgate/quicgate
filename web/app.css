@@ -1,0 +1,76 @@
+/* quicgate admin UI, on top of huisstijl example tokens */
+
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100vh; }
+body { background: var(--c-bg); color: var(--c-text); font-family: var(--font-body); font-size: var(--fs-base); }
+
+.mono { font-family: var(--font-mono); }
+
+/* layout */
+.center-wrap { min-height: 100vh; display: grid; place-items: center; padding: var(--sp-6); }
+.login-card { width: min(380px, 100%); }
+.page { max-width: 1080px; margin: 0 auto; padding: var(--sp-6); }
+
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--sp-4) var(--sp-6); border-bottom: 1px solid var(--c-border);
+  background: var(--c-bg-2);
+}
+.topbar__brand { display: flex; align-items: baseline; gap: var(--sp-3); }
+.topbar__title { font-weight: var(--fw-bold); letter-spacing: var(--ls-tight); }
+.topbar__actions { display: flex; align-items: center; gap: var(--sp-3); }
+
+.card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-3); }
+.card-head h2 { margin: 0; font-size: var(--fs-lg); font-weight: var(--fw-bold); }
+
+/* forms */
+.field { display: flex; flex-direction: column; gap: var(--sp-1); margin-bottom: var(--sp-3); flex: 1; }
+.field > span { font-size: var(--fs-sm); color: var(--c-text-muted); font-family: var(--font-mono); }
+.field > span em { font-style: normal; color: var(--c-text-faint); }
+.field--sm { flex: 0 0 150px; }
+.field-row { display: flex; gap: var(--sp-3); align-items: flex-end; flex-wrap: wrap; }
+
+input, select, textarea {
+  background: var(--c-surface-2); color: var(--c-text); border: 1px solid var(--c-border);
+  border-radius: var(--r-sm); padding: var(--sp-2) var(--sp-3); font: inherit; font-size: var(--fs-base);
+  transition: border-color var(--dur-fast);
+}
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--c-accent); }
+textarea { resize: vertical; }
+
+.check { display: flex; align-items: center; gap: var(--sp-2); margin: var(--sp-2) 0; cursor: pointer; }
+.check input { accent-color: var(--c-accent); width: 16px; height: 16px; }
+.check span em { font-style: normal; color: var(--c-text-faint); }
+
+.group { border: 1px solid var(--c-border); border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4); margin: var(--sp-4) 0; }
+.group legend { font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--ls-wide); text-transform: uppercase; color: var(--c-text-muted); padding: 0 var(--sp-2); }
+
+.form-error { color: var(--c-danger); background: var(--c-danger-bg); border-radius: var(--r-sm); padding: var(--sp-2) var(--sp-3); margin: var(--sp-3) 0; font-size: var(--fs-sm); }
+
+/* table */
+.table { width: 100%; border-collapse: collapse; }
+.table th { text-align: left; font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--ls-wide); text-transform: uppercase; color: var(--c-text-faint); padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--c-border); }
+.table td { padding: var(--sp-3); border-bottom: 1px solid var(--c-border); vertical-align: middle; }
+.table tr:last-child td { border-bottom: none; }
+.table .domain { font-family: var(--font-mono); font-size: var(--fs-sm); }
+.empty { text-align: center; color: var(--c-text-faint); padding: var(--sp-8); }
+
+/* modal */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: grid; place-items: center; padding: var(--sp-4); z-index: 50; }
+.modal { width: min(680px, 100%); max-height: 90vh; overflow-y: auto; }
+.modal-actions { display: flex; justify-content: flex-end; gap: var(--sp-3); margin-top: var(--sp-4); }
+
+/* tabs */
+.tabs { display: flex; gap: var(--sp-1); border-bottom: 1px solid var(--c-border); margin-bottom: var(--sp-4); }
+.tab {
+  background: none; border: none; color: var(--c-text-muted); font: inherit; font-family: var(--font-mono);
+  font-size: var(--fs-sm); padding: var(--sp-2) var(--sp-3); cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tab.is-active { color: var(--c-accent); border-bottom-color: var(--c-accent); }
+
+/* header rule rows */
+.hdr-rules { display: flex; flex-direction: column; gap: var(--sp-2); margin-bottom: var(--sp-2); }
+.hdr-rule { display: flex; gap: var(--sp-2); align-items: center; }
+.hdr-rule select { flex: 0 0 100px; }
+.hdr-rule input { flex: 1; font-family: var(--font-mono); font-size: var(--fs-sm); }
