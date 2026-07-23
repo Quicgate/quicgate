@@ -373,6 +373,7 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 		flush = -1
 	}
 
+	rewrite := compileRewrite(o.PathRewrite)
 	proxy := &httputil.ReverseProxy{
 		Transport:     transport,
 		FlushInterval: flush,
@@ -386,6 +387,9 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 			}
 			pr.SetURL(pick)
 			pr.SetXForwarded()
+			if rewrite != nil {
+				pr.Out.URL.Path = rewrite.apply(pr.Out.URL.Path)
+			}
 			if o.PreserveHost {
 				pr.Out.Host = pr.In.Host
 			} else if o.HostOverride != "" {
@@ -400,19 +404,16 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 			applyHeaderRules(resp.Header, o.ResponseHeaders, nil)
 			return nil
 		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("proxy %s -> %s: %v", r.Host, target.Host, err)
-			status := http.StatusBadGateway
-			if errors.Is(err, context.DeadlineExceeded) {
-				status = http.StatusGatewayTimeout
-			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(status)
-			fmt.Fprintf(w, errorPage, status, status, http.StatusText(status))
-		},
+		ErrorHandler: badGatewayHandler(target, o.BadGatewayHTML),
 	}
 
 	var handler http.Handler = proxy
+
+	// Custom locations: route matching path prefixes to their own upstreams.
+	if len(h.Locations) > 0 {
+		handler = e.locationDispatcher(h, handler, transport)
+	}
+
 	if o.Compression {
 		handler = gzipWrap(handler)
 	}
@@ -429,10 +430,13 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 }
 
 // wrapCommon applies the middleware shared by every host type, outermost
-// first: access list -> forward-auth -> rate limit -> exploit filter.
+// first: access list -> forward-auth -> rate limit -> bots -> exploit filter.
 func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess) http.Handler {
 	if o.BlockExploits {
 		handler = blockExploits(handler)
+	}
+	if o.BlockBadBots {
+		handler = blockBadBots(handler)
 	}
 	if o.RateLimit != nil {
 		handler = newRateLimiter(o.RateLimit).wrap(handler)
@@ -444,6 +448,65 @@ func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess) http
 		handler = acl.wrap(handler)
 	}
 	return handler
+}
+
+// badGatewayHandler renders the upstream-down page, using a per-host custom
+// HTML body when one is configured.
+func badGatewayHandler(target *url.URL, customHTML string) func(http.ResponseWriter, *http.Request, error) {
+	return func(w http.ResponseWriter, r *http.Request, err error) {
+		log.Printf("proxy %s -> %s: %v", r.Host, target.Host, err)
+		status := http.StatusBadGateway
+		if errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(status)
+		if customHTML != "" {
+			fmt.Fprint(w, customHTML)
+			return
+		}
+		fmt.Fprintf(w, errorPage, status, status, http.StatusText(status))
+	}
+}
+
+// locationDispatcher routes requests whose path matches a location prefix
+// (longest wins) to that location's own upstream + rewrite; everything else
+// falls through to the host's default handler.
+func (e *Engine) locationDispatcher(h store.Host, def http.Handler, transport *http.Transport) http.Handler {
+	type loc struct {
+		prefix string
+		proxy  http.Handler
+	}
+	var locs []loc
+	for _, l := range h.Locations {
+		target := &url.URL{Scheme: l.Upstream.Scheme, Host: fmt.Sprintf("%s:%d", l.Upstream.Host, l.Upstream.Port)}
+		rw := compileRewrite(l.PathRewrite)
+		lp := &httputil.ReverseProxy{
+			Transport: transport,
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(target)
+				pr.SetXForwarded()
+				if rw != nil {
+					pr.Out.URL.Path = rw.apply(pr.Out.URL.Path)
+				}
+			},
+			ErrorHandler: badGatewayHandler(target, h.Options.BadGatewayHTML),
+		}
+		locs = append(locs, loc{prefix: l.Path, proxy: lp})
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		best := -1
+		for i, l := range locs {
+			if strings.HasPrefix(r.URL.Path, l.prefix) && (best < 0 || len(l.prefix) > len(locs[best].prefix)) {
+				best = i
+			}
+		}
+		if best >= 0 {
+			locs[best].proxy.ServeHTTP(w, r)
+			return
+		}
+		def.ServeHTTP(w, r)
+	})
 }
 
 // applyHeaderRules runs the ordered typed header mutations. Values support

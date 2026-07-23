@@ -19,6 +19,23 @@ type HeaderRule struct {
 	Value string `json:"value,omitempty"`
 }
 
+// PathRewrite rewrites the request path before it reaches the upstream.
+// Applied in order: strip prefix, add prefix, then regex replace.
+type PathRewrite struct {
+	StripPrefix string `json:"stripPrefix,omitempty"`
+	AddPrefix   string `json:"addPrefix,omitempty"`
+	Regex       string `json:"regex,omitempty"`       // RE2
+	Replacement string `json:"replacement,omitempty"` // $1, $2 supported
+}
+
+// Location routes a path prefix on a proxy host to its own upstream, with an
+// optional path rewrite (NPM's "custom locations", done right).
+type Location struct {
+	Path        string       `json:"path"` // matched as a prefix; longest wins
+	Upstream    Upstream     `json:"upstream"`
+	PathRewrite *PathRewrite `json:"pathRewrite,omitempty"`
+}
+
 // RateLimit is a per-client-IP token bucket for one host.
 type RateLimit struct {
 	RPS   float64 `json:"rps"`   // sustained requests per second
@@ -79,13 +96,18 @@ type Options struct {
 	// Request / response groups
 	RequestHeaders  []HeaderRule `json:"requestHeaders,omitempty"`
 	ResponseHeaders []HeaderRule `json:"responseHeaders,omitempty"`
+	PathRewrite     *PathRewrite `json:"pathRewrite,omitempty"`
 
 	// Security group
 	BlockIndexing bool         `json:"blockIndexing"` // send X-Robots-Tag: noindex, nofollow
 	BlockExploits bool         `json:"blockExploits"` // filter common attack patterns
+	BlockBadBots  bool         `json:"blockBadBots"`  // block known scraper/bot user-agents
 	RateLimit     *RateLimit   `json:"rateLimit,omitempty"`
 	ForwardAuth   *ForwardAuth `json:"forwardAuth,omitempty"`
 	ClientCert    *ClientCert  `json:"clientCert,omitempty"` // mTLS
+
+	// Response group (continued)
+	BadGatewayHTML string `json:"badGatewayHtml,omitempty"` // custom upstream-down page
 
 	// Response group
 	Compression bool `json:"compression"` // gzip responses when the client accepts it
@@ -103,6 +125,7 @@ type Host struct {
 	Domains      []string   `json:"domains"`
 	Upstream     Upstream   `json:"upstream"`             // primary target
 	Upstreams    []Upstream `json:"upstreams,omitempty"`  // load-balancing pool (optional)
+	Locations    []Location `json:"locations,omitempty"`  // path-prefix routes to other upstreams
 	Redirect     *Redirect  `json:"redirect,omitempty"`
 	StaticRoot   string     `json:"staticRoot,omitempty"` // when type=static
 	CertMode     string    `json:"certMode"` // auto (ACME) | none (plain http) | custom
@@ -230,6 +253,21 @@ func (h *Host) Validate() error {
 				return errors.New("all pool upstreams must share the primary's scheme")
 			}
 		}
+		for i := range h.Locations {
+			loc := &h.Locations[i]
+			if !strings.HasPrefix(loc.Path, "/") {
+				return fmt.Errorf("location %d: path must start with /", i+1)
+			}
+			if err := validateUpstream(loc.Upstream); err != nil {
+				return fmt.Errorf("location %d: %w", i+1, err)
+			}
+			if err := validateRewrite(loc.PathRewrite); err != nil {
+				return fmt.Errorf("location %d: %w", i+1, err)
+			}
+		}
+		if err := validateRewrite(h.Options.PathRewrite); err != nil {
+			return err
+		}
 	case "static":
 		h.Redirect = nil
 		h.Upstream = Upstream{}
@@ -292,6 +330,18 @@ func (h *Host) Validate() error {
 		return errors.New("forceSsl requires TLS")
 	}
 	return h.Options.validate()
+}
+
+func validateRewrite(pr *PathRewrite) error {
+	if pr == nil {
+		return nil
+	}
+	if pr.Regex != "" {
+		if _, err := regexp.Compile(pr.Regex); err != nil {
+			return fmt.Errorf("invalid path-rewrite regex: %w", err)
+		}
+	}
+	return nil
 }
 
 func (o *Options) validate() error {
@@ -393,6 +443,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 		"ALTER TABLE hosts ADD COLUMN static_root TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE users ADD COLUMN totp_secret TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE streams ADD COLUMN extra TEXT NOT NULL DEFAULT '{}'",
+		"ALTER TABLE hosts ADD COLUMN locations TEXT NOT NULL DEFAULT '[]'",
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
@@ -410,10 +461,13 @@ func now() string { return time.Now().UTC().Format(time.RFC3339) }
 
 func scanHost(row interface{ Scan(...any) error }) (Host, error) {
 	var h Host
-	var domains, upstream, options, redirect, upstreams string
+	var domains, upstream, options, redirect, upstreams, locations string
 	var forceSSL, enabled int
-	err := row.Scan(&h.ID, &h.Type, &domains, &upstream, &h.CertMode, &forceSSL, &enabled, &options, &h.CreatedAt, &h.UpdatedAt, &h.AccessListID, &redirect, &h.CertID, &upstreams, &h.StaticRoot)
+	err := row.Scan(&h.ID, &h.Type, &domains, &upstream, &h.CertMode, &forceSSL, &enabled, &options, &h.CreatedAt, &h.UpdatedAt, &h.AccessListID, &redirect, &h.CertID, &upstreams, &h.StaticRoot, &locations)
 	if err != nil {
+		return h, err
+	}
+	if err := json.Unmarshal([]byte(locations), &h.Locations); err != nil {
 		return h, err
 	}
 	h.ForceSSL = forceSSL == 1
@@ -436,7 +490,7 @@ func scanHost(row interface{ Scan(...any) error }) (Host, error) {
 	return h, nil
 }
 
-const hostCols = "id, type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at, access_list_id, redirect, cert_id, upstreams, static_root"
+const hostCols = "id, type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at, access_list_id, redirect, cert_id, upstreams, static_root, locations"
 
 func (s *Store) ListHosts() ([]Host, error) {
 	rows, err := s.db.Query("SELECT " + hostCols + " FROM hosts ORDER BY id")
@@ -475,10 +529,11 @@ func (s *Store) CreateHost(h *Host) error {
 	options, _ := json.Marshal(h.Options)
 	redirect, _ := json.Marshal(h.Redirect)
 	upstreams, _ := json.Marshal(h.Upstreams)
+	locations, _ := json.Marshal(h.Locations)
 	h.CreatedAt, h.UpdatedAt = now(), now()
 	res, err := s.db.Exec(
-		"INSERT INTO hosts (type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at, access_list_id, redirect, cert_id, upstreams, static_root) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.CreatedAt, h.UpdatedAt, h.AccessListID, string(redirect), h.CertID, string(upstreams), h.StaticRoot)
+		"INSERT INTO hosts (type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at, access_list_id, redirect, cert_id, upstreams, static_root, locations) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.CreatedAt, h.UpdatedAt, h.AccessListID, string(redirect), h.CertID, string(upstreams), h.StaticRoot, string(locations))
 	if err != nil {
 		return err
 	}
@@ -495,10 +550,11 @@ func (s *Store) UpdateHost(h *Host) error {
 	options, _ := json.Marshal(h.Options)
 	redirect, _ := json.Marshal(h.Redirect)
 	upstreams, _ := json.Marshal(h.Upstreams)
+	locations, _ := json.Marshal(h.Locations)
 	h.UpdatedAt = now()
 	res, err := s.db.Exec(
-		"UPDATE hosts SET type=?, domains=?, upstream=?, cert_mode=?, force_ssl=?, enabled=?, options=?, updated_at=?, access_list_id=?, redirect=?, cert_id=?, upstreams=?, static_root=? WHERE id=?",
-		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.UpdatedAt, h.AccessListID, string(redirect), h.CertID, string(upstreams), h.StaticRoot, h.ID)
+		"UPDATE hosts SET type=?, domains=?, upstream=?, cert_mode=?, force_ssl=?, enabled=?, options=?, updated_at=?, access_list_id=?, redirect=?, cert_id=?, upstreams=?, static_root=?, locations=? WHERE id=?",
+		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.UpdatedAt, h.AccessListID, string(redirect), h.CertID, string(upstreams), h.StaticRoot, string(locations), h.ID)
 	if err != nil {
 		return err
 	}

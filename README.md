@@ -2,7 +2,7 @@
 
 Single-binary reverse proxy manager. The workflow of Nginx Proxy Manager, but the engine is native Go: HTTP/1.1, HTTP/2 and HTTP/3 (QUIC via quic-go), automatic Let's Encrypt certificates (certmagic), and every "advanced" option as a typed, validated setting instead of a free-text nginx blob. Config changes apply instantly, no reloads.
 
-See [SPEC.md](SPEC.md) for the NPM feature parity matrix, [ROADMAP.md](ROADMAP.md) for the (now-completed) issue-tracker-mined feature list, and [API.md](API.md) for the REST API reference.
+See [SPEC.md](SPEC.md) for the NPM feature parity matrix, [ROADMAP.md](ROADMAP.md) for the (now-completed) issue-tracker-mined feature list, and [API.md](API.md) for the REST API reference. Interactive Swagger UI is served at `/docs.html` (OpenAPI spec at `/openapi.yaml`).
 
 ## Features
 

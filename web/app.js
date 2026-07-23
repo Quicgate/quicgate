@@ -309,6 +309,40 @@ function readHdrRows(containerId) {
 $('btn-add-reqhdr').addEventListener('click', () => addHdrRow('req-headers'));
 $('btn-add-resphdr').addEventListener('click', () => addHdrRow('resp-headers'));
 
+/* ---- custom location rows ---- */
+function addLocationRow(loc) {
+  const row = document.createElement('div');
+  row.className = 'hdr-rule';
+  row.innerHTML =
+    '<input class="l-path" placeholder="/api" style="flex:0 0 90px">' +
+    '<input class="l-up" placeholder="http://10.0.0.2:8080" style="flex:1">' +
+    '<input class="l-strip" placeholder="strip /api" style="flex:0 0 110px">' +
+    '<button type="button" class="btn btn--ghost btn--sm">&times;</button>';
+  if (loc) {
+    row.querySelector('.l-path').value = loc.path || '';
+    if (loc.upstream) row.querySelector('.l-up').value = `${loc.upstream.scheme}://${loc.upstream.host}:${loc.upstream.port}`;
+    if (loc.pathRewrite && loc.pathRewrite.stripPrefix) row.querySelector('.l-strip').value = loc.pathRewrite.stripPrefix;
+  }
+  row.children[3].addEventListener('click', () => row.remove());
+  $('f-locations').appendChild(row);
+}
+$('btn-add-location').addEventListener('click', () => addLocationRow());
+
+function readLocations() {
+  const out = [];
+  for (const row of $('f-locations').children) {
+    const path = row.querySelector('.l-path').value.trim();
+    const up = row.querySelector('.l-up').value.trim();
+    const strip = row.querySelector('.l-strip').value.trim();
+    const m = up.match(/^(https?):\/\/([^:/\s]+):(\d+)$/);
+    if (!path || !m) continue;
+    const loc = { path, upstream: { scheme: m[1], host: m[2], port: parseInt(m[3], 10) } };
+    if (strip) loc.pathRewrite = { stripPrefix: strip };
+    out.push(loc);
+  }
+  return out;
+}
+
 /* ---- modal ---- */
 function switchTab(name) {
   for (const t of $('modal-tabs').children) t.classList.toggle('is-active', t.dataset.tab === name);
@@ -352,6 +386,15 @@ function openModal(h) {
   $('f-rpath').checked = rd.preservePath !== false;
   $('f-staticroot').value = h ? (h.staticRoot || '') : '';
   $('f-pool').value = h && h.upstreams ? h.upstreams.map((u) => `${u.scheme}://${u.host}:${u.port}`).join('\n') : '';
+  const prw = o.pathRewrite || {};
+  $('f-rw-strip').value = prw.stripPrefix || '';
+  $('f-rw-add').value = prw.addPrefix || '';
+  $('f-rw-regex').value = prw.regex || '';
+  $('f-rw-repl').value = prw.replacement || '';
+  $('f-locations').innerHTML = '';
+  for (const l of (h && h.locations) || []) addLocationRow(l);
+  $('f-badbots').checked = !!o.blockBadBots;
+  $('f-badgateway').value = o.badGatewayHtml || '';
   $('f-enabled').checked = h ? h.enabled : true;
   const sel = $('f-accesslist');
   sel.innerHTML = '<option value="">Publicly accessible</option>';
@@ -434,6 +477,7 @@ $('host-form').addEventListener('submit', async (e) => {
       port: parseInt($('f-uport').value, 10),
     } : { scheme: 'http', host: '', port: 0 },
     upstreams: type === 'proxy' ? parsePool($('f-pool').value) : [],
+    locations: type === 'proxy' ? readLocations() : [],
     staticRoot: type === 'static' ? $('f-staticroot').value.trim() : '',
     redirect: type === 'redirect' ? {
       httpCode: parseInt($('f-rcode').value, 10),
@@ -458,7 +502,17 @@ $('host-form').addEventListener('submit', async (e) => {
       buffering: $('f-buffering').checked ? undefined : false,
       blockIndexing: $('f-noindex').checked,
       blockExploits: $('f-exploits').checked,
+      blockBadBots: $('f-badbots').checked,
       compression: $('f-compress').checked,
+      badGatewayHtml: $('f-badgateway').value,
+      pathRewrite: ($('f-rw-strip').value.trim() || $('f-rw-add').value.trim() || $('f-rw-regex').value.trim())
+        ? {
+            stripPrefix: $('f-rw-strip').value.trim(),
+            addPrefix: $('f-rw-add').value.trim(),
+            regex: $('f-rw-regex').value.trim(),
+            replacement: $('f-rw-repl').value,
+          }
+        : null,
       rateLimit: $('f-ratelimit').checked
         ? { rps: parseFloat($('f-rate-rps').value) || 10, burst: parseInt($('f-rate-burst').value, 10) || 20 }
         : null,
@@ -890,8 +944,18 @@ $('profile-pw-form').addEventListener('submit', async (e) => {
   }
 });
 
+let logCache = [];
 async function refreshLogs() {
-  const logs = await api('GET', '/api/logs?n=200').catch(() => []);
+  logCache = await api('GET', '/api/logs?n=500').catch(() => []);
+  renderLogs();
+}
+$('logs-filter').addEventListener('input', renderLogs);
+
+function renderLogs() {
+  const q = $('logs-filter').value.trim().toLowerCase();
+  const logs = q
+    ? logCache.filter((e) => `${e.host} ${e.client_ip} ${e.path} ${e.status}`.toLowerCase().includes(q))
+    : logCache;
   const body = $('logs-body');
   body.innerHTML = '';
   $('logs-empty').hidden = logs.length > 0;

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,11 +25,20 @@ type accessLogger struct {
 	status3xx atomic.Uint64
 	status4xx atomic.Uint64
 	status5xx atomic.Uint64
+	perHost   sync.Map // host -> *hostCounters
 }
 
-// promText renders the counters in Prometheus exposition format.
+type hostCounters struct {
+	total atomic.Uint64
+	bytes atomic.Uint64
+	errs  atomic.Uint64 // 5xx
+}
+
+// promText renders the counters in Prometheus exposition format, with
+// per-host breakdowns.
 func (l *accessLogger) promText() string {
-	return fmt.Sprintf(`# HELP quicgate_requests_total Total proxied requests.
+	var b strings.Builder
+	fmt.Fprintf(&b, `# HELP quicgate_requests_total Total proxied requests.
 # TYPE quicgate_requests_total counter
 quicgate_requests_total %d
 # HELP quicgate_responses_total Responses by status class.
@@ -39,7 +50,29 @@ quicgate_responses_total{class="5xx"} %d
 # HELP quicgate_response_bytes_total Total response bytes.
 # TYPE quicgate_response_bytes_total counter
 quicgate_response_bytes_total %d
+# HELP quicgate_host_requests_total Requests per host.
+# TYPE quicgate_host_requests_total counter
+# HELP quicgate_host_errors_total 5xx responses per host.
+# TYPE quicgate_host_errors_total counter
+# HELP quicgate_host_response_bytes_total Response bytes per host.
+# TYPE quicgate_host_response_bytes_total counter
 `, l.total.Load(), l.status2xx.Load(), l.status3xx.Load(), l.status4xx.Load(), l.status5xx.Load(), l.bytes.Load())
+	l.perHost.Range(func(k, v any) bool {
+		host := promLabel(k.(string))
+		hc := v.(*hostCounters)
+		fmt.Fprintf(&b, "quicgate_host_requests_total{host=%q} %d\n", host, hc.total.Load())
+		fmt.Fprintf(&b, "quicgate_host_errors_total{host=%q} %d\n", host, hc.errs.Load())
+		fmt.Fprintf(&b, "quicgate_host_response_bytes_total{host=%q} %d\n", host, hc.bytes.Load())
+		return true
+	})
+	return b.String()
+}
+
+func promLabel(s string) string {
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		s = h
+	}
+	return strings.ReplaceAll(s, `"`, "")
 }
 
 // MetricsText exposes the Prometheus text for the admin /metrics endpoint.
@@ -124,6 +157,13 @@ func (l *accessLogger) wrap(next http.HandlerFunc) http.HandlerFunc {
 			l.status4xx.Add(1)
 		case 5:
 			l.status5xx.Add(1)
+		}
+		hcAny, _ := l.perHost.LoadOrStore(promLabel(r.Host), &hostCounters{})
+		hc := hcAny.(*hostCounters)
+		hc.total.Add(1)
+		hc.bytes.Add(uint64(sw.bytes))
+		if sw.status/100 == 5 {
+			hc.errs.Add(1)
 		}
 		ip := r.RemoteAddr
 		if h, _, err := net.SplitHostPort(ip); err == nil {

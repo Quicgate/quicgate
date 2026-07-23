@@ -212,6 +212,59 @@ func blockExploits(next http.Handler) http.Handler {
 	})
 }
 
+// ---- bad-bot / scraper blocking ----
+
+var badBotRe = regexp.MustCompile(`(?i)(ahrefsbot|semrushbot|mj12bot|dotbot|petalbot|bytespider|gptbot|ccbot|claudebot|amazonbot|dataforseo|blexbot|zoominfobot|serpstatbot|megaindex|scrapy|python-requests|go-http-client|libwww-perl|masscan|nikto|sqlmap)`)
+
+func blockBadBots(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if badBotRe.MatchString(r.UserAgent()) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ---- path rewrite ----
+
+type compiledRewrite struct {
+	strip string
+	add   string
+	re    *regexp.Regexp
+	repl  string
+}
+
+func compileRewrite(pr *store.PathRewrite) *compiledRewrite {
+	if pr == nil {
+		return nil
+	}
+	c := &compiledRewrite{strip: pr.StripPrefix, add: pr.AddPrefix, repl: pr.Replacement}
+	if pr.Regex != "" {
+		c.re, _ = regexp.Compile(pr.Regex) // validated at save time
+	}
+	return c
+}
+
+func (c *compiledRewrite) apply(path string) string {
+	if c == nil {
+		return path
+	}
+	if c.strip != "" && strings.HasPrefix(path, c.strip) {
+		path = path[len(c.strip):]
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+	}
+	if c.add != "" {
+		path = strings.TrimRight(c.add, "/") + path
+	}
+	if c.re != nil {
+		path = c.re.ReplaceAllString(path, c.repl)
+	}
+	return path
+}
+
 // ---- redirect + dead hosts ----
 
 func buildRedirectHandler(rd store.Redirect) http.Handler {

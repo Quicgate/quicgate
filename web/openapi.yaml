@@ -1,0 +1,272 @@
+openapi: 3.0.3
+info:
+  title: quicgate management API
+  version: "1.0"
+  description: >
+    Management API for quicgate, served on the admin port (default :81).
+    Authenticate with a session cookie (via /api/login) or an API bearer token.
+servers:
+  - url: /
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: qg_session
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "API token from POST /api/tokens (Authorization: Bearer qg_...)."
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+    Upstream:
+      type: object
+      properties:
+        scheme: { type: string, enum: [http, https] }
+        host: { type: string }
+        port: { type: integer }
+    PathRewrite:
+      type: object
+      properties:
+        stripPrefix: { type: string }
+        addPrefix: { type: string }
+        regex: { type: string, description: RE2 }
+        replacement: { type: string }
+    Location:
+      type: object
+      properties:
+        path: { type: string, description: matched as a prefix, longest wins }
+        upstream: { $ref: '#/components/schemas/Upstream' }
+        pathRewrite: { $ref: '#/components/schemas/PathRewrite' }
+    Host:
+      type: object
+      properties:
+        id: { type: integer }
+        type: { type: string, enum: [proxy, redirect, dead, static] }
+        domains: { type: array, items: { type: string } }
+        upstream: { $ref: '#/components/schemas/Upstream' }
+        upstreams: { type: array, items: { $ref: '#/components/schemas/Upstream' } }
+        locations: { type: array, items: { $ref: '#/components/schemas/Location' } }
+        staticRoot: { type: string }
+        redirect:
+          type: object
+          properties:
+            httpCode: { type: integer, enum: [300, 301, 302, 307, 308] }
+            targetScheme: { type: string, enum: [auto, http, https] }
+            targetHost: { type: string }
+            preservePath: { type: boolean }
+        certMode: { type: string, enum: [auto, custom, none] }
+        certId: { type: integer, nullable: true }
+        forceSsl: { type: boolean }
+        enabled: { type: boolean }
+        accessListId: { type: integer, nullable: true }
+        options: { type: object, description: typed advanced options (headers, timeouts, hsts, rateLimit, forwardAuth, clientCert, pathRewrite, blockExploits, blockBadBots, compression, badGatewayHtml, ...) }
+    AccessList:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        satisfy: { type: string, enum: [any, all] }
+        passAuth: { type: boolean }
+        rules:
+          type: array
+          items:
+            type: object
+            properties:
+              action: { type: string, enum: [allow, deny] }
+              cidr: { type: string }
+              host: { type: string, description: hostname, re-resolved (dynamic DNS) }
+              country: { type: string, description: ISO 3166-1 alpha-2 (GeoIP) }
+        users:
+          type: array
+          items:
+            type: object
+            properties:
+              username: { type: string }
+              password: { type: string, description: write-only; omit to keep existing }
+    Stream:
+      type: object
+      properties:
+        id: { type: integer }
+        listenPort: { type: integer }
+        listenPortEnd: { type: integer, description: ">0 for a TCP port range" }
+        protocol: { type: string, enum: [tcp, udp, both] }
+        forwardHost: { type: string }
+        forwardPort: { type: integer }
+        allowedCidrs: { type: array, items: { type: string } }
+        sendProxyProtocol: { type: string, enum: ["", v1, v2] }
+        acceptProxyProtocol: { type: boolean }
+        terminateTls: { type: boolean }
+        certId: { type: integer, nullable: true }
+        sniRoutes:
+          type: array
+          items:
+            type: object
+            properties:
+              host: { type: string }
+              forwardHost: { type: string }
+              forwardPort: { type: integer }
+        enabled: { type: boolean }
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+paths:
+  /api/login:
+    post:
+      summary: Log in
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string }
+                password: { type: string }
+                code: { type: string, description: TOTP code when 2FA is enabled }
+      responses:
+        "200": { description: "session set, or {totpRequired:true}" }
+        "401": { description: invalid credentials }
+  /api/logout:
+    post: { summary: Log out, responses: { "200": { description: ok } } }
+  /api/me:
+    get: { summary: Current user, responses: { "200": { description: "{email, mustChange, totpEnabled}" } } }
+  /api/password:
+    post:
+      summary: Change password
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { current: {type: string}, new: {type: string} } } } }
+      responses: { "200": { description: ok } }
+  /api/2fa/setup:
+    post: { summary: Begin 2FA setup, responses: { "200": { description: "{secret, uri}" } } }
+  /api/2fa/enable:
+    post: { summary: Enable 2FA, responses: { "200": { description: enabled } } }
+  /api/2fa/disable:
+    post: { summary: Disable 2FA, responses: { "200": { description: disabled } } }
+  /api/hosts:
+    get:
+      summary: List hosts
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Host' } } } } }
+    post:
+      summary: Create host
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/Host' } } } }
+      responses: { "201": { description: created }, "400": { description: invalid, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } } }
+  /api/hosts/{id}:
+    put:
+      summary: Update host
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/Host' } } } }
+      responses: { "200": { description: ok } }
+    delete:
+      summary: Delete host
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      responses: { "200": { description: deleted } }
+  /api/health:
+    get: { summary: Upstream health, responses: { "200": { description: "[{target, up, lastErr}]" } } }
+  /api/access-lists:
+    get:
+      summary: List access lists
+      responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AccessList' } } } } } }
+    post:
+      summary: Create access list
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/AccessList' } } } }
+      responses: { "201": { description: created } }
+  /api/access-lists/{id}:
+    put:
+      summary: Update access list
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/AccessList' } } } }
+      responses: { "200": { description: ok } }
+    delete:
+      summary: Delete access list
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      responses: { "200": { description: deleted } }
+  /api/streams:
+    get:
+      summary: List streams
+      responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Stream' } } } } } }
+    post:
+      summary: Create stream
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/Stream' } } } }
+      responses: { "201": { description: created } }
+  /api/streams/{id}:
+    put:
+      summary: Update stream
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/Stream' } } } }
+      responses: { "200": { description: ok } }
+    delete:
+      summary: Delete stream
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      responses: { "200": { description: deleted } }
+  /api/certs:
+    get: { summary: Managed (ACME) cert status, responses: { "200": { description: "[{domain, status, notAfter, lastError, errorAt}]" } } }
+  /api/custom-certs:
+    get: { summary: List uploaded certs, responses: { "200": { description: OK } } }
+    post:
+      summary: Upload a cert
+      requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string}, certPem: {type: string}, keyPem: {type: string} } } } } }
+      responses: { "201": { description: created } }
+  /api/custom-certs/{id}:
+    put:
+      summary: Replace cert in place
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      responses: { "200": { description: ok } }
+    delete:
+      summary: Delete cert
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      responses: { "200": { description: deleted } }
+  /api/custom-certs/self-signed:
+    post:
+      summary: Generate a self-signed cert
+      requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string}, domains: {type: array, items: {type: string}}, days: {type: integer} } } } } }
+      responses: { "201": { description: created } }
+  /api/custom-certs/from-file:
+    post:
+      summary: Import a cert from server-local files
+      requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string}, certPath: {type: string}, keyPath: {type: string} } } } } }
+      responses: { "201": { description: created } }
+  /api/settings:
+    get: { summary: Get settings (closed key set), responses: { "200": { description: OK } } }
+    put:
+      summary: Update settings (merge; unknown keys rejected)
+      requestBody: { content: { application/json: { schema: { type: object, additionalProperties: { type: string } } } } }
+      responses: { "200": { description: ok } }
+  /api/notify-test:
+    post: { summary: Send a test webhook alert, responses: { "200": { description: sent } } }
+  /api/tokens:
+    get: { summary: List API tokens, responses: { "200": { description: OK } } }
+    post:
+      summary: Create an API token (returns raw token once)
+      requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string} } } } } }
+      responses: { "201": { description: "{id, name, token}" } }
+  /api/tokens/{id}:
+    delete:
+      summary: Revoke token
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      responses: { "200": { description: deleted } }
+  /api/config:
+    get: { summary: Effective (applied) routing table, responses: { "200": { description: "[{domain, type, target, wildcard}]" } } }
+  /api/logs:
+    get:
+      summary: Recent access-log lines (newest first)
+      parameters: [ { name: n, in: query, schema: { type: integer, maximum: 2000 } } ]
+      responses: { "200": { description: OK } }
+  /api/backup:
+    get: { summary: Download a full backup (tar.gz), responses: { "200": { description: "application/gzip" } } }
+  /api/restore:
+    post: { summary: Restore from a backup tar.gz (replaces everything), responses: { "200": { description: restored } } }
+  /api/import:
+    post:
+      summary: Declarative import (additive)
+      requestBody: { content: { application/json: { schema: { type: object, properties: { accessLists: {type: array}, hosts: {type: array}, streams: {type: array} } } } } }
+      responses: { "200": { description: "{hosts, accessLists, streams} counts" } }
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      security: []
+      responses: { "200": { description: "text/plain exposition" } }

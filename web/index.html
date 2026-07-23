@@ -121,6 +121,7 @@
     <div id="page-system" hidden>
       <div class="card">
         <div class="card-head"><h2>Access log</h2><button id="btn-logs-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
+        <input id="logs-filter" class="search" type="search" placeholder="Filter by host, client IP, path or status...">
         <table class="table" id="logs-table">
           <thead><tr><th>Time</th><th>Client</th><th>Host</th><th>Request</th><th>Status</th><th>ms</th></tr></thead>
           <tbody id="logs-body"></tbody>
@@ -164,8 +165,13 @@
         </div>
 
         <div class="card col-span-2">
-          <div class="card-head"><h2>API tokens</h2><button id="btn-add-token" class="btn btn--primary btn--sm">New token</button></div>
-          <p class="hs-muted">Long-lived bearer tokens for the API (<span class="mono">Authorization: Bearer &lt;token&gt;</span>). Shown once on creation.</p>
+          <div class="card-head"><h2>API tokens</h2>
+            <div>
+              <a class="btn btn--ghost btn--sm" href="docs.html" target="_blank">API docs</a>
+              <button id="btn-add-token" class="btn btn--primary btn--sm">New token</button>
+            </div>
+          </div>
+          <p class="hs-muted">Long-lived bearer tokens for the API (<span class="mono">Authorization: Bearer &lt;token&gt;</span>). Shown once on creation. Interactive reference at <a href="docs.html" target="_blank" class="mono">/docs.html</a> (needs internet for Swagger UI); the raw spec is at <a href="openapi.yaml" target="_blank" class="mono">/openapi.yaml</a>.</p>
           <div id="new-token" class="form-error" hidden style="color:var(--c-accent);background:var(--c-accent-bg)"></div>
           <table class="table" id="tokens-table">
             <thead><tr><th>Name</th><th>Created</th><th></th></tr></thead>
@@ -422,7 +428,10 @@
       <section class="tabpane" data-pane="security" hidden>
         <label class="check"><input type="checkbox" id="f-noindex"><span>Block search engine indexing <em>(X-Robots-Tag: noindex)</em></span></label>
         <label class="check"><input type="checkbox" id="f-exploits"><span>Block common exploits <em>(SQLi / traversal / injection tripwire)</em></span></label>
+        <label class="check"><input type="checkbox" id="f-badbots"><span>Block bad bots / scrapers <em>(AhrefsBot, GPTBot, ClaudeBot, sqlmap, …)</em></span></label>
         <label class="check" data-proxyonly><input type="checkbox" id="f-compress"><span>Compress responses <em>(gzip)</em></span></label>
+        <label class="field" data-proxyonly><span>Custom upstream-down page <em>(HTML; blank = built-in 502)</em></span>
+          <textarea id="f-badgateway" rows="3" class="mono"></textarea></label>
         <fieldset class="group">
           <legend>Rate limit (per client IP)</legend>
           <label class="check"><input type="checkbox" id="f-ratelimit"><span>Enable</span></label>
@@ -473,6 +482,22 @@
       <section class="tabpane" data-pane="upstream" hidden>
         <label class="field"><span>Load-balancing pool <em>(extra upstreams, one scheme://host:port per line; round-robin with health checks)</em></span>
           <textarea id="f-pool" rows="2" class="mono" placeholder="http://10.0.0.2:8080&#10;http://10.0.0.3:8080"></textarea></label>
+        <fieldset class="group">
+          <legend>Path rewrite (before upstream)</legend>
+          <div class="field-row">
+            <label class="field field--sm"><span>Strip prefix</span><input id="f-rw-strip" class="mono" placeholder="/api"></label>
+            <label class="field field--sm"><span>Add prefix</span><input id="f-rw-add" class="mono" placeholder="/v2"></label>
+          </div>
+          <div class="field-row">
+            <label class="field"><span>Regex <em>(RE2)</em></span><input id="f-rw-regex" class="mono" placeholder="^/old/(.*)$"></label>
+            <label class="field"><span>Replacement</span><input id="f-rw-repl" class="mono" placeholder="/new/$1"></label>
+          </div>
+        </fieldset>
+        <fieldset class="group">
+          <legend>Custom locations (path prefix &rarr; other upstream; longest match wins)</legend>
+          <div id="f-locations" class="hdr-rules"></div>
+          <button type="button" class="btn btn--ghost btn--sm" id="btn-add-location">+ Add location</button>
+        </fieldset>
         <label class="check"><input type="checkbox" id="f-preservehost"><span>Preserve incoming Host header</span></label>
         <label class="field"><span>Host header override <em>(ignored when preserving)</em></span><input id="f-hostoverride" class="mono"></label>
         <label class="check"><input type="checkbox" id="f-skipverify"><span>Skip TLS verification (self-signed upstream)</span></label>
