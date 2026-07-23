@@ -263,7 +263,9 @@ func (e *Engine) Reload(ctx context.Context) error {
 		go e.upnp.Sync(mappings)
 	}
 	if len(managed) > 0 && !e.cfg.DisableTLS {
-		if err := e.magic.ManageAsync(ctx, managed); err != nil {
+		// Detach from the caller's context: an admin API request that triggers
+		// Reload would otherwise cancel background issuance when it returns.
+		if err := e.magic.ManageAsync(context.WithoutCancel(ctx), managed); err != nil {
 			log.Printf("engine: cert management: %v", err)
 		}
 	}
