@@ -87,6 +87,7 @@ async function boot() {
 
 function afterLogin(me) {
   $('me-email').textContent = me.email;
+  if (me.version) $('qg-version').textContent = /^v|^dev/.test(me.version) ? me.version : 'v' + me.version;
   if (me.mustChange) {
     show('view-password');
   } else {

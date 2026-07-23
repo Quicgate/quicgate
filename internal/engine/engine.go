@@ -32,10 +32,14 @@ type Config struct {
 	DataDir    string
 	ACMEEmail  string
 	ACMEStage  bool // use Let's Encrypt staging CA
-	DisableTLS bool // dev mode: no TLS/QUIC listeners at all
-	DisableH3  bool // skip the HTTP/3 (QUIC) listener + Alt-Svc; force clients to h2
-	UPnP       bool // request router port forwards via UPnP IGD
+	DisableTLS bool   // dev mode: no TLS/QUIC listeners at all
+	DisableH3  bool   // skip the HTTP/3 (QUIC) listener + Alt-Svc; force clients to h2
+	UPnP       bool   // request router port forwards via UPnP IGD
+	Version    string // build version, surfaced in the UI/API
 }
+
+// Version returns the running build version.
+func (e *Engine) Version() string { return e.cfg.Version }
 
 type route struct {
 	host  store.Host

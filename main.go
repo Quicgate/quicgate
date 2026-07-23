@@ -21,6 +21,10 @@ import (
 //go:embed web
 var webEmbed embed.FS
 
+// version is stamped at build time via -ldflags "-X main.version=...".
+// Defaults to "dev" for `go run`/unstamped builds.
+var version = "dev"
+
 func env(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -49,7 +53,9 @@ func main() {
 		DisableTLS: os.Getenv("QG_TLS") == "off",
 		DisableH3:  os.Getenv("QG_H3") == "off",
 		UPnP:       os.Getenv("QG_UPNP") == "1",
+		Version:    version,
 	}, st)
+	log.Printf("quicgate %s starting", version)
 
 	webFS, err := fs.Sub(webEmbed, "web")
 	if err != nil {

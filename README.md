@@ -11,6 +11,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/maferick/quicgate/releases"><img src="https://img.shields.io/github/v/release/maferick/quicgate?color=a3e635&label=release" alt="latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-a3e635" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/go-1.26-00ADD8?logo=go" alt="Go 1.26">
   <img src="https://img.shields.io/badge/container-ghcr.io%2Fmaferick%2Fquicgate-0b0e0f" alt="ghcr.io/maferick/quicgate">

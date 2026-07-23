@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,6 +73,11 @@ func (s *Server) Handler() http.Handler {
 			"oidc": s.store.GetSetting("oidc_enabled", "") == "1",
 			"ldap": s.ldapConfigured(),
 		})
+	})
+	// Unauthenticated so update-checkers / uptime monitors can read it; the
+	// version is public on GitHub anyway and reveals nothing sensitive.
+	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"version": s.engine.Version(), "go": runtime.Version()})
 	})
 	mux.HandleFunc("POST /api/logout", s.auth(s.handleLogout))
 	mux.HandleFunc("GET /api/me", s.auth(s.handleMe))
@@ -574,7 +580,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Name: "qg_session", Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
 		Secure: isHTTPS(r), MaxAge: int(sessionTTL.Seconds()),
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"email": u.Email, "mustChange": u.MustChange})
+	writeJSON(w, http.StatusOK, map[string]any{"email": u.Email, "mustChange": u.MustChange, "version": s.engine.Version()})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -594,7 +600,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"email": u.Email, "mustChange": u.MustChange, "totpEnabled": u.TOTPSecret != ""})
+	writeJSON(w, http.StatusOK, map[string]any{"email": u.Email, "mustChange": u.MustChange, "totpEnabled": u.TOTPSecret != "", "version": s.engine.Version()})
 }
 
 func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
