@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -118,12 +119,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
 	mux.HandleFunc("POST /api/custom-certs/self-signed", s.auth(s.handleSelfSignedCert))
 	mux.HandleFunc("POST /api/custom-certs/from-file", s.auth(s.handleCertFromFile))
-	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /metrics", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		w.Write([]byte(s.engine.MetricsText()))
-	})
+	}))
 	mux.Handle("/", http.FileServerFS(s.webFS))
-	return mux
+	return s.securityHeaders(s.csrf(mux))
 }
 
 func pathID(r *http.Request) (int64, error) {
@@ -441,6 +442,47 @@ type ctxKey int
 
 const sessionKey ctxKey = 0
 
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) csrf(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if _, err := r.Cookie("qg_session"); err == nil {
+			if !sameOrigin(r) {
+				writeErr(w, http.StatusForbidden, "cross-site request blocked")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func sameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = r.Header.Get("Referer")
+	}
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
+}
+
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// API-token bearer auth for automation (no session/2FA needed).
@@ -468,8 +510,27 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, http.StatusUnauthorized, "session expired")
 			return
 		}
+		if s.passwordChangeRequired(sess, r) {
+			writeErr(w, http.StatusForbidden, "password change required")
+			return
+		}
 		next(w, r.WithContext(context.WithValue(r.Context(), sessionKey, sess)))
 	}
+}
+
+func isHTTPS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+func (s *Server) passwordChangeRequired(sess session, r *http.Request) bool {
+	if sess.email == "api-token" || sess.userID == 0 {
+		return false
+	}
+	if r.URL.Path == "/api/password" || r.URL.Path == "/api/logout" || r.URL.Path == "/api/me" {
+		return false
+	}
+	u, err := s.store.GetUserByEmail(sess.email)
+	return err == nil && u.MustChange
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -510,8 +571,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.sessions[id] = session{userID: u.ID, email: u.Email, expires: time.Now().Add(sessionTTL)}
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
-		Name: "qg_session", Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode,
-		MaxAge: int(sessionTTL.Seconds()),
+		Name: "qg_session", Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
+		Secure: isHTTPS(r), MaxAge: int(sessionTTL.Seconds()),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"email": u.Email, "mustChange": u.MustChange})
 }
@@ -522,7 +583,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		delete(s.sessions, c.Value)
 		s.mu.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{Name: "qg_session", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "qg_session", Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: isHTTPS(r), MaxAge: -1})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

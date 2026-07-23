@@ -5,21 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>quicgate API docs</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
-<style>body { margin: 0; }</style>
+<link rel="stylesheet" href="swagger-ui.css">
 </head>
 <body>
 <div id="swagger"></div>
-<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-<script>
-  window.onload = () => {
-    window.ui = SwaggerUIBundle({
-      url: 'openapi.yaml',
-      dom_id: '#swagger',
-      deepLinking: true,
-      presets: [SwaggerUIBundle.presets.apis],
-    });
-  };
-</script>
+<script src="swagger-ui-bundle.js"></script>
+<script src="docs.js"></script>
 </body>
 </html>
