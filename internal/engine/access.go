@@ -131,7 +131,12 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		if !c.passAuth {
+		// Strip the credential only when this list actually consumed it for
+		// basic-auth and the user opted not to pass it on (NPM's "Pass Auth
+		// to Host"). A pure IP/CIDR list must never eat the header: backends
+		// like Vaultwarden and gitea authenticate with Authorization: Bearer,
+		// and deleting it here silently breaks their logins.
+		if !c.passAuth && len(c.users) > 0 {
 			r.Header.Del("Authorization")
 		}
 		next.ServeHTTP(w, r)
