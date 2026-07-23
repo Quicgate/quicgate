@@ -31,7 +31,7 @@ function switchPage(name) {
   if (name === 'hosts') refresh();
   if (name === 'access') refreshAcls();
   if (name === 'streams') refreshStreams();
-  if (name === 'certs') refreshCustomCerts();
+  if (name === 'certs') { refreshCerts(); refreshCustomCerts(); }
   if (name === 'system') loadSystem();
   if (name === 'settings') loadSettings();
   if (name === 'profile') loadProfile();
@@ -213,6 +213,23 @@ function renderHosts() {
       ? `<span class="badge badge--success">${acl.name}</span>`
       : '<span class="badge">public</span>';
 
+    const tdCert = document.createElement('td');
+    tdCert.className = 'domain';
+    if (h.certMode === 'auto') {
+      const c = h.domains.map((d) => certByDomain[d.toLowerCase()]).find(Boolean);
+      if (c) {
+        const cls = c.status === 'issued' ? 'badge--success' : c.status === 'failed' ? 'badge--danger' : '';
+        const exp = c.notAfter ? ' ' + new Date(c.notAfter).toLocaleDateString() : '';
+        tdCert.innerHTML = `<span class="badge ${cls}">${c.status}</span>${exp}`;
+      } else {
+        tdCert.innerHTML = '<span class="badge">pending</span>';
+      }
+    } else if (h.certMode === 'custom') {
+      tdCert.innerHTML = '<span class="badge">custom</span>';
+    } else {
+      tdCert.textContent = '-';
+    }
+
     const tdEnabled = document.createElement('td');
     const sw = document.createElement('label');
     sw.className = 'switch';
@@ -254,13 +271,17 @@ function renderHosts() {
     btnEdit.style.marginLeft = '8px';
     tdActions.append(btnLogs, btnEdit, btnDel);
 
-    tr.append(tdDomains, tdUpstream, tdTLS, tdAccess, tdEnabled, tdActions);
+    tr.append(tdDomains, tdUpstream, tdTLS, tdAccess, tdCert, tdEnabled, tdActions);
     body.appendChild(tr);
   }
 }
 
+let certByDomain = {};
 async function refreshCerts() {
   const certs = await api('GET', '/api/certs').catch(() => []);
+  certByDomain = {};
+  for (const c of certs) certByDomain[c.domain.toLowerCase()] = c;
+  renderHosts(); // fill the Certificate column in the hosts table
   const body = $('certs-body');
   body.innerHTML = '';
   $('certs-empty').hidden = certs.length > 0;

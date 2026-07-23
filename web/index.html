@@ -75,20 +75,11 @@
         <input id="host-search" class="search" type="search" placeholder="Filter by domain, upstream or access list...">
         <table class="table" id="hosts-table">
           <thead><tr>
-            <th>Domains</th><th>Upstream</th><th>TLS</th><th>Access</th><th>Enabled</th><th></th>
+            <th>Domains</th><th>Upstream</th><th>TLS</th><th>Access</th><th>Certificate</th><th>Enabled</th><th></th>
           </tr></thead>
           <tbody id="hosts-body"></tbody>
         </table>
         <div id="hosts-empty" class="empty" hidden>No proxy hosts yet. Add the first one.</div>
-      </div>
-
-      <div class="card">
-        <div class="card-head"><h2>Certificates</h2><button id="btn-certs-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
-        <table class="table" id="certs-table">
-          <thead><tr><th>Domain</th><th>Status</th><th>Expires</th></tr></thead>
-          <tbody id="certs-body"></tbody>
-        </table>
-        <div id="certs-empty" class="empty" hidden>No managed certificates.</div>
       </div>
     </div>
 
@@ -114,6 +105,16 @@
 
     <div id="page-certs" hidden>
       <div class="card">
+        <div class="card-head"><h2>Managed certificates <em class="hs-muted" style="font-size:var(--fs-xs)">(auto-issued via ACME)</em></h2><button id="btn-certs-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
+        <table class="table" id="certs-table">
+          <thead><tr><th>Domain</th><th>Status</th><th>Expires</th></tr></thead>
+          <tbody id="certs-body"></tbody>
+        </table>
+        <div id="certs-empty" class="empty" hidden>No managed certificates.</div>
+      </div>
+
+      <div class="card" style="margin-top:var(--sp-6)">
+        <div class="card-head"><h2>Uploaded certificates</h2></div>
         <table class="table" id="ccerts-table">
           <thead><tr><th>Name</th><th>Domains</th><th>Expires</th><th></th></tr></thead>
           <tbody id="ccerts-body"></tbody>

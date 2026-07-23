@@ -12,18 +12,6 @@ body { background: var(--c-bg); color: var(--c-text); font-family: var(--font-bo
 .login-card { width: min(380px, 100%); }
 .page { max-width: 1720px; margin: 0 auto; padding: var(--sp-6); }
 
-/* hosts page: proxy list + certificates side by side on wide screens */
-#page-hosts {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  gap: var(--sp-6);
-  align-items: start;
-}
-#page-hosts > .card { margin: 0 !important; }
-@media (max-width: 1280px) {
-  #page-hosts { grid-template-columns: 1fr; }
-}
-
 /* multi-column card layout for settings/profile — fills the width */
 .card-grid {
   display: grid;
