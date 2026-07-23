@@ -219,7 +219,7 @@
             <label class="field"><span>Client ID</span><input id="set-oidc-client-id" class="mono"></label>
             <label class="field"><span>Client secret</span><input id="set-oidc-client-secret" type="password" class="mono"></label>
           </div>
-          <label class="field"><span>Redirect URL</span><input id="set-oidc-redirect" type="url" class="mono" placeholder="https://quicgate.example.com/api/oidc/callback"></label>
+          <label class="field"><span>Redirect URL</span><input id="set-oidc-redirect" type="url" class="mono" placeholder="https://proxy.example.com/api/oidc/callback"></label>
           <label class="field"><span>Allowed emails <em>(comma-separated; blank = any verified)</em></span><input id="set-oidc-emails" class="mono"></label>
           <div class="modal-actions"><button type="submit" class="btn btn--primary">Save</button></div>
         </form>
@@ -349,7 +349,7 @@
         <label class="field field--sm"><span>Forward port</span><input id="s-fport" type="number" min="1" max="65535"></label>
       </div>
       <label class="field"><span>Allowed source IPs / CIDRs <em>(one per line, empty = anyone; UPnP may expose this port to the internet)</em></span>
-        <textarea id="s-cidrs" rows="2" class="mono" placeholder="192.168.178.0/24&#10;77.60.160.80/28"></textarea></label>
+        <textarea id="s-cidrs" rows="2" class="mono" placeholder="192.168.1.0/24&#10;203.0.113.0/28"></textarea></label>
       <fieldset class="group">
         <legend>Advanced (TCP)</legend>
         <label class="field field--sm"><span>Send PROXY protocol</span>

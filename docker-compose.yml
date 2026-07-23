@@ -1,18 +1,29 @@
 services:
   quicgate:
-    image: registry.example.com/quicgate:latest
+    image: ghcr.io/maferick/quicgate:latest
     container_name: quicgate
     restart: unless-stopped
-    # Host networking: stream forwards bind host ports dynamically (no
-    # pre-published port list) and the engine sees real client IPs, which
-    # access-list IP filtering depends on. Engine owns 80/443(tcp+udp),
-    # admin UI 81, plus any configured stream ports.
+    # Host networking is recommended: stream forwards bind host ports
+    # dynamically (no pre-published port list) and the engine sees real
+    # client IPs, which access-list IP filtering depends on. The engine
+    # owns 80/443 (tcp+udp for HTTP/3), the admin UI listens on 81, plus
+    # any stream ports you configure.
     network_mode: host
     environment:
       - QG_ACME_EMAIL=you@example.com
-      # Requests router forwards for 80/443 + stream ports via UPnP IGD.
-      # Needs "permit independent port sharing" for this device on the
-      # FRITZ!Box. 80/443 conflict while they still forward to .92; logged.
-      - QG_UPNP=1
+      # Optional: auto-manage router port forwards (80/443 + stream
+      # ports) via UPnP IGD. Your router must allow this device to open
+      # ports (e.g. FRITZ!Box "permit independent port sharing").
+      # - QG_UPNP=1
     volumes:
-      - /opt/quicgate:/data
+      - ./data:/data
+
+# Prefer isolated networking? Replace network_mode: host with:
+#    ports:
+#      - "80:80"
+#      - "443:443/tcp"
+#      - "443:443/udp"   # HTTP/3
+#      - "81:81"         # admin UI - do NOT expose this to the internet
+# Note: with bridge networking, access lists see the Docker gateway IP
+# unless you also configure your firewall for real client IPs, and new
+# stream ports need to be published here manually.

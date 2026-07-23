@@ -625,10 +625,10 @@ function addAclRuleRow(rule) {
   row.innerHTML =
     '<select class="r-action"><option value="allow">allow</option><option value="deny">deny</option></select>' +
     '<select class="r-kind"><option value="cidr">IP/CIDR</option><option value="host">Hostname (DDNS)</option><option value="country">Country</option></select>' +
-    '<input class="r-value" placeholder="192.168.178.0/24">' +
+    '<input class="r-value" placeholder="192.168.1.0/24">' +
     '<button type="button" class="btn btn--ghost btn--sm">&times;</button>';
   const [action, kind, value] = [row.querySelector('.r-action'), row.querySelector('.r-kind'), row.querySelector('.r-value')];
-  const hints = { cidr: '192.168.178.0/24 or single IP', host: 'home.duckdns.org', country: 'NL' };
+  const hints = { cidr: '192.168.1.0/24 or single IP', host: 'home.duckdns.org', country: 'NL' };
   kind.addEventListener('change', () => { value.placeholder = hints[kind.value]; });
   if (rule) {
     action.value = rule.action;

@@ -154,4 +154,4 @@ Options render as form controls in a tabbed "Advanced" panel per host. Unknown/r
 
 ## Deployment
 
-Standard pipeline: Gitea `maferick/quicgate` -> Actions -> registry.example.com/quicgate:latest -> Portainer stack + custom template. Container FROM scratch + binary + CA bundle; volumes for SQLite db + certmagic storage. Needs 80/443 (TCP) and 443 (UDP, HTTP/3) published. Runs alongside NPM/Pangolin on different ports until trusted.
+Ship as a single container: FROM scratch + static binary + CA bundle; one volume for the SQLite db + certmagic storage. Needs 80/443 (TCP) and 443 (UDP, HTTP/3) published. Can run alongside NPM/Pangolin on different ports until trusted.
