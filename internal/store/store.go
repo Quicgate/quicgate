@@ -82,11 +82,13 @@ type Options struct {
 
 // Host is one configured host of any type. M1 implements type "proxy".
 type Host struct {
-	ID           int64     `json:"id"`
-	Type         string    `json:"type"` // proxy | redirect | dead
-	Domains      []string  `json:"domains"`
-	Upstream     Upstream  `json:"upstream"`
-	Redirect     *Redirect `json:"redirect,omitempty"`
+	ID           int64      `json:"id"`
+	Type         string     `json:"type"` // proxy | redirect | dead | static
+	Domains      []string   `json:"domains"`
+	Upstream     Upstream   `json:"upstream"`             // primary target
+	Upstreams    []Upstream `json:"upstreams,omitempty"`  // load-balancing pool (optional)
+	Redirect     *Redirect  `json:"redirect,omitempty"`
+	StaticRoot   string     `json:"staticRoot,omitempty"` // when type=static
 	CertMode     string    `json:"certMode"` // auto (ACME) | none (plain http) | custom
 	CertID       *int64    `json:"certId"`   // when certMode=custom
 	ForceSSL     bool      `json:"forceSsl"`
@@ -151,7 +153,7 @@ func (h *Host) Validate() error {
 	if h.Type == "" {
 		h.Type = "proxy"
 	}
-	if h.Type != "proxy" && h.Type != "redirect" && h.Type != "dead" {
+	if h.Type != "proxy" && h.Type != "redirect" && h.Type != "dead" && h.Type != "static" {
 		return fmt.Errorf("unsupported host type %q", h.Type)
 	}
 	if len(h.Domains) == 0 {
@@ -167,14 +169,36 @@ func (h *Host) Validate() error {
 	switch h.Type {
 	case "proxy":
 		h.Redirect = nil
-		if h.Upstream.Scheme != "http" && h.Upstream.Scheme != "https" {
-			return fmt.Errorf("upstream scheme must be http or https, got %q", h.Upstream.Scheme)
+		h.StaticRoot = ""
+		validateUpstream := func(u Upstream) error {
+			if u.Scheme != "http" && u.Scheme != "https" {
+				return fmt.Errorf("upstream scheme must be http or https, got %q", u.Scheme)
+			}
+			if strings.TrimSpace(u.Host) == "" {
+				return errors.New("upstream host is required")
+			}
+			if u.Port < 1 || u.Port > 65535 {
+				return fmt.Errorf("upstream port %d out of range", u.Port)
+			}
+			return nil
 		}
-		if strings.TrimSpace(h.Upstream.Host) == "" {
-			return errors.New("upstream host is required")
+		if err := validateUpstream(h.Upstream); err != nil {
+			return err
 		}
-		if h.Upstream.Port < 1 || h.Upstream.Port > 65535 {
-			return fmt.Errorf("upstream port %d out of range", h.Upstream.Port)
+		for i, u := range h.Upstreams {
+			if err := validateUpstream(u); err != nil {
+				return fmt.Errorf("pool upstream %d: %w", i+1, err)
+			}
+			if u.Scheme != h.Upstream.Scheme {
+				return errors.New("all pool upstreams must share the primary's scheme")
+			}
+		}
+	case "static":
+		h.Redirect = nil
+		h.Upstream = Upstream{}
+		h.Upstreams = nil
+		if strings.TrimSpace(h.StaticRoot) == "" {
+			return errors.New("static host needs a root directory")
 		}
 	case "redirect":
 		h.Upstream = Upstream{}
@@ -200,7 +224,9 @@ func (h *Host) Validate() error {
 		}
 	case "dead":
 		h.Upstream = Upstream{}
+		h.Upstreams = nil
 		h.Redirect = nil
+		h.StaticRoot = ""
 	}
 	if rl := h.Options.RateLimit; rl != nil {
 		if rl.RPS <= 0 {
@@ -326,6 +352,8 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 		"ALTER TABLE streams ADD COLUMN allowed_cidrs TEXT NOT NULL DEFAULT '[]'",
 		"ALTER TABLE hosts ADD COLUMN redirect TEXT NOT NULL DEFAULT 'null'",
 		"ALTER TABLE hosts ADD COLUMN cert_id INTEGER",
+		"ALTER TABLE hosts ADD COLUMN upstreams TEXT NOT NULL DEFAULT '[]'",
+		"ALTER TABLE hosts ADD COLUMN static_root TEXT NOT NULL DEFAULT ''",
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
@@ -340,9 +368,9 @@ func now() string { return time.Now().UTC().Format(time.RFC3339) }
 
 func scanHost(row interface{ Scan(...any) error }) (Host, error) {
 	var h Host
-	var domains, upstream, options, redirect string
+	var domains, upstream, options, redirect, upstreams string
 	var forceSSL, enabled int
-	err := row.Scan(&h.ID, &h.Type, &domains, &upstream, &h.CertMode, &forceSSL, &enabled, &options, &h.CreatedAt, &h.UpdatedAt, &h.AccessListID, &redirect, &h.CertID)
+	err := row.Scan(&h.ID, &h.Type, &domains, &upstream, &h.CertMode, &forceSSL, &enabled, &options, &h.CreatedAt, &h.UpdatedAt, &h.AccessListID, &redirect, &h.CertID, &upstreams, &h.StaticRoot)
 	if err != nil {
 		return h, err
 	}
@@ -360,10 +388,13 @@ func scanHost(row interface{ Scan(...any) error }) (Host, error) {
 	if err := json.Unmarshal([]byte(redirect), &h.Redirect); err != nil {
 		return h, err
 	}
+	if err := json.Unmarshal([]byte(upstreams), &h.Upstreams); err != nil {
+		return h, err
+	}
 	return h, nil
 }
 
-const hostCols = "id, type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at, access_list_id, redirect, cert_id"
+const hostCols = "id, type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at, access_list_id, redirect, cert_id, upstreams, static_root"
 
 func (s *Store) ListHosts() ([]Host, error) {
 	rows, err := s.db.Query("SELECT " + hostCols + " FROM hosts ORDER BY id")
@@ -401,10 +432,11 @@ func (s *Store) CreateHost(h *Host) error {
 	upstream, _ := json.Marshal(h.Upstream)
 	options, _ := json.Marshal(h.Options)
 	redirect, _ := json.Marshal(h.Redirect)
+	upstreams, _ := json.Marshal(h.Upstreams)
 	h.CreatedAt, h.UpdatedAt = now(), now()
 	res, err := s.db.Exec(
-		"INSERT INTO hosts (type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at, access_list_id, redirect, cert_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.CreatedAt, h.UpdatedAt, h.AccessListID, string(redirect), h.CertID)
+		"INSERT INTO hosts (type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at, access_list_id, redirect, cert_id, upstreams, static_root) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.CreatedAt, h.UpdatedAt, h.AccessListID, string(redirect), h.CertID, string(upstreams), h.StaticRoot)
 	if err != nil {
 		return err
 	}
@@ -420,10 +452,11 @@ func (s *Store) UpdateHost(h *Host) error {
 	upstream, _ := json.Marshal(h.Upstream)
 	options, _ := json.Marshal(h.Options)
 	redirect, _ := json.Marshal(h.Redirect)
+	upstreams, _ := json.Marshal(h.Upstreams)
 	h.UpdatedAt = now()
 	res, err := s.db.Exec(
-		"UPDATE hosts SET type=?, domains=?, upstream=?, cert_mode=?, force_ssl=?, enabled=?, options=?, updated_at=?, access_list_id=?, redirect=?, cert_id=? WHERE id=?",
-		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.UpdatedAt, h.AccessListID, string(redirect), h.CertID, h.ID)
+		"UPDATE hosts SET type=?, domains=?, upstream=?, cert_mode=?, force_ssl=?, enabled=?, options=?, updated_at=?, access_list_id=?, redirect=?, cert_id=?, upstreams=?, static_root=? WHERE id=?",
+		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.UpdatedAt, h.AccessListID, string(redirect), h.CertID, string(upstreams), h.StaticRoot, h.ID)
 	if err != nil {
 		return err
 	}

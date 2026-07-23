@@ -263,8 +263,11 @@
               <option value="proxy">Proxy host</option>
               <option value="redirect">Redirection</option>
               <option value="dead">404 (dead) host</option>
+              <option value="static">Static files</option>
             </select></label>
         </div>
+        <label class="field" id="f-static-block" hidden><span>Root directory <em>(inside the container; mount a volume)</em></span>
+          <input id="f-staticroot" class="mono" placeholder="/data/sites/example"></label>
         <label class="field"><span>Domain names <em>(one per line, *.wildcards allowed)</em></span>
           <textarea id="f-domains" rows="3" class="mono" required></textarea></label>
         <div class="field-row" id="f-upstream-row">
@@ -327,6 +330,8 @@
       </section>
 
       <section class="tabpane" data-pane="upstream" hidden>
+        <label class="field"><span>Load-balancing pool <em>(extra upstreams, one scheme://host:port per line; round-robin with health checks)</em></span>
+          <textarea id="f-pool" rows="2" class="mono" placeholder="http://10.0.0.2:8080&#10;http://10.0.0.3:8080"></textarea></label>
         <label class="check"><input type="checkbox" id="f-preservehost"><span>Preserve incoming Host header</span></label>
         <label class="field"><span>Host header override <em>(ignored when preserving)</em></span><input id="f-hostoverride" class="mono"></label>
         <label class="check"><input type="checkbox" id="f-skipverify"><span>Skip TLS verification (self-signed upstream)</span></label>

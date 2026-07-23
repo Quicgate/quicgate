@@ -77,10 +77,11 @@ type Engine struct {
 	acmeDNSConfig string
 	certs         *certTracker
 	accessLog     *accessLogger
+	health        *healthChecker
 }
 
 func New(cfg Config, st *store.Store) *Engine {
-	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager()}
+	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager(), health: newHealthChecker()}
 	e.acmeStaging = cfg.ACMEStage
 	e.acmeEmail = cfg.ACMEEmail
 	e.certs = newCertTracker(func() string { return st.GetSetting("notify_url", "") })
@@ -189,6 +190,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	}
 	e.loadCustomCerts(hosts)
 	t := &routingTable{exact: map[string]*route{}, wildcard: map[string]*route{}}
+	healthTargets := map[string]struct{ scheme, hostport string }{}
 	var managed []string
 	for _, h := range hosts {
 		if !h.Enabled {
@@ -198,7 +200,13 @@ func (e *Engine) Reload(ctx context.Context) error {
 		if h.AccessListID != nil {
 			acl = access[*h.AccessListID]
 		}
-		r := buildRoute(h, acl)
+		for _, u := range append([]store.Upstream{h.Upstream}, h.Upstreams...) {
+			if u.Host != "" {
+				hp := fmt.Sprintf("%s:%d", u.Host, u.Port)
+				healthTargets[u.Scheme+"://"+hp] = struct{ scheme, hostport string }{u.Scheme, hp}
+			}
+		}
+		r := e.buildRoute(h, acl)
 		for _, d := range h.Domains {
 			if strings.HasPrefix(d, "*.") {
 				t.wildcard[d[2:]] = r
@@ -211,6 +219,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 		}
 	}
 	e.table.Store(t)
+	e.health.setTargets(healthTargets)
 	e.streams.Sync(streams)
 	if e.upnp != nil {
 		var mappings []PortMapping
@@ -268,22 +277,34 @@ func (e *Engine) loadCustomCerts(hosts []store.Host) {
 }
 
 // buildRoute compiles one host's typed options into a ready http.Handler chain.
-func buildRoute(h store.Host, acl *compiledAccess) *route {
+func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 	o := h.Options
 
-	// Redirect and dead hosts skip the proxy machinery entirely, but still
-	// get the access-list, rate-limit and exploit-filter wrappers.
-	if h.Type == "redirect" || h.Type == "dead" {
-		var handler http.Handler
-		if h.Type == "redirect" && h.Redirect != nil {
+	// Non-proxy hosts skip the proxy machinery entirely, but still get the
+	// access-list, rate-limit and exploit-filter wrappers.
+	switch h.Type {
+	case "redirect":
+		var handler http.Handler = deadHandler()
+		if h.Redirect != nil {
 			handler = buildRedirectHandler(*h.Redirect)
-		} else {
-			handler = deadHandler()
 		}
-		handler = wrapCommon(handler, o, acl)
-		return &route{host: h, proxy: handler}
+		return &route{host: h, proxy: wrapCommon(handler, o, acl)}
+	case "dead":
+		return &route{host: h, proxy: wrapCommon(deadHandler(), o, acl)}
+	case "static":
+		fs := http.FileServer(http.Dir(h.StaticRoot))
+		return &route{host: h, proxy: wrapCommon(fs, o, acl)}
 	}
 
+	// Build the balancer target list: primary plus any pool members.
+	bal := &balancer{health: e.health}
+	pool := append([]store.Upstream{h.Upstream}, h.Upstreams...)
+	for _, u := range pool {
+		hp := fmt.Sprintf("%s:%d", u.Host, u.Port)
+		bal.targets = append(bal.targets, balTarget{
+			key: u.Scheme + "://" + hp, url: u.Scheme + "://" + hp, hostport: hp,
+		})
+	}
 	target := &url.URL{Scheme: h.Upstream.Scheme, Host: fmt.Sprintf("%s:%d", h.Upstream.Host, h.Upstream.Port)}
 
 	dialTimeout := 10 * time.Second
@@ -324,7 +345,14 @@ func buildRoute(h store.Host, acl *compiledAccess) *route {
 		Transport:     transport,
 		FlushInterval: flush,
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(target)
+			// Pick a (healthy) backend per request for load balancing.
+			pick := target
+			if len(bal.targets) > 1 {
+				if u, err := url.Parse(bal.pick()); err == nil {
+					pick = u
+				}
+			}
+			pr.SetURL(pick)
 			pr.SetXForwarded()
 			if o.PreserveHost {
 				pr.Out.Host = pr.In.Host

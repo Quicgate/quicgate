@@ -71,6 +71,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/hosts/{id}", s.auth(s.handleUpdateHost))
 	mux.HandleFunc("DELETE /api/hosts/{id}", s.auth(s.handleDeleteHost))
 	mux.HandleFunc("GET /api/certs", s.auth(s.handleCerts))
+	mux.HandleFunc("GET /api/health", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.engine.HealthStatuses())
+	}))
 	mux.HandleFunc("GET /api/custom-certs", s.auth(s.handleListCustomCerts))
 	mux.HandleFunc("POST /api/custom-certs", s.auth(s.handleCreateCustomCert))
 	mux.HandleFunc("PUT /api/custom-certs/{id}", s.auth(s.handleUpdateCustomCert))

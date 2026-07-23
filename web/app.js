@@ -53,6 +53,16 @@ async function api(method, path, body) {
   return data;
 }
 
+// parsePool turns "scheme://host:port" lines into upstream objects.
+function parsePool(text) {
+  const out = [];
+  for (const line of text.split('\n').map((s) => s.trim()).filter(Boolean)) {
+    const m = line.match(/^(https?):\/\/([^:/\s]+):(\d+)$/);
+    if (m) out.push({ scheme: m[1], host: m[2], port: parseInt(m[3], 10) });
+  }
+  return out;
+}
+
 function setError(id, err) {
   const el = $(id);
   el.hidden = !err;
@@ -121,10 +131,15 @@ function hostMatches(h, q) {
 
 $('host-search').addEventListener('input', () => renderHosts());
 
+let healthMap = {};
 async function refresh() {
-  [hosts, accessLists, customCerts] = await Promise.all([
+  let health;
+  [hosts, accessLists, customCerts, health] = await Promise.all([
     api('GET', '/api/hosts'), api('GET', '/api/access-lists'), api('GET', '/api/custom-certs'),
+    api('GET', '/api/health').catch(() => []),
   ]);
+  healthMap = {};
+  for (const t of health) healthMap[t.target] = t.up;
   renderHosts();
   refreshCerts();
 }
@@ -152,8 +167,17 @@ function renderHosts() {
       tdUpstream.innerHTML = `<span class="badge">${h.redirect.httpCode} redirect</span> ${h.redirect.targetHost}`;
     } else if (h.type === 'dead') {
       tdUpstream.innerHTML = '<span class="badge badge--danger">404 host</span>';
+    } else if (h.type === 'static') {
+      tdUpstream.innerHTML = `<span class="badge">static</span> ${h.staticRoot}`;
     } else {
-      tdUpstream.textContent = `${h.upstream.scheme}://${h.upstream.host}:${h.upstream.port}`;
+      const pool = [h.upstream, ...(h.upstreams || [])];
+      const primary = `${h.upstream.scheme}://${h.upstream.host}:${h.upstream.port}`;
+      if (pool.length > 1) {
+        const up = pool.filter((u) => healthMap[`${u.scheme}://${u.host}:${u.port}`] !== false).length;
+        tdUpstream.innerHTML = `${primary} <span class="badge ${up === pool.length ? 'badge--success' : 'badge--danger'}">${up}/${pool.length} up</span>`;
+      } else {
+        tdUpstream.textContent = primary;
+      }
     }
 
     const tdTLS = document.createElement('td');
@@ -279,6 +303,7 @@ function syncHostType() {
   const t = $('f-type').value;
   $('f-upstream-row').hidden = t !== 'proxy';
   $('f-redirect-block').hidden = t !== 'redirect';
+  $('f-static-block').hidden = t !== 'static';
   for (const el of document.querySelectorAll('#modal [data-proxyonly]')) {
     el.style.display = t === 'proxy' ? '' : 'none';
   }
@@ -305,6 +330,8 @@ function openModal(h) {
   $('f-rscheme').value = rd.targetScheme || 'auto';
   $('f-rhost').value = rd.targetHost || '';
   $('f-rpath').checked = rd.preservePath !== false;
+  $('f-staticroot').value = h ? (h.staticRoot || '') : '';
+  $('f-pool').value = h && h.upstreams ? h.upstreams.map((u) => `${u.scheme}://${u.host}:${u.port}`).join('\n') : '';
   $('f-enabled').checked = h ? h.enabled : true;
   const sel = $('f-accesslist');
   sel.innerHTML = '<option value="">Publicly accessible</option>';
@@ -377,6 +404,8 @@ $('host-form').addEventListener('submit', async (e) => {
       host: $('f-uhost').value.trim(),
       port: parseInt($('f-uport').value, 10),
     } : { scheme: 'http', host: '', port: 0 },
+    upstreams: type === 'proxy' ? parsePool($('f-pool').value) : [],
+    staticRoot: type === 'static' ? $('f-staticroot').value.trim() : '',
     redirect: type === 'redirect' ? {
       httpCode: parseInt($('f-rcode').value, 10),
       targetScheme: $('f-rscheme').value,
