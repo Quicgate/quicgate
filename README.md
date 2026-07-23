@@ -131,6 +131,14 @@ Dev mode without TLS: `QG_TLS=off QG_HTTP=:8090 QG_ADMIN=:8091 QG_DATA=./devdata
 - [ROADMAP.md](ROADMAP.md) — features mined from NPM's issue tracker (all five phases implemented)
 - [API.md](API.md) — REST API reference
 
+## Contributing
+
+Issues and PRs welcome — please read [CONTRIBUTING.md](CONTRIBUTING.md) first (quicgate is deliberately opinionated: one binary, typed options, no free-text config).
+
+## Security
+
+Found a vulnerability? Please report it privately — see [SECURITY.md](SECURITY.md). Do not open a public issue for security problems.
+
 ## License
 
 [MIT](LICENSE)
