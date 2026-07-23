@@ -33,6 +33,7 @@ type Config struct {
 	ACMEEmail  string
 	ACMEStage  bool // use Let's Encrypt staging CA
 	DisableTLS bool // dev mode: no TLS/QUIC listeners at all
+	DisableH3  bool // skip the HTTP/3 (QUIC) listener + Alt-Svc; force clients to h2
 	UPnP       bool // request router port forwards via UPnP IGD
 }
 
@@ -256,6 +257,20 @@ func (e *Engine) Reload(ctx context.Context) error {
 				}
 			}
 		}
+		// User-defined router forwards straight to other LAN hosts (no proxy).
+		if pfs, err := e.store.ListPortForwards(); err == nil {
+			for _, p := range pfs {
+				if !p.Enabled {
+					continue
+				}
+				if p.Protocol == "tcp" || p.Protocol == "both" {
+					mappings = append(mappings, PortMapping{Proto: "TCP", Port: uint16(p.ExtPort), IntIP: p.IntIP, IntPort: uint16(p.IntPort)})
+				}
+				if p.Protocol == "udp" || p.Protocol == "both" {
+					mappings = append(mappings, PortMapping{Proto: "UDP", Port: uint16(p.ExtPort), IntIP: p.IntIP, IntPort: uint16(p.IntPort)})
+				}
+			}
+		}
 		go e.upnp.Sync(mappings)
 	}
 	if len(managed) > 0 && !e.cfg.DisableTLS {
@@ -385,6 +400,7 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 			}
 			pr.SetURL(pick)
 			pr.SetXForwarded()
+			setRealIP(pr)
 			if rewrite != nil {
 				pr.Out.URL.Path = rewrite.apply(pr.Out.URL.Path)
 			}
@@ -427,6 +443,21 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 	}
 	handler = wrapCommon(handler, o, acl)
 	return &route{host: h, proxy: handler}
+}
+
+// setRealIP adds the X-Real-IP header with the immediate client's address,
+// matching what Traefik/nginx send by default. SetXForwarded already appended
+// the client to X-Forwarded-For; X-Real-IP is the single real client IP that
+// backends like Vaultwarden read (its default IP_HEADER) for logging and
+// per-IP rate limiting.
+func setRealIP(pr *httputil.ProxyRequest) {
+	ip := pr.In.RemoteAddr
+	if h, _, err := net.SplitHostPort(ip); err == nil {
+		ip = h
+	}
+	if ip != "" {
+		pr.Out.Header.Set("X-Real-IP", ip)
+	}
 }
 
 // wrapCommon applies the middleware shared by every host type, outermost
@@ -486,6 +517,7 @@ func (e *Engine) locationDispatcher(h store.Host, def http.Handler, transport *h
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.SetURL(target)
 				pr.SetXForwarded()
+				setRealIP(pr)
 				pr.Out.Host = pr.In.Host
 				if rw != nil {
 					pr.Out.URL.Path = rw.apply(pr.Out.URL.Path)
@@ -578,11 +610,16 @@ func (e *Engine) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Strict-Transport-Security", v)
 	}
-	if e.h3 != nil && (o.HTTP3 == nil || *o.HTTP3) && r.ProtoMajor < 3 {
-		if err := e.h3.SetQUICHeaders(w.Header()); err == nil {
-			// Alt-Svc set: browsers upgrade to HTTP/3 on the next request.
-			_ = err
-		}
+	switch {
+	case o.HTTP3 != nil && !*o.HTTP3:
+		// Host opted out of HTTP/3. Actively clear any Alt-Svc the browser
+		// cached earlier (h3 hints live up to 30 days) so it drops h3 and
+		// falls back to h2 for this host, while other hosts keep h3. Needed
+		// for backends whose web clients misbehave over h3 (e.g. Vaultwarden).
+		w.Header().Set("Alt-Svc", "clear")
+	case e.h3 != nil && r.ProtoMajor < 3:
+		// Advertise h3 so browsers upgrade to HTTP/3 on the next request.
+		_ = e.h3.SetQUICHeaders(w.Header())
 	}
 	rt.proxy.ServeHTTP(w, r)
 }
@@ -713,13 +750,20 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 		go func() { errCh <- fmt.Errorf("https listener: %w", httpsSrv.ListenAndServeTLS("", "")) }()
 
-		e.h3 = &http3.Server{
-			Addr:      e.cfg.HTTPSAddr,
-			Handler:   httpsHandler,
-			TLSConfig: http3.ConfigureTLSConfig(tlsCfg),
+		// HTTP/3 is opt-out: when disabled we never create e.h3, which also
+		// stops Alt-Svc advertisement (serveHTTPS checks e.h3 != nil), so
+		// browsers never upgrade and existing ones fall back to h2.
+		if !e.cfg.DisableH3 {
+			e.h3 = &http3.Server{
+				Addr:      e.cfg.HTTPSAddr,
+				Handler:   httpsHandler,
+				TLSConfig: http3.ConfigureTLSConfig(tlsCfg),
+			}
+			go func() { errCh <- fmt.Errorf("http3 listener: %w", e.h3.ListenAndServe()) }()
+			log.Printf("engine: https + http/3 listening on %s (tcp+udp)", e.cfg.HTTPSAddr)
+		} else {
+			log.Printf("engine: https listening on %s (tcp); http/3 disabled", e.cfg.HTTPSAddr)
 		}
-		go func() { errCh <- fmt.Errorf("http3 listener: %w", e.h3.ListenAndServe()) }()
-		log.Printf("engine: https + http/3 listening on %s (tcp+udp)", e.cfg.HTTPSAddr)
 	} else {
 		log.Printf("engine: TLS disabled (dev mode), only plain http is served")
 	}

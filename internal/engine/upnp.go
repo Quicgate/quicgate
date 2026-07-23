@@ -13,10 +13,14 @@ import (
 
 const upnpRenewInterval = 30 * time.Minute
 
-// PortMapping is one router forward quicgate wants for itself.
+// PortMapping is one router forward quicgate wants. By default it points at
+// quicgate itself (IntIP empty); user-defined forwards set IntIP/IntPort to
+// send WAN traffic straight to another LAN host (e.g. the NAS or Plex).
 type PortMapping struct {
-	Proto string // TCP | UDP
-	Port  uint16
+	Proto   string // TCP | UDP
+	Port    uint16 // external (WAN) port
+	IntIP   string // internal target IP; "" = quicgate's own LAN IP
+	IntPort uint16 // internal target port; 0 = same as Port
 }
 
 func (p PortMapping) key() string { return fmt.Sprintf("%s:%d", p.Proto, p.Port) }
@@ -114,20 +118,28 @@ func (m *UPnPManager) Sync(desired []PortMapping) {
 		delete(m.mapped, key)
 	}
 	for key, p := range want {
-		err := m.client.AddPortMapping("", p.Port, p.Proto, p.Port, m.localIP, true, "quicgate", m.lease)
+		ip := p.IntIP
+		if ip == "" {
+			ip = m.localIP
+		}
+		intPort := p.IntPort
+		if intPort == 0 {
+			intPort = p.Port
+		}
+		err := m.client.AddPortMapping("", p.Port, p.Proto, intPort, ip, true, "quicgate", m.lease)
 		if err != nil && strings.Contains(err.Error(), "725") {
 			// Router only supports permanent leases.
-			err = m.client.AddPortMapping("", p.Port, p.Proto, p.Port, m.localIP, true, "quicgate", 0)
+			err = m.client.AddPortMapping("", p.Port, p.Proto, intPort, ip, true, "quicgate", 0)
 		}
 		if err != nil {
 			if !m.mapped[key] {
-				log.Printf("upnp: map %s -> %s failed (in use elsewhere?): %v", key, m.localIP, err)
+				log.Printf("upnp: map %s -> %s:%d failed (in use elsewhere?): %v", key, ip, intPort, err)
 			}
 			delete(m.mapped, key)
 			continue
 		}
 		if !m.mapped[key] {
-			log.Printf("upnp: mapped %s -> %s:%d", key, m.localIP, p.Port)
+			log.Printf("upnp: mapped %s -> %s:%d", key, ip, intPort)
 		}
 		m.mapped[key] = true
 	}

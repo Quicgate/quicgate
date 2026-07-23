@@ -103,6 +103,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/streams", s.auth(s.handleCreateStream))
 	mux.HandleFunc("PUT /api/streams/{id}", s.auth(s.handleUpdateStream))
 	mux.HandleFunc("DELETE /api/streams/{id}", s.auth(s.handleDeleteStream))
+	mux.HandleFunc("GET /api/port-forwards", s.auth(s.handleListPortForwards))
+	mux.HandleFunc("POST /api/port-forwards", s.auth(s.handleCreatePortForward))
+	mux.HandleFunc("PUT /api/port-forwards/{id}", s.auth(s.handleUpdatePortForward))
+	mux.HandleFunc("DELETE /api/port-forwards/{id}", s.auth(s.handleDeletePortForward))
 	mux.HandleFunc("GET /api/tokens", s.auth(s.handleListTokens))
 	mux.HandleFunc("POST /api/tokens", s.auth(s.handleCreateToken))
 	mux.HandleFunc("DELETE /api/tokens/{id}", s.auth(s.handleDeleteToken))
@@ -316,6 +320,74 @@ func (s *Server) handleDeleteStream(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.DeleteStream(id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "stream not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.reload(r.Context())
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleListPortForwards(w http.ResponseWriter, r *http.Request) {
+	pfs, err := s.store.ListPortForwards()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if pfs == nil {
+		pfs = []store.PortForward{}
+	}
+	writeJSON(w, http.StatusOK, pfs)
+}
+
+func (s *Server) handleCreatePortForward(w http.ResponseWriter, r *http.Request) {
+	var p store.PortForward
+	if err := decodeStrict(r, &p); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.CreatePortForward(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.reload(r.Context())
+	writeJSON(w, http.StatusCreated, p)
+}
+
+func (s *Server) handleUpdatePortForward(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var p store.PortForward
+	if err := decodeStrict(r, &p); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	p.ID = id
+	if err := s.store.UpdatePortForward(&p); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, http.StatusNotFound, "port forward not found")
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.reload(r.Context())
+	writeJSON(w, http.StatusOK, p)
+}
+
+func (s *Server) handleDeletePortForward(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if err := s.store.DeletePortForward(id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, http.StatusNotFound, "port forward not found")
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, err.Error())

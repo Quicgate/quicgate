@@ -429,6 +429,17 @@ CREATE TABLE IF NOT EXISTS streams (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS port_forwards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ext_port INTEGER NOT NULL,
+  protocol TEXT NOT NULL DEFAULT 'tcp',
+  int_ip TEXT NOT NULL,
+  int_port INTEGER NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`)
 	if err != nil {
 		return err

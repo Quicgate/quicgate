@@ -47,6 +47,7 @@ func main() {
 		ACMEEmail:  os.Getenv("QG_ACME_EMAIL"),
 		ACMEStage:  os.Getenv("QG_ACME_STAGING") == "1",
 		DisableTLS: os.Getenv("QG_TLS") == "off",
+		DisableH3:  os.Getenv("QG_H3") == "off",
 		UPnP:       os.Getenv("QG_UPNP") == "1",
 	}, st)
 
