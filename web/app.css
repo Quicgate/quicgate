@@ -96,6 +96,16 @@ textarea { resize: vertical; }
 
 /* header rule rows */
 .hdr-rules { display: flex; flex-direction: column; gap: var(--sp-2); margin-bottom: var(--sp-2); }
-.hdr-rule { display: flex; gap: var(--sp-2); align-items: center; }
+.hdr-rule { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
 .hdr-rule select { flex: 0 0 100px; }
-.hdr-rule input { flex: 1; font-family: var(--font-mono); font-size: var(--fs-sm); }
+.hdr-rule input { flex: 1; min-width: 120px; font-family: var(--font-mono); font-size: var(--fs-sm); }
+/* clickable HTTP-verb chips for method-scoped access rules */
+.r-methods { display: inline-flex; gap: 3px; flex-wrap: wrap; }
+.mchip {
+  font-family: var(--font-mono); font-size: 10px; font-weight: var(--fw-semibold);
+  letter-spacing: .04em; padding: 3px 7px; border-radius: var(--r-pill);
+  border: 1px solid var(--c-border); color: var(--c-text-faint);
+  cursor: pointer; user-select: none;
+}
+.mchip:hover { border-color: var(--c-accent-border); color: var(--c-text-muted); }
+.mchip.on { color: var(--c-text-invert); background: var(--c-accent); border-color: var(--c-accent); }

@@ -233,7 +233,19 @@ func (e *Engine) Reload(ctx context.Context) error {
 	}
 	e.table.Store(t)
 	e.health.setTargets(healthTargets)
-	e.streams.Sync(streams, e.loadStreamCert)
+	e.streams.Sync(streams, e.loadStreamCert, func(id int64) []*net.IPNet {
+		a := access[id]
+		if a == nil {
+			return nil
+		}
+		var nets []*net.IPNet
+		for _, r := range a.rules {
+			if r.allow && r.net != nil {
+				nets = append(nets, r.net)
+			}
+		}
+		return nets
+	})
 	if e.upnp != nil {
 		var mappings []PortMapping
 		if p := portOf(e.cfg.HTTPAddr); p > 0 {

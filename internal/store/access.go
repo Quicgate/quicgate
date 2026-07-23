@@ -315,6 +315,7 @@ type streamExtra struct {
 	TerminateTLS        bool       `json:"terminateTls,omitempty"`
 	CertID              *int64     `json:"certId,omitempty"`
 	SNIRoutes           []SNIRoute `json:"sniRoutes,omitempty"`
+	AccessListID        *int64     `json:"accessListId,omitempty"`
 }
 
 func scanStream(row interface{ Scan(...any) error }) (Stream, error) {
@@ -335,6 +336,7 @@ func scanStream(row interface{ Scan(...any) error }) (Stream, error) {
 	}
 	st.ListenPortEnd, st.SendProxyProtocol, st.AcceptProxyProtocol = e.ListenPortEnd, e.SendProxyProtocol, e.AcceptProxyProtocol
 	st.TerminateTLS, st.CertID, st.SNIRoutes = e.TerminateTLS, e.CertID, e.SNIRoutes
+	st.AccessListID = e.AccessListID
 	return st, nil
 }
 
@@ -342,7 +344,7 @@ func (st *Stream) extraJSON() string {
 	b, _ := json.Marshal(streamExtra{
 		ListenPortEnd: st.ListenPortEnd, SendProxyProtocol: st.SendProxyProtocol,
 		AcceptProxyProtocol: st.AcceptProxyProtocol, TerminateTLS: st.TerminateTLS,
-		CertID: st.CertID, SNIRoutes: st.SNIRoutes,
+		CertID: st.CertID, SNIRoutes: st.SNIRoutes, AccessListID: st.AccessListID,
 	})
 	return string(b)
 }

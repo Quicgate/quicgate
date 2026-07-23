@@ -623,22 +623,32 @@ async function refreshAcls() {
 function addAclRuleRow(rule) {
   const row = document.createElement('div');
   row.className = 'hdr-rule';
+  const verbs = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
+  const chips = verbs.map((v) => `<span class="mchip" data-m="${v}" tabindex="0">${v}</span>`).join('');
   row.innerHTML =
     '<select class="r-action"><option value="allow">allow</option><option value="deny">deny</option></select>' +
     '<select class="r-kind"><option value="cidr">IP/CIDR</option><option value="host">Hostname (DDNS)</option><option value="country">Country</option></select>' +
     '<input class="r-value" placeholder="192.168.1.0/24">' +
-    '<input class="r-methods mono" placeholder="any verb" title="HTTP methods this rule applies to, comma-separated (e.g. POST, PUT). Blank = all methods." style="flex:0 0 120px">' +
+    '<span class="r-methods" title="Click the verbs this rule applies to. None selected = all methods.">' + chips + '</span>' +
     '<button type="button" class="btn btn--ghost btn--sm r-del">&times;</button>';
-  const [action, kind, value, methods] = [row.querySelector('.r-action'), row.querySelector('.r-kind'), row.querySelector('.r-value'), row.querySelector('.r-methods')];
+  const [action, kind, value] = [row.querySelector('.r-action'), row.querySelector('.r-kind'), row.querySelector('.r-value')];
   const hints = { cidr: '192.168.1.0/24 or single IP', host: 'home.duckdns.org', country: 'NL' };
   kind.addEventListener('change', () => { value.placeholder = hints[kind.value]; });
+  const toggle = (ch) => ch.classList.toggle('on');
+  row.querySelectorAll('.mchip').forEach((ch) => {
+    ch.addEventListener('click', () => toggle(ch));
+    ch.addEventListener('keydown', (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(ch); } });
+  });
   if (rule) {
     action.value = rule.action;
     if (rule.host) { kind.value = 'host'; value.value = rule.host; }
     else if (rule.country) { kind.value = 'country'; value.value = rule.country; }
     else { kind.value = 'cidr'; value.value = rule.cidr; }
     value.placeholder = hints[kind.value];
-    if (rule.methods && rule.methods.length) methods.value = rule.methods.join(', ');
+    for (const m of rule.methods || []) {
+      const c = row.querySelector(`.mchip[data-m="${m}"]`);
+      if (c) c.classList.add('on');
+    }
   }
   row.querySelector('.r-del').addEventListener('click', () => row.remove());
   $('acl-rules').appendChild(row);
@@ -689,7 +699,7 @@ $('acl-form').addEventListener('submit', async (e) => {
     const val = row.querySelector('.r-value').value.trim();
     if (!val) continue;
     const rule = { action, [kind]: val };
-    const methods = row.querySelector('.r-methods').value.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+    const methods = [...row.querySelectorAll('.r-methods .mchip.on')].map((c) => c.dataset.m);
     if (methods.length) rule.methods = methods;
     rules.push(rule);
   }
@@ -721,7 +731,7 @@ $('acl-form').addEventListener('submit', async (e) => {
 /* ---- streams page ---- */
 async function refreshStreams() {
   let streams;
-  [streams, customCerts] = await Promise.all([api('GET', '/api/streams'), api('GET', '/api/custom-certs')]);
+  [streams, customCerts, accessLists] = await Promise.all([api('GET', '/api/streams'), api('GET', '/api/custom-certs'), api('GET', '/api/access-lists')]);
   const body = $('streams-body');
   body.innerHTML = '';
   $('streams-empty').hidden = streams.length > 0;
@@ -742,9 +752,14 @@ async function refreshStreams() {
     tdFwd.textContent = `${s.forwardHost}:${s.forwardPort}`;
     const tdSources = document.createElement('td');
     const nCidrs = (s.allowedCidrs || []).length;
-    tdSources.innerHTML = nCidrs
-      ? `<span class="badge badge--success">${nCidrs} CIDR${nCidrs > 1 ? 's' : ''}</span>`
-      : '<span class="badge badge--danger">open</span>';
+    if (s.accessListId) {
+      const acl = accessLists.find((a) => a.id === s.accessListId);
+      tdSources.innerHTML = `<span class="badge badge--success">${acl ? acl.name : 'access list'}</span>`;
+    } else if (nCidrs) {
+      tdSources.innerHTML = `<span class="badge badge--success">${nCidrs} CIDR${nCidrs > 1 ? 's' : ''}</span>`;
+    } else {
+      tdSources.innerHTML = '<span class="badge badge--danger">open</span>';
+    }
     const tdEnabled = document.createElement('td');
     const sw = document.createElement('label');
     sw.className = 'switch';
@@ -792,6 +807,15 @@ function openStreamModal(s) {
   $('s-fhost').value = s ? s.forwardHost : '';
   $('s-fport').value = s ? s.forwardPort : '';
   $('s-cidrs').value = s && s.allowedCidrs ? s.allowedCidrs.join('\n') : '';
+  const src = $('s-source');
+  src.innerHTML = '<option value="">Inline CIDR list</option>';
+  for (const a of accessLists) {
+    const opt = document.createElement('option');
+    opt.value = String(a.id); opt.textContent = 'Access list: ' + a.name;
+    src.appendChild(opt);
+  }
+  src.value = s && s.accessListId ? String(s.accessListId) : '';
+  $('s-cidrs-field').hidden = !!src.value;
   $('s-sendproxy').value = s ? (s.sendProxyProtocol || '') : '';
   $('s-acceptproxy').checked = s ? !!s.acceptProxyProtocol : false;
   $('s-terminatetls').checked = s ? !!s.terminateTls : false;
@@ -809,6 +833,7 @@ function openStreamModal(s) {
   $('stream-modal').hidden = false;
 }
 $('s-terminatetls').addEventListener('change', () => { $('s-cert-field').hidden = !$('s-terminatetls').checked; });
+$('s-source').addEventListener('change', () => { $('s-cidrs-field').hidden = !!$('s-source').value; });
 
 $('btn-add-stream').addEventListener('click', () => openStreamModal(null));
 $('stream-modal-close').addEventListener('click', () => { $('stream-modal').hidden = true; });
@@ -828,7 +853,8 @@ $('stream-form').addEventListener('submit', async (e) => {
     protocol: $('s-proto').value,
     forwardHost: $('s-fhost').value.trim(),
     forwardPort: parseInt($('s-fport').value, 10) || 0,
-    allowedCidrs: $('s-cidrs').value.split('\n').map((v) => v.trim()).filter(Boolean),
+    allowedCidrs: $('s-source').value ? [] : $('s-cidrs').value.split('\n').map((v) => v.trim()).filter(Boolean),
+    accessListId: $('s-source').value ? parseInt($('s-source').value, 10) : null,
     sendProxyProtocol: $('s-sendproxy').value,
     acceptProxyProtocol: $('s-acceptproxy').checked,
     terminateTls: $('s-terminatetls').checked,

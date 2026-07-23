@@ -349,7 +349,9 @@
         <label class="field"><span>Forward host / IP</span><input id="s-fhost" class="mono"></label>
         <label class="field field--sm"><span>Forward port</span><input id="s-fport" type="number" min="1" max="65535"></label>
       </div>
-      <label class="field"><span>Allowed source IPs / CIDRs <em>(one per line, empty = anyone; UPnP may expose this port to the internet)</em></span>
+      <label class="field"><span>Source restriction <em>(who may connect)</em></span>
+        <select id="s-source"><option value="">Inline CIDR list</option></select></label>
+      <label class="field" id="s-cidrs-field"><span>Allowed source IPs / CIDRs <em>(one per line, empty = anyone; UPnP may expose this port to the internet)</em></span>
         <textarea id="s-cidrs" rows="2" class="mono" placeholder="192.168.1.0/24&#10;203.0.113.0/28"></textarea></label>
       <fieldset class="group">
         <legend>Advanced (TCP)</legend>

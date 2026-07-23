@@ -292,9 +292,31 @@ func (s *Server) handleListStreams(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, streams)
 }
 
+// streamACLExists guards a stream's optional access-list source reference: a
+// dangling id would silently drop to "no restriction", so reject it.
+func (s *Server) streamACLExists(id *int64) error {
+	if id == nil {
+		return nil
+	}
+	lists, err := s.store.ListAccessLists()
+	if err != nil {
+		return err
+	}
+	for _, a := range lists {
+		if a.ID == *id {
+			return nil
+		}
+	}
+	return errors.New("accessListId does not reference an existing access list")
+}
+
 func (s *Server) handleCreateStream(w http.ResponseWriter, r *http.Request) {
 	var st store.Stream
 	if err := decodeStrict(r, &st); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.streamACLExists(st.AccessListID); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -321,6 +343,10 @@ func (s *Server) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st.ID = id
+	if err := s.streamACLExists(st.AccessListID); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := s.store.UpdateStream(&st, s.engine.ReservedPorts()); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "stream not found")

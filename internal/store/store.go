@@ -187,6 +187,9 @@ type Stream struct {
 	ForwardHost  string   `json:"forwardHost"`
 	ForwardPort  int      `json:"forwardPort"`
 	AllowedCIDRs []string `json:"allowedCidrs"`
+	// AccessListID, when set, reuses that access list's allow CIDR/host rules
+	// as the source filter instead of AllowedCIDRs (define an allowlist once).
+	AccessListID *int64 `json:"accessListId,omitempty"`
 
 	// Round-2 options (all TCP-only).
 	SendProxyProtocol   string     `json:"sendProxyProtocol,omitempty"`   // "" | v1 | v2 (prepend PROXY header to backend)

@@ -75,14 +75,18 @@ type certLoader func(id int64) (tls.Certificate, bool)
 
 // Sync makes the running forwarders match the store. TCP streams may expand
 // into a port range; each port becomes its own listener.
-func (m *StreamManager) Sync(streams []store.Stream, loadCert certLoader) {
+// aclNetResolver returns an access list's allow CIDR/host nets, for reuse as a
+// stream's source filter.
+type aclNetResolver func(id int64) []*net.IPNet
+
+func (m *StreamManager) Sync(streams []store.Stream, loadCert certLoader, resolveACL aclNetResolver) {
 	desired := map[string]*streamSpec{}
 	for _, s := range streams {
 		if !s.Enabled {
 			continue
 		}
 		// Build the shared spec once per stream.
-		spec := buildStreamSpec(s, loadCert)
+		spec := buildStreamSpec(s, loadCert, resolveACL)
 		protos := []string{s.Protocol}
 		if s.Protocol == "both" {
 			protos = []string{"tcp", "udp"}
@@ -135,23 +139,32 @@ func (m *StreamManager) Sync(streams []store.Stream, loadCert certLoader) {
 	}
 }
 
-func buildStreamSpec(s store.Stream, loadCert certLoader) *streamSpec {
+func buildStreamSpec(s store.Stream, loadCert certLoader, resolveACL aclNetResolver) *streamSpec {
 	target := fmt.Sprintf("%s:%d", s.ForwardHost, s.ForwardPort)
 	spec := &streamSpec{
 		target: target,
-		sig: fmt.Sprintf("%s|%v|pp:%s/%v|tls:%v/%v|sni:%v", target, s.AllowedCIDRs,
-			s.SendProxyProtocol, s.AcceptProxyProtocol, s.TerminateTLS, s.CertID, s.SNIRoutes),
 		tcp: tcpOpts{
 			sendProxy:   s.SendProxyProtocol,
 			acceptProxy: s.AcceptProxyProtocol,
 			defaultDest: target,
 		},
 	}
-	for _, c := range s.AllowedCIDRs {
-		if _, n, err := net.ParseCIDR(c); err == nil {
-			spec.nets = append(spec.nets, n)
+	// Source filter: reuse an access list's allow CIDR/host rules, or the
+	// inline CIDR list. Only IP rules apply at L4 (no basic-auth/GeoIP/method).
+	var srcSig string
+	if s.AccessListID != nil && resolveACL != nil {
+		spec.nets = resolveACL(*s.AccessListID)
+		srcSig = fmt.Sprintf("acl%d:%v", *s.AccessListID, spec.nets)
+	} else {
+		for _, c := range s.AllowedCIDRs {
+			if _, n, err := net.ParseCIDR(c); err == nil {
+				spec.nets = append(spec.nets, n)
+			}
 		}
+		srcSig = fmt.Sprintf("%v", s.AllowedCIDRs)
 	}
+	spec.sig = fmt.Sprintf("%s|%s|pp:%s/%v|tls:%v/%v|sni:%v", target, srcSig,
+		s.SendProxyProtocol, s.AcceptProxyProtocol, s.TerminateTLS, s.CertID, s.SNIRoutes)
 	if s.TerminateTLS && s.CertID != nil && loadCert != nil {
 		if cert, ok := loadCert(*s.CertID); ok {
 			spec.tcp.tlsCert = &cert

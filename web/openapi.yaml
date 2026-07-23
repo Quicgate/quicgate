@@ -101,6 +101,7 @@ components:
         forwardHost: { type: string }
         forwardPort: { type: integer }
         allowedCidrs: { type: array, items: { type: string } }
+        accessListId: { type: integer, description: "reuse an access list's allow CIDR/host rules as the source filter instead of allowedCidrs" }
         sendProxyProtocol: { type: string, enum: ["", v1, v2] }
         acceptProxyProtocol: { type: boolean }
         terminateTls: { type: boolean }
