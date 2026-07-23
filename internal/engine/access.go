@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -12,8 +13,9 @@ import (
 
 type compiledRule struct {
 	allow   bool
-	net     *net.IPNet // CIDR or resolved DDNS host
-	country string     // GeoIP country code, if this is a country rule
+	net     *net.IPNet      // CIDR or resolved DDNS host
+	country string          // GeoIP country code, if this is a country rule
+	methods map[string]bool // HTTP verbs this rule applies to; nil = all
 }
 
 type compiledAccess struct {
@@ -33,10 +35,17 @@ func compileAccess(a store.AccessList, geo *geoDB, ban *banManager) *compiledAcc
 	c := &compiledAccess{name: a.Name, satisfy: a.Satisfy, passAuth: a.PassAuth, users: map[string]string{}, geo: geo, ban: ban}
 	for _, r := range a.Rules {
 		allow := r.Action == "allow"
+		var methods map[string]bool
+		if len(r.Methods) > 0 {
+			methods = make(map[string]bool, len(r.Methods))
+			for _, m := range r.Methods {
+				methods[strings.ToUpper(m)] = true
+			}
+		}
 		switch {
 		case r.CIDR != "":
 			if _, ipnet, err := net.ParseCIDR(r.CIDR); err == nil {
-				c.rules = append(c.rules, compiledRule{allow: allow, net: ipnet})
+				c.rules = append(c.rules, compiledRule{allow: allow, net: ipnet, methods: methods})
 			}
 		case r.Host != "":
 			ips, err := net.LookupIP(r.Host)
@@ -49,10 +58,10 @@ func compileAccess(a store.AccessList, geo *geoDB, ban *banManager) *compiledAcc
 				if ip.To4() == nil {
 					bits = 128
 				}
-				c.rules = append(c.rules, compiledRule{allow: allow, net: &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}})
+				c.rules = append(c.rules, compiledRule{allow: allow, net: &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}, methods: methods})
 			}
 		case r.Country != "":
-			c.rules = append(c.rules, compiledRule{allow: allow, country: r.Country})
+			c.rules = append(c.rules, compiledRule{allow: allow, country: r.Country, methods: methods})
 		}
 	}
 	for _, u := range a.Users {
@@ -61,9 +70,10 @@ func compileAccess(a store.AccessList, geo *geoDB, ban *banManager) *compiledAcc
 	return c
 }
 
-// ipAllowed evaluates the ordered rules; first match wins, no match denies.
-// An access list with no IP rules imposes no IP restriction.
-func (c *compiledAccess) ipAllowed(remoteAddr string) bool {
+// ipAllowed evaluates the ordered rules for the given method; first match
+// wins, no match denies. Rules scoped to specific HTTP verbs are skipped when
+// the method differs. An access list with no IP rules imposes no restriction.
+func (c *compiledAccess) ipAllowed(remoteAddr, method string) bool {
 	if len(c.rules) == 0 {
 		return true
 	}
@@ -77,6 +87,9 @@ func (c *compiledAccess) ipAllowed(remoteAddr string) bool {
 	}
 	var country string
 	for _, r := range c.rules {
+		if r.methods != nil && !r.methods[method] {
+			continue
+		}
 		if r.country != "" {
 			if country == "" && c.geo != nil {
 				country = c.geo.country(ip)
@@ -111,9 +124,20 @@ func (c *compiledAccess) authOK(r *http.Request) bool {
 }
 
 // wrap gates next behind the access list, mirroring NPM's satisfy semantics.
+// isCORSPreflight reports whether r is a browser CORS preflight. Preflights
+// carry no credentials by spec, so gating them behind auth breaks every
+// cross-origin app; let them through and gate the real request that follows.
+func isCORSPreflight(r *http.Request) bool {
+	return r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != ""
+}
+
 func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ipOK := c.ipAllowed(r.RemoteAddr)
+		if isCORSPreflight(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ipOK := c.ipAllowed(r.RemoteAddr, r.Method)
 		authOK := c.authOK(r)
 		allowed := ipOK && authOK
 		if c.satisfy == "any" && len(c.rules) > 0 && len(c.users) > 0 {

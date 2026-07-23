@@ -18,6 +18,11 @@ type storedUser struct {
 
 // Validate checks an access list; prev (may be nil) supplies existing hashes
 // for users whose password was left empty on update.
+var validHTTPMethods = map[string]bool{
+	"GET": true, "HEAD": true, "POST": true, "PUT": true,
+	"PATCH": true, "DELETE": true, "OPTIONS": true, "CONNECT": true, "TRACE": true,
+}
+
 func (a *AccessList) Validate(prev *AccessList) error {
 	a.Name = strings.TrimSpace(a.Name)
 	if a.Name == "" {
@@ -68,6 +73,20 @@ func (a *AccessList) Validate(prev *AccessList) error {
 		}
 		if r.Host != "" {
 			a.Rules[i].Host = strings.ToLower(strings.TrimSpace(r.Host))
+		}
+		if len(r.Methods) > 0 {
+			methods := make([]string, 0, len(r.Methods))
+			for _, m := range r.Methods {
+				m = strings.ToUpper(strings.TrimSpace(m))
+				if m == "" {
+					continue
+				}
+				if !validHTTPMethods[m] {
+					return fmt.Errorf("rule %d: unknown HTTP method %q", i+1, m)
+				}
+				methods = append(methods, m)
+			}
+			a.Rules[i].Methods = methods
 		}
 	}
 	prevHashes := map[string]string{}

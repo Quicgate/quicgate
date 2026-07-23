@@ -145,6 +145,9 @@ type AccessRule struct {
 	CIDR    string `json:"cidr,omitempty"`
 	Host    string `json:"host,omitempty"`    // hostname, re-resolved periodically
 	Country string `json:"country,omitempty"` // ISO 3166-1 alpha-2, needs GeoIP DB
+	// Methods scopes the rule to specific HTTP verbs (e.g. keep GET public
+	// but require auth for POST/PUT/DELETE). Empty = every method.
+	Methods []string `json:"methods,omitempty"`
 }
 
 // AccessUser carries a plaintext Password only inbound from the API; at rest

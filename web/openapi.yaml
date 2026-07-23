@@ -80,6 +80,10 @@ components:
               cidr: { type: string }
               host: { type: string, description: hostname, re-resolved (dynamic DNS) }
               country: { type: string, description: ISO 3166-1 alpha-2 (GeoIP) }
+              methods:
+                type: array
+                items: { type: string }
+                description: "HTTP verbs this rule applies to (e.g. [POST, PUT, DELETE]); empty = all methods"
         users:
           type: array
           items:

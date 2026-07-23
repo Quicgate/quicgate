@@ -626,8 +626,9 @@ function addAclRuleRow(rule) {
     '<select class="r-action"><option value="allow">allow</option><option value="deny">deny</option></select>' +
     '<select class="r-kind"><option value="cidr">IP/CIDR</option><option value="host">Hostname (DDNS)</option><option value="country">Country</option></select>' +
     '<input class="r-value" placeholder="192.168.1.0/24">' +
-    '<button type="button" class="btn btn--ghost btn--sm">&times;</button>';
-  const [action, kind, value] = [row.querySelector('.r-action'), row.querySelector('.r-kind'), row.querySelector('.r-value')];
+    '<input class="r-methods mono" placeholder="any verb" title="HTTP methods this rule applies to, comma-separated (e.g. POST, PUT). Blank = all methods." style="flex:0 0 120px">' +
+    '<button type="button" class="btn btn--ghost btn--sm r-del">&times;</button>';
+  const [action, kind, value, methods] = [row.querySelector('.r-action'), row.querySelector('.r-kind'), row.querySelector('.r-value'), row.querySelector('.r-methods')];
   const hints = { cidr: '192.168.1.0/24 or single IP', host: 'home.duckdns.org', country: 'NL' };
   kind.addEventListener('change', () => { value.placeholder = hints[kind.value]; });
   if (rule) {
@@ -636,8 +637,9 @@ function addAclRuleRow(rule) {
     else if (rule.country) { kind.value = 'country'; value.value = rule.country; }
     else { kind.value = 'cidr'; value.value = rule.cidr; }
     value.placeholder = hints[kind.value];
+    if (rule.methods && rule.methods.length) methods.value = rule.methods.join(', ');
   }
-  row.children[3].addEventListener('click', () => row.remove());
+  row.querySelector('.r-del').addEventListener('click', () => row.remove());
   $('acl-rules').appendChild(row);
 }
 
@@ -685,7 +687,10 @@ $('acl-form').addEventListener('submit', async (e) => {
     const kind = row.querySelector('.r-kind').value;
     const val = row.querySelector('.r-value').value.trim();
     if (!val) continue;
-    rules.push({ action, [kind]: val });
+    const rule = { action, [kind]: val };
+    const methods = row.querySelector('.r-methods').value.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+    if (methods.length) rule.methods = methods;
+    rules.push(rule);
   }
   const users = [];
   for (const row of $('acl-users').children) {
