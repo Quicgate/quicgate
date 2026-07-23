@@ -1,0 +1,14 @@
+services:
+  quicgate:
+    image: registry.example.com/quicgate:latest
+    container_name: quicgate
+    restart: unless-stopped
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+      - "81:81/tcp"
+    environment:
+      - QG_ACME_EMAIL=you@example.com
+    volumes:
+      - /opt/quicgate:/data
