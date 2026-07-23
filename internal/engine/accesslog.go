@@ -2,8 +2,10 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -11,11 +13,37 @@ import (
 
 // accessLogger writes one JSON line per proxied request to a size-rotated
 // file. Structured with the real client IP so ban tools (fail2ban, CrowdSec)
-// can consume it directly.
+// can consume it directly. It also keeps counters for the metrics endpoint.
 type accessLogger struct {
-	out *lumberjack.Logger
-	enc chan []byte
+	out       *lumberjack.Logger
+	enc       chan []byte
+	total     atomic.Uint64
+	bytes     atomic.Uint64
+	status2xx atomic.Uint64
+	status3xx atomic.Uint64
+	status4xx atomic.Uint64
+	status5xx atomic.Uint64
 }
+
+// promText renders the counters in Prometheus exposition format.
+func (l *accessLogger) promText() string {
+	return fmt.Sprintf(`# HELP quicgate_requests_total Total proxied requests.
+# TYPE quicgate_requests_total counter
+quicgate_requests_total %d
+# HELP quicgate_responses_total Responses by status class.
+# TYPE quicgate_responses_total counter
+quicgate_responses_total{class="2xx"} %d
+quicgate_responses_total{class="3xx"} %d
+quicgate_responses_total{class="4xx"} %d
+quicgate_responses_total{class="5xx"} %d
+# HELP quicgate_response_bytes_total Total response bytes.
+# TYPE quicgate_response_bytes_total counter
+quicgate_response_bytes_total %d
+`, l.total.Load(), l.status2xx.Load(), l.status3xx.Load(), l.status4xx.Load(), l.status5xx.Load(), l.bytes.Load())
+}
+
+// MetricsText exposes the Prometheus text for the admin /metrics endpoint.
+func (e *Engine) MetricsText() string { return e.accessLog.promText() }
 
 func newAccessLogger(dir string) *accessLogger {
 	l := &accessLogger{
@@ -85,6 +113,18 @@ func (l *accessLogger) wrap(next http.HandlerFunc) http.HandlerFunc {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w}
 		next(sw, r)
+		l.total.Add(1)
+		l.bytes.Add(uint64(sw.bytes))
+		switch sw.status / 100 {
+		case 2:
+			l.status2xx.Add(1)
+		case 3:
+			l.status3xx.Add(1)
+		case 4:
+			l.status4xx.Add(1)
+		case 5:
+			l.status5xx.Add(1)
+		}
 		ip := r.RemoteAddr
 		if h, _, err := net.SplitHostPort(ip); err == nil {
 			ip = h

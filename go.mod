@@ -9,6 +9,7 @@ require (
 	github.com/libdns/transip v1.1.2
 	github.com/mholt/acmez/v3 v3.1.6
 	github.com/oschwald/maxminddb-golang v1.13.1
+	github.com/pquerna/otp v1.5.0
 	github.com/quic-go/quic-go v0.60.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/time v0.15.0
@@ -17,6 +18,7 @@ require (
 )
 
 require (
+	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect

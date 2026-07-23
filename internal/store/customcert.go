@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -125,6 +126,43 @@ func (s *Store) UpdateCustomCertPEM(id int64, c *CustomCert) error {
 	c.ID = id
 	c.CertPEM, c.KeyPEM = "", ""
 	return nil
+}
+
+// GenerateSelfSigned creates and stores a self-signed cert for the domains,
+// for internal / .lan hosts where ACME cannot reach.
+func (s *Store) GenerateSelfSigned(name string, domains []string, days int) (*CustomCert, error) {
+	if len(domains) == 0 {
+		return nil, errors.New("at least one domain is required")
+	}
+	if days <= 0 {
+		days = 825
+	}
+	certPEM, keyPEM, err := selfSignedPEM(domains, days)
+	if err != nil {
+		return nil, err
+	}
+	c := &CustomCert{Name: name, CertPEM: certPEM, KeyPEM: keyPEM}
+	if err := s.CreateCustomCert(c); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// ImportCertFromFile reads a cert and key from disk paths and stores them.
+func (s *Store) ImportCertFromFile(name, certPath, keyPath string) (*CustomCert, error) {
+	certBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, fmt.Errorf("read cert: %w", err)
+	}
+	keyBytes, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read key: %w", err)
+	}
+	c := &CustomCert{Name: name, CertPEM: string(certBytes), KeyPEM: string(keyBytes)}
+	if err := s.CreateCustomCert(c); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 func (s *Store) DeleteCustomCert(id int64) error {

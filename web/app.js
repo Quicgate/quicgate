@@ -21,7 +21,7 @@ $('btn-theme').addEventListener('click', () => {
 });
 
 /* ---- page nav ---- */
-const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', certs: 'btn-add-cert', settings: null };
+const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', certs: 'btn-add-cert', system: null, settings: null };
 function switchPage(name) {
   for (const b of $('pagenav').children) b.classList.toggle('is-active', b.dataset.page === name);
   for (const p of Object.keys(pages)) {
@@ -32,6 +32,7 @@ function switchPage(name) {
   if (name === 'access') refreshAcls();
   if (name === 'streams') refreshStreams();
   if (name === 'certs') refreshCustomCerts();
+  if (name === 'system') loadSystem();
   if (name === 'settings') loadSettings();
 }
 $('pagenav').addEventListener('click', (e) => {
@@ -94,10 +95,23 @@ $('login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   setError('login-error', null);
   try {
+    const code = $('login-totp') ? $('login-totp').value.trim() : '';
     const me = await api('POST', '/api/login', {
       email: $('login-email').value,
       password: $('login-password').value,
+      code,
     });
+    if (me.totpRequired) {
+      if (!$('login-totp')) {
+        const label = document.createElement('label');
+        label.className = 'field';
+        label.innerHTML = '<span>Authentication code</span><input id="login-totp" class="mono" placeholder="123456" autocomplete="one-time-code">';
+        $('login-error').before(label);
+      }
+      setError('login-error', new Error('Enter your 2FA code.'));
+      $('login-totp').focus();
+      return;
+    }
     afterLogin(me);
   } catch (err) {
     setError('login-error', err);
@@ -760,6 +774,46 @@ $('btn-add-cert').addEventListener('click', () => openCertModal(null));
 $('cert-modal-close').addEventListener('click', () => { $('cert-modal').hidden = true; });
 $('cert-btn-cancel').addEventListener('click', () => { $('cert-modal').hidden = true; });
 
+$('cert-tabs').addEventListener('click', (e) => {
+  const t = e.target.dataset.ctab;
+  if (!t) return;
+  for (const b of $('cert-tabs').children) b.classList.toggle('is-active', b.dataset.ctab === t);
+  $('cert-form').hidden = t !== 'upload';
+  $('cert-selfsigned-form').hidden = t !== 'selfsigned';
+});
+
+$('cert-selfsigned-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  setError('ss-error', null);
+  try {
+    await api('POST', '/api/custom-certs/self-signed', {
+      name: $('ss-name').value.trim(),
+      domains: $('ss-domains').value.split('\n').map((s) => s.trim()).filter(Boolean),
+      days: parseInt($('ss-days').value, 10) || 825,
+    });
+    $('cert-modal').hidden = true;
+    refreshCustomCerts();
+  } catch (err) { setError('ss-error', err); }
+});
+
+$('import-file').addEventListener('change', async () => {
+  const file = $('import-file').files[0];
+  if (!file) return;
+  const el = $('restore-status');
+  el.hidden = false;
+  el.textContent = 'Importing...';
+  try {
+    const text = await file.text();
+    const res = await fetch('/api/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    el.textContent = `Imported ${data.hosts || 0} hosts, ${data.accessLists || 0} access lists, ${data.streams || 0} streams.`;
+  } catch (err) {
+    el.textContent = 'Import failed: ' + err.message;
+  }
+  $('import-file').value = '';
+});
+
 $('cert-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   setError('cert-error', null);
@@ -772,6 +826,109 @@ $('cert-form').addEventListener('submit', async (e) => {
   } catch (err) {
     setError('cert-error', err);
   }
+});
+
+/* ---- system page ---- */
+function loadSystem() {
+  refreshLogs();
+  refreshEffConfig();
+  refreshTokens();
+  refresh2FA();
+}
+
+async function refreshLogs() {
+  const logs = await api('GET', '/api/logs?n=200').catch(() => []);
+  const body = $('logs-body');
+  body.innerHTML = '';
+  $('logs-empty').hidden = logs.length > 0;
+  for (const e of logs) {
+    const tr = document.createElement('tr');
+    const cls = e.status >= 500 ? 'badge--danger' : e.status >= 400 ? 'badge--danger' : 'badge--success';
+    tr.innerHTML =
+      `<td class="domain">${e.ts ? new Date(e.ts).toLocaleTimeString() : ''}</td>` +
+      `<td class="domain">${e.client_ip || ''}</td>` +
+      `<td class="domain">${e.host || ''}</td>` +
+      `<td class="domain">${e.method || ''} ${e.path || ''}</td>` +
+      `<td><span class="badge ${cls}">${e.status || ''}</span></td>` +
+      `<td class="domain">${e.dur_ms ?? ''}</td>`;
+    body.appendChild(tr);
+  }
+}
+$('btn-logs-refresh').addEventListener('click', refreshLogs);
+
+async function refreshEffConfig() {
+  const routes = (await api('GET', '/api/config').catch(() => [])) || [];
+  const body = $('effconfig-body');
+  body.innerHTML = '';
+  for (const r of routes.sort((a, b) => a.domain.localeCompare(b.domain))) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="domain">${r.domain}</td><td><span class="badge">${r.type}</span></td><td class="domain">${r.target || ''}</td>`;
+    body.appendChild(tr);
+  }
+}
+$('btn-config-refresh').addEventListener('click', refreshEffConfig);
+
+async function refreshTokens() {
+  const tokens = await api('GET', '/api/tokens').catch(() => []);
+  const body = $('tokens-body');
+  body.innerHTML = '';
+  for (const t of tokens) {
+    const tr = document.createElement('tr');
+    const td0 = document.createElement('td'); td0.textContent = t.name;
+    const td1 = document.createElement('td'); td1.className = 'domain'; td1.textContent = t.createdAt ? new Date(t.createdAt).toLocaleDateString() : '';
+    const td2 = document.createElement('td'); td2.style.textAlign = 'right';
+    const del = document.createElement('button');
+    del.className = 'btn btn--danger btn--sm'; del.textContent = 'Revoke';
+    del.addEventListener('click', async () => { await api('DELETE', `/api/tokens/${t.id}`); refreshTokens(); });
+    td2.appendChild(del);
+    tr.append(td0, td1, td2);
+    body.appendChild(tr);
+  }
+}
+$('btn-add-token').addEventListener('click', async () => {
+  const name = prompt('Token name (e.g. "ci-pipeline"):');
+  if (!name) return;
+  try {
+    const t = await api('POST', '/api/tokens', { name });
+    const el = $('new-token');
+    el.hidden = false;
+    el.textContent = `New token (copy now, shown once): ${t.token}`;
+    refreshTokens();
+  } catch (err) { alert(err.message); }
+});
+
+let pending2FASecret = null;
+async function refresh2FA() {
+  const me = await api('GET', '/api/me');
+  const el = $('twofa-status');
+  el.innerHTML = '';
+  setError('twofa-error', null);
+  $('twofa-setup').hidden = true;
+  if (me.totpEnabled) {
+    el.innerHTML = '<span class="badge badge--success">2FA enabled</span> ';
+    const btn = document.createElement('button');
+    btn.className = 'btn btn--danger btn--sm'; btn.textContent = 'Disable';
+    btn.addEventListener('click', async () => { await api('POST', '/api/2fa/disable'); refresh2FA(); });
+    el.appendChild(btn);
+  } else {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn--primary btn--sm'; btn.textContent = 'Enable 2FA';
+    btn.addEventListener('click', async () => {
+      const s = await api('POST', '/api/2fa/setup');
+      pending2FASecret = s.secret;
+      $('twofa-secret').textContent = s.secret;
+      $('twofa-setup').hidden = false;
+    });
+    el.appendChild(btn);
+  }
+}
+$('twofa-confirm').addEventListener('click', async () => {
+  setError('twofa-error', null);
+  try {
+    await api('POST', '/api/2fa/enable', { secret: pending2FASecret, code: $('twofa-code').value.trim() });
+    $('twofa-code').value = '';
+    refresh2FA();
+  } catch (err) { setError('twofa-error', err); }
 });
 
 /* ---- settings page ---- */
@@ -791,6 +948,7 @@ async function loadSettings() {
   const s = await api('GET', '/api/settings');
   $('set-acme-email').value = s.acme_email || '';
   $('set-acme-staging').checked = s.acme_staging === '1';
+  $('set-acme-ca-url').value = s.acme_ca_url || '';
   $('set-notify-url').value = s.notify_url || '';
   $('set-dns-provider').value = s.acme_dns_provider || '';
   $('set-dns-config').value = s.acme_dns_config || '';
@@ -825,6 +983,7 @@ $('settings-form').addEventListener('submit', async (e) => {
     await api('PUT', '/api/settings', {
       acme_email: $('set-acme-email').value.trim(),
       acme_staging: $('set-acme-staging').checked ? '1' : '0',
+      acme_ca_url: $('set-acme-ca-url').value.trim(),
       notify_url: $('set-notify-url').value.trim(),
       acme_dns_provider: $('set-dns-provider').value,
       acme_dns_config: $('set-dns-config').value.trim(),

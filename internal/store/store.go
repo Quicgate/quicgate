@@ -162,6 +162,7 @@ type User struct {
 	Email      string
 	Hash       string
 	MustChange bool
+	TOTPSecret string // empty = 2FA disabled
 }
 
 var domainRe = regexp.MustCompile(`^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?$|^localhost$`)
@@ -373,12 +374,16 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 		"ALTER TABLE hosts ADD COLUMN cert_id INTEGER",
 		"ALTER TABLE hosts ADD COLUMN upstreams TEXT NOT NULL DEFAULT '[]'",
 		"ALTER TABLE hosts ADD COLUMN static_root TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE users ADD COLUMN totp_secret TEXT NOT NULL DEFAULT ''",
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
 		}
 	}
-	return s.migrateCustomCerts()
+	if err := s.migrateCustomCerts(); err != nil {
+		return err
+	}
+	return s.migrateTokens()
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -505,10 +510,16 @@ func (s *Store) CountUsers() (int, error) {
 func (s *Store) GetUserByEmail(email string) (User, error) {
 	var u User
 	var mc int
-	err := s.db.QueryRow("SELECT id, email, hash, must_change FROM users WHERE email=?", strings.ToLower(email)).
-		Scan(&u.ID, &u.Email, &u.Hash, &mc)
+	err := s.db.QueryRow("SELECT id, email, hash, must_change, totp_secret FROM users WHERE email=?", strings.ToLower(email)).
+		Scan(&u.ID, &u.Email, &u.Hash, &mc, &u.TOTPSecret)
 	u.MustChange = mc == 1
 	return u, err
+}
+
+// SetTOTPSecret enables 2FA (secret set) or disables it (empty).
+func (s *Store) SetTOTPSecret(id int64, secret string) error {
+	_, err := s.db.Exec("UPDATE users SET totp_secret=? WHERE id=?", secret, id)
+	return err
 }
 
 func (s *Store) CreateUser(email, hash string, mustChange bool) error {

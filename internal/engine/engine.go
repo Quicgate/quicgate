@@ -77,6 +77,7 @@ type Engine struct {
 	acmeEmail     string
 	acmeDNS       string
 	acmeDNSConfig string
+	acmeCAURL     string
 	certs         *certTracker
 	accessLog     *accessLogger
 	health        *healthChecker
@@ -125,6 +126,9 @@ func (e *Engine) buildIssuer() {
 	if e.acmeStaging {
 		ca = certmagic.LetsEncryptStagingCA
 	}
+	if custom := e.store.GetSetting("acme_ca_url", ""); custom != "" {
+		ca = custom // ZeroSSL, Buypass, internal step-ca, etc.
+	}
 	tmpl := certmagic.ACMEIssuer{
 		CA:     ca,
 		Email:  e.acmeEmail,
@@ -167,10 +171,11 @@ func (e *Engine) applyACMESettings() {
 	email := e.store.GetSetting("acme_email", e.cfg.ACMEEmail)
 	dns := e.store.GetSetting("acme_dns_provider", "")
 	dnsConfig := e.store.GetSetting("acme_dns_config", "")
-	if staging == e.acmeStaging && email == e.acmeEmail && dns == e.acmeDNS && dnsConfig == e.acmeDNSConfig {
+	caURL := e.store.GetSetting("acme_ca_url", "")
+	if staging == e.acmeStaging && email == e.acmeEmail && dns == e.acmeDNS && dnsConfig == e.acmeDNSConfig && caURL == e.acmeCAURL {
 		return
 	}
-	e.acmeStaging, e.acmeEmail, e.acmeDNS, e.acmeDNSConfig = staging, email, dns, dnsConfig
+	e.acmeStaging, e.acmeEmail, e.acmeDNS, e.acmeDNSConfig, e.acmeCAURL = staging, email, dns, dnsConfig, caURL
 	e.buildIssuer()
 	log.Printf("engine: ACME settings changed (staging=%v, email=%q, dns=%q), issuer rebuilt", staging, email, dns)
 }
@@ -679,6 +684,45 @@ type CertStatus struct {
 
 // NotifyTest sends a test message to the configured webhook.
 func (e *Engine) NotifyTest() { e.certs.SendTest() }
+
+// EffectiveRoute summarizes one active route for the "applied config" viewer.
+type EffectiveRoute struct {
+	Domain   string `json:"domain"`
+	Type     string `json:"type"`
+	Target   string `json:"target"`
+	Wildcard bool   `json:"wildcard"`
+}
+
+// EffectiveConfig returns what the engine is actually serving right now,
+// proving stored config == applied config (no drift by construction).
+func (e *Engine) EffectiveConfig() []EffectiveRoute {
+	t := e.table.Load()
+	var out []EffectiveRoute
+	summ := func(domain string, r *route, wildcard bool) EffectiveRoute {
+		er := EffectiveRoute{Domain: domain, Type: r.host.Type, Wildcard: wildcard}
+		switch r.host.Type {
+		case "proxy":
+			er.Target = fmt.Sprintf("%s://%s:%d", r.host.Upstream.Scheme, r.host.Upstream.Host, r.host.Upstream.Port)
+			if len(r.host.Upstreams) > 0 {
+				er.Target += fmt.Sprintf(" (+%d pool)", len(r.host.Upstreams))
+			}
+		case "redirect":
+			if r.host.Redirect != nil {
+				er.Target = fmt.Sprintf("%d -> %s", r.host.Redirect.HTTPCode, r.host.Redirect.TargetHost)
+			}
+		case "static":
+			er.Target = r.host.StaticRoot
+		}
+		return er
+	}
+	for d, r := range t.exact {
+		out = append(out, summ(d, r, false))
+	}
+	for d, r := range t.wildcard {
+		out = append(out, summ("*."+d, r, true))
+	}
+	return out
+}
 
 // banConfig reads the auto-ban settings live from the store.
 func (e *Engine) banConfig() banConfig {

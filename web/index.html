@@ -48,6 +48,7 @@
         <button class="pagelink" data-page="access">Access Lists</button>
         <button class="pagelink" data-page="streams">Streams</button>
         <button class="pagelink" data-page="certs">Certificates</button>
+        <button class="pagelink" data-page="system">System</button>
         <button class="pagelink" data-page="settings">Settings</button>
       </nav>
     </div>
@@ -115,12 +116,57 @@
       </div>
     </div>
 
+    <div id="page-system" hidden>
+      <div class="card">
+        <div class="card-head"><h2>Access log</h2><button id="btn-logs-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
+        <table class="table" id="logs-table">
+          <thead><tr><th>Time</th><th>Client</th><th>Host</th><th>Request</th><th>Status</th><th>ms</th></tr></thead>
+          <tbody id="logs-body"></tbody>
+        </table>
+        <div id="logs-empty" class="empty" hidden>No log entries yet.</div>
+      </div>
+
+      <div class="card" style="margin-top:var(--sp-6)">
+        <div class="card-head"><h2>Effective configuration <em class="hs-muted" style="font-size:var(--fs-xs)">(what the engine is serving right now)</em></h2><button id="btn-config-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
+        <table class="table" id="effconfig-table">
+          <thead><tr><th>Domain</th><th>Type</th><th>Target</th></tr></thead>
+          <tbody id="effconfig-body"></tbody>
+        </table>
+      </div>
+
+      <div class="card" style="margin-top:var(--sp-6); max-width:640px">
+        <div class="card-head"><h2>API tokens</h2><button id="btn-add-token" class="btn btn--primary btn--sm">New token</button></div>
+        <p class="hs-muted">Long-lived bearer tokens for the API (<span class="mono">Authorization: Bearer &lt;token&gt;</span>). Shown once on creation.</p>
+        <div id="new-token" class="form-error" hidden style="color:var(--c-accent);background:var(--c-accent-bg)"></div>
+        <table class="table" id="tokens-table">
+          <thead><tr><th>Name</th><th>Created</th><th></th></tr></thead>
+          <tbody id="tokens-body"></tbody>
+        </table>
+      </div>
+
+      <div class="card" style="margin-top:var(--sp-6); max-width:560px">
+        <div class="card-head"><h2>Two-factor authentication</h2></div>
+        <div id="twofa-status"></div>
+        <div id="twofa-setup" hidden>
+          <p class="hs-muted">Scan this secret into your authenticator, then enter a code to confirm.</p>
+          <p class="mono" id="twofa-secret" style="word-break:break-all"></p>
+          <div class="field-row">
+            <label class="field field--sm"><span>Code</span><input id="twofa-code" class="mono" placeholder="123456"></label>
+            <button id="twofa-confirm" class="btn btn--primary" style="align-self:flex-end">Enable</button>
+          </div>
+        </div>
+        <div id="twofa-error" class="form-error" hidden></div>
+      </div>
+    </div>
+
     <div id="page-settings" hidden>
       <div class="card" style="max-width:560px">
         <div class="card-head"><h2>ACME / Let's Encrypt</h2></div>
         <form id="settings-form">
           <label class="field"><span>Account email</span><input id="set-acme-email" type="email" class="mono"></label>
           <label class="check"><input type="checkbox" id="set-acme-staging"><span>Use the staging CA <em>(test certs, no rate limits; browsers will warn)</em></span></label>
+          <label class="field"><span>Custom ACME directory URL <em>(blank = Let's Encrypt; e.g. ZeroSSL, step-ca)</em></span>
+            <input id="set-acme-ca-url" type="url" class="mono" placeholder="https://acme.zerossl.com/v2/DV90"></label>
           <label class="field field--sm"><span>DNS provider <em>(for wildcard certs)</em></span>
             <select id="set-dns-provider"><option value="">None (HTTP-01)</option><option value="transip">TransIP (DNS-01)</option></select></label>
           <label class="field" id="dns-config-field" hidden><span>TransIP credentials <em>(JSON: {"login":"...","private_key":"..."})</em></span>
@@ -171,6 +217,7 @@
         <div class="modal-actions" style="justify-content:flex-start">
           <a class="btn btn--primary" href="/api/backup" download>Download backup</a>
           <label class="btn btn--secondary" style="cursor:pointer">Restore from file<input id="restore-file" type="file" accept=".gz,.tgz,application/gzip" hidden></label>
+          <label class="btn btn--secondary" style="cursor:pointer">Import config (JSON)<input id="import-file" type="file" accept=".json,application/json" hidden></label>
         </div>
         <div id="restore-status" class="form-error" hidden></div>
       </div>
@@ -241,6 +288,17 @@
 <div id="cert-modal" class="modal-backdrop" hidden>
   <div class="modal card">
     <div class="card-head"><h2 id="cert-modal-title">Upload certificate</h2><button id="cert-modal-close" class="btn btn--ghost btn--sm">&times;</button></div>
+    <nav class="tabs" id="cert-tabs">
+      <button type="button" class="tab is-active" data-ctab="upload">Upload PEM</button>
+      <button type="button" class="tab" data-ctab="selfsigned">Self-signed</button>
+    </nav>
+    <form id="cert-selfsigned-form" hidden>
+      <label class="field"><span>Name</span><input id="ss-name" required></label>
+      <label class="field"><span>Domains <em>(one per line; IPs allowed)</em></span><textarea id="ss-domains" rows="3" class="mono" required placeholder="app.lan&#10;192.168.1.10"></textarea></label>
+      <label class="field field--sm"><span>Valid days</span><input id="ss-days" type="number" value="825"></label>
+      <div id="ss-error" class="form-error" hidden></div>
+      <div class="modal-actions"><button type="submit" class="btn btn--primary">Generate</button></div>
+    </form>
     <form id="cert-form">
       <label class="field"><span>Name</span><input id="c-name" required></label>
       <label class="field"><span>Certificate (PEM, full chain)</span>

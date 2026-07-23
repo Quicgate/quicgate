@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 
 	"quicgate/internal/engine"
@@ -94,6 +95,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/streams", s.auth(s.handleCreateStream))
 	mux.HandleFunc("PUT /api/streams/{id}", s.auth(s.handleUpdateStream))
 	mux.HandleFunc("DELETE /api/streams/{id}", s.auth(s.handleDeleteStream))
+	mux.HandleFunc("GET /api/tokens", s.auth(s.handleListTokens))
+	mux.HandleFunc("POST /api/tokens", s.auth(s.handleCreateToken))
+	mux.HandleFunc("DELETE /api/tokens/{id}", s.auth(s.handleDeleteToken))
+	mux.HandleFunc("POST /api/2fa/setup", s.auth(s.handle2FASetup))
+	mux.HandleFunc("POST /api/2fa/enable", s.auth(s.handle2FAEnable))
+	mux.HandleFunc("POST /api/2fa/disable", s.auth(s.handle2FADisable))
+	mux.HandleFunc("GET /api/logs", s.auth(s.handleLogs))
+	mux.HandleFunc("GET /api/config", s.auth(s.handleEffectiveConfig))
+	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
+	mux.HandleFunc("POST /api/custom-certs/self-signed", s.auth(s.handleSelfSignedCert))
+	mux.HandleFunc("POST /api/custom-certs/from-file", s.auth(s.handleCertFromFile))
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		w.Write([]byte(s.engine.MetricsText()))
+	})
 	mux.Handle("/", http.FileServerFS(s.webFS))
 	return mux
 }
@@ -112,6 +128,7 @@ var settingsKeys = map[string]bool{
 	"default_site_value": true, // custom HTML or redirect URL
 	"acme_dns_provider":  true, // "" | transip  (DNS-01 for wildcards)
 	"acme_dns_config":    true, // provider credentials (JSON)
+	"acme_ca_url":        true, // custom ACME directory (ZeroSSL/step-ca)
 	"ban_enabled":        true, // "1" = auto-ban on repeated auth failures
 	"ban_threshold":      true,
 	"ban_window_sec":     true,
@@ -305,6 +322,15 @@ const sessionKey ctxKey = 0
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// API-token bearer auth for automation (no session/2FA needed).
+		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			if s.store.ValidAPIToken(strings.TrimPrefix(h, "Bearer ")) {
+				next(w, r.WithContext(context.WithValue(r.Context(), sessionKey, session{email: "api-token"})))
+				return
+			}
+			writeErr(w, http.StatusUnauthorized, "invalid API token")
+			return
+		}
 		c, err := r.Cookie("qg_session")
 		if err != nil {
 			writeErr(w, http.StatusUnauthorized, "not logged in")
@@ -326,7 +352,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Email, Password string }
+	var body struct{ Email, Password, Code string }
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json")
 		return
@@ -336,6 +362,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(400 * time.Millisecond) // flat cost for wrong email and wrong password alike
 		writeErr(w, http.StatusUnauthorized, "invalid credentials")
 		return
+	}
+	// Second factor, when enabled.
+	if u.TOTPSecret != "" {
+		if body.Code == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"totpRequired": true})
+			return
+		}
+		if !totp.Validate(body.Code, u.TOTPSecret) {
+			writeErr(w, http.StatusUnauthorized, "invalid authentication code")
+			return
+		}
 	}
 	tok := make([]byte, 32)
 	if _, err := rand.Read(tok); err != nil {
@@ -370,7 +407,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"email": u.Email, "mustChange": u.MustChange})
+	writeJSON(w, http.StatusOK, map[string]any{"email": u.Email, "mustChange": u.MustChange, "totpEnabled": u.TOTPSecret != ""})
 }
 
 func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
