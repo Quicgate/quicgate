@@ -388,10 +388,12 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 			if rewrite != nil {
 				pr.Out.URL.Path = rewrite.apply(pr.Out.URL.Path)
 			}
-			if o.PreserveHost {
-				pr.Out.Host = pr.In.Host
-			} else if o.HostOverride != "" {
+			// Preserve the client's Host header by default (like Traefik/nginx
+			// proxy_set_header Host $host) so host-validating backends work.
+			if o.HostOverride != "" {
 				pr.Out.Host = o.HostOverride
+			} else {
+				pr.Out.Host = pr.In.Host
 			}
 			applyHeaderRules(pr.Out.Header, o.RequestHeaders, pr.In)
 		},
@@ -484,6 +486,7 @@ func (e *Engine) locationDispatcher(h store.Host, def http.Handler, transport *h
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.SetURL(target)
 				pr.SetXForwarded()
+				pr.Out.Host = pr.In.Host
 				if rw != nil {
 					pr.Out.URL.Path = rw.apply(pr.Out.URL.Path)
 				}
