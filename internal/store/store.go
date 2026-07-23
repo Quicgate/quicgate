@@ -429,3 +429,36 @@ func (s *Store) SetSetting(key, value string) error {
 		key, value)
 	return err
 }
+
+// Snapshot writes a consistent copy of the database to path.
+func (s *Store) Snapshot(path string) error {
+	_, err := s.db.Exec("VACUUM INTO ?", path)
+	return err
+}
+
+var backupTables = []string{"hosts", "users", "access_lists", "streams", "settings"}
+
+// RestoreFrom replaces all configuration with the contents of the snapshot
+// database at dbPath, atomically. Fails cleanly (nothing changed) when the
+// snapshot's schema does not match this binary's.
+func (s *Store) RestoreFrom(dbPath string) error {
+	if _, err := s.db.Exec("ATTACH ? AS backup", dbPath); err != nil {
+		return fmt.Errorf("open snapshot: %w", err)
+	}
+	defer s.db.Exec("DETACH backup")
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, t := range backupTables {
+		if _, err := tx.Exec("DELETE FROM " + t); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if _, err := tx.Exec("INSERT INTO " + t + " SELECT * FROM backup." + t); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("restore %s (schema mismatch between backup and this version?): %w", t, err)
+		}
+	}
+	return tx.Commit()
+}

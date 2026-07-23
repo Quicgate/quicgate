@@ -205,9 +205,13 @@ async function refreshCerts() {
   $('certs-empty').hidden = certs.length > 0;
   for (const c of certs) {
     const tr = document.createElement('tr');
-    const badgeClass = c.status === 'issued' ? 'badge badge--success' : 'badge';
+    const badgeClass = c.status === 'issued' ? 'badge badge--success'
+      : c.status === 'failed' ? 'badge badge--danger' : 'badge';
+    const detail = c.lastError
+      ? `<div class="hs-muted" style="font-size:var(--fs-xs)" title="${c.lastError.replace(/"/g, '&quot;')}">last error: ${c.lastError.slice(0, 90)}</div>`
+      : '';
     tr.innerHTML = `<td class="domain">${c.domain}</td>` +
-      `<td><span class="${badgeClass}">${c.status}</span></td>` +
+      `<td><span class="${badgeClass}">${c.status}</span>${detail}</td>` +
       `<td class="domain">${c.notAfter ? new Date(c.notAfter).toLocaleString() : '-'}</td>`;
     body.appendChild(tr);
   }
@@ -586,6 +590,7 @@ async function loadSettings() {
   const s = await api('GET', '/api/settings');
   $('set-acme-email').value = s.acme_email || '';
   $('set-acme-staging').checked = s.acme_staging === '1';
+  $('set-notify-url').value = s.notify_url || '';
 }
 
 $('settings-form').addEventListener('submit', async (e) => {
@@ -595,10 +600,43 @@ $('settings-form').addEventListener('submit', async (e) => {
     await api('PUT', '/api/settings', {
       acme_email: $('set-acme-email').value.trim(),
       acme_staging: $('set-acme-staging').checked ? '1' : '0',
+      notify_url: $('set-notify-url').value.trim(),
     });
   } catch (err) {
     setError('settings-error', err);
   }
+});
+
+$('btn-notify-test').addEventListener('click', async () => {
+  setError('settings-error', null);
+  try {
+    await api('PUT', '/api/settings', { notify_url: $('set-notify-url').value.trim() });
+    await api('POST', '/api/notify-test');
+    setError('settings-error', 'Test alert sent (check your notification channel).');
+  } catch (err) {
+    setError('settings-error', err);
+  }
+});
+
+$('restore-file').addEventListener('change', async () => {
+  const file = $('restore-file').files[0];
+  if (!file) return;
+  if (!confirm('Restore this backup? ALL current configuration, users and certificates will be replaced.')) {
+    $('restore-file').value = '';
+    return;
+  }
+  const el = $('restore-status');
+  el.hidden = false;
+  el.textContent = 'Restoring...';
+  try {
+    const res = await fetch('/api/restore', { method: 'POST', body: file });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    el.textContent = 'Restored. The restored admin credentials now apply; you may need to sign in again.';
+  } catch (err) {
+    el.textContent = 'Restore failed: ' + err.message;
+  }
+  $('restore-file').value = '';
 });
 
 boot();

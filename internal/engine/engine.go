@@ -70,12 +70,16 @@ type Engine struct {
 
 	acmeStaging bool
 	acmeEmail   string
+	certs       *certTracker
+	accessLog   *accessLogger
 }
 
 func New(cfg Config, st *store.Store) *Engine {
 	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager()}
 	e.acmeStaging = cfg.ACMEStage
 	e.acmeEmail = cfg.ACMEEmail
+	e.certs = newCertTracker(func() string { return st.GetSetting("notify_url", "") })
+	e.accessLog = newAccessLogger(cfg.DataDir)
 	if cfg.UPnP {
 		e.upnp = NewUPnPManager(3600)
 	}
@@ -86,6 +90,7 @@ func New(cfg Config, st *store.Store) *Engine {
 	})
 	e.magic = certmagic.New(cache, certmagic.Config{
 		Storage: &certmagic.FileStorage{Path: cfg.DataDir + "/certs"},
+		OnEvent: e.certs.handle,
 		OnDemand: &certmagic.OnDemandConfig{
 			DecisionFunc: func(ctx context.Context, name string) error {
 				if r := e.table.Load().lookup(name); r != nil && r.host.Enabled && r.host.CertMode == "auto" {
@@ -398,7 +403,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		return err
 	}
 
-	httpHandler := e.acme.HTTPChallengeHandler(http.HandlerFunc(e.serveHTTP))
+	httpHandler := e.acme.HTTPChallengeHandler(e.accessLog.wrap(e.serveHTTP))
 	httpSrv := &http.Server{Addr: e.cfg.HTTPAddr, Handler: httpHandler, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 3)
 	go func() { errCh <- fmt.Errorf("http listener: %w", httpSrv.ListenAndServe()) }()
@@ -407,9 +412,10 @@ func (e *Engine) Run(ctx context.Context) error {
 	var httpsSrv *http.Server
 	if !e.cfg.DisableTLS {
 		tlsCfg := e.tlsConfig()
+		httpsHandler := e.accessLog.wrap(e.serveHTTPS)
 		httpsSrv = &http.Server{
 			Addr:              e.cfg.HTTPSAddr,
-			Handler:           http.HandlerFunc(e.serveHTTPS),
+			Handler:           httpsHandler,
 			TLSConfig:         tlsCfg,
 			ReadHeaderTimeout: 10 * time.Second,
 		}
@@ -417,7 +423,7 @@ func (e *Engine) Run(ctx context.Context) error {
 
 		e.h3 = &http3.Server{
 			Addr:      e.cfg.HTTPSAddr,
-			Handler:   http.HandlerFunc(e.serveHTTPS),
+			Handler:   httpsHandler,
 			TLSConfig: http3.ConfigureTLSConfig(tlsCfg),
 		}
 		go func() { errCh <- fmt.Errorf("http3 listener: %w", e.h3.ListenAndServe()) }()
@@ -471,10 +477,15 @@ func (e *Engine) ReservedPorts() []int {
 
 // CertStatus reports the state of the managed certificate for one domain.
 type CertStatus struct {
-	Domain   string `json:"domain"`
-	Status   string `json:"status"` // issued | pending | none
-	NotAfter string `json:"notAfter,omitempty"`
+	Domain    string `json:"domain"`
+	Status    string `json:"status"` // issued | pending | failed
+	NotAfter  string `json:"notAfter,omitempty"`
+	LastError string `json:"lastError,omitempty"`
+	ErrorAt   string `json:"errorAt,omitempty"`
 }
+
+// NotifyTest sends a test message to the configured webhook.
+func (e *Engine) NotifyTest() { e.certs.SendTest() }
 
 // CertStatuses inspects certmagic storage for every auto-TLS domain.
 func (e *Engine) CertStatuses(ctx context.Context) []CertStatus {
@@ -490,6 +501,13 @@ func (e *Engine) CertStatuses(ctx context.Context) []CertStatus {
 		if cert, err := e.magic.CacheManagedCertificate(ctx, domain); err == nil && cert.Leaf != nil {
 			st.Status = "issued"
 			st.NotAfter = cert.Leaf.NotAfter.UTC().Format(time.RFC3339)
+		}
+		if ev, ok := e.certs.get(domain); ok && !ev.OK {
+			if st.Status == "pending" {
+				st.Status = "failed"
+			}
+			st.LastError = firstLine(ev.Error)
+			st.ErrorAt = ev.At.UTC().Format(time.RFC3339)
 		}
 		out = append(out, st)
 	}

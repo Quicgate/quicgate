@@ -34,12 +34,13 @@ type Server struct {
 	store    *store.Store
 	engine   *engine.Engine
 	webFS    fs.FS
+	dataDir  string
 	mu       sync.Mutex
 	sessions map[string]session
 }
 
-func New(st *store.Store, eng *engine.Engine, webFS fs.FS) *Server {
-	return &Server{store: st, engine: eng, webFS: webFS, sessions: map[string]session{}}
+func New(st *store.Store, eng *engine.Engine, webFS fs.FS, dataDir string) *Server {
+	return &Server{store: st, engine: eng, webFS: webFS, dataDir: dataDir, sessions: map[string]session{}}
 }
 
 // EnsureAdmin seeds the NPM-style default admin on first run.
@@ -76,6 +77,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/access-lists/{id}", s.auth(s.handleDeleteAccessList))
 	mux.HandleFunc("GET /api/settings", s.auth(s.handleGetSettings))
 	mux.HandleFunc("PUT /api/settings", s.auth(s.handlePutSettings))
+	mux.HandleFunc("GET /api/backup", s.auth(s.handleBackup))
+	mux.HandleFunc("POST /api/restore", s.auth(s.handleRestore))
+	mux.HandleFunc("POST /api/notify-test", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		s.engine.NotifyTest()
+		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+	}))
 	mux.HandleFunc("GET /api/streams", s.auth(s.handleListStreams))
 	mux.HandleFunc("POST /api/streams", s.auth(s.handleCreateStream))
 	mux.HandleFunc("PUT /api/streams/{id}", s.auth(s.handleUpdateStream))
@@ -93,6 +100,7 @@ func pathID(r *http.Request) (int64, error) {
 var settingsKeys = map[string]bool{
 	"acme_staging": true, // "1" = Let's Encrypt staging CA
 	"acme_email":   true,
+	"notify_url":   true, // webhook (ntfy/Gotify style) for failure alerts
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {

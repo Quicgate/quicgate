@@ -54,7 +54,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("web assets: %v", err)
 	}
-	adm := admin.New(st, eng, webFS)
+	adm := admin.New(st, eng, webFS, dataDir)
 	if err := adm.EnsureAdmin(); err != nil {
 		log.Fatalf("admin seed: %v", err)
 	}
