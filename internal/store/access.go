@@ -206,6 +206,20 @@ func (st *Stream) Validate(others []Stream, reserved []int) error {
 	if st.ForwardPort < 1 || st.ForwardPort > 65535 {
 		return fmt.Errorf("forward port %d out of range", st.ForwardPort)
 	}
+	for i, c := range st.AllowedCIDRs {
+		cidr := strings.TrimSpace(c)
+		if !strings.Contains(cidr, "/") {
+			if strings.Contains(cidr, ":") {
+				cidr += "/128"
+			} else {
+				cidr += "/32"
+			}
+		}
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return fmt.Errorf("allowed CIDR %d: invalid %q", i+1, c)
+		}
+		st.AllowedCIDRs[i] = cidr
+	}
 	overlaps := func(a, b string) bool { return a == "both" || b == "both" || a == b }
 	for _, o := range others {
 		if o.ID != st.ID && o.ListenPort == st.ListenPort && overlaps(o.Protocol, st.Protocol) {
@@ -218,12 +232,17 @@ func (st *Stream) Validate(others []Stream, reserved []int) error {
 func scanStream(row interface{ Scan(...any) error }) (Stream, error) {
 	var st Stream
 	var enabled int
-	err := row.Scan(&st.ID, &st.ListenPort, &st.Protocol, &st.ForwardHost, &st.ForwardPort, &enabled, &st.CreatedAt, &st.UpdatedAt)
+	var cidrs string
+	err := row.Scan(&st.ID, &st.ListenPort, &st.Protocol, &st.ForwardHost, &st.ForwardPort, &enabled, &st.CreatedAt, &st.UpdatedAt, &cidrs)
+	if err != nil {
+		return st, err
+	}
 	st.Enabled = enabled == 1
+	err = json.Unmarshal([]byte(cidrs), &st.AllowedCIDRs)
 	return st, err
 }
 
-const streamCols = "id, listen_port, protocol, fwd_host, fwd_port, enabled, created_at, updated_at"
+const streamCols = "id, listen_port, protocol, fwd_host, fwd_port, enabled, created_at, updated_at, allowed_cidrs"
 
 func (s *Store) ListStreams() ([]Stream, error) {
 	rows, err := s.db.Query("SELECT " + streamCols + " FROM streams ORDER BY listen_port")
@@ -251,8 +270,9 @@ func (s *Store) CreateStream(st *Stream, reserved []int) error {
 		return err
 	}
 	st.CreatedAt, st.UpdatedAt = now(), now()
-	res, err := s.db.Exec("INSERT INTO streams (listen_port, protocol, fwd_host, fwd_port, enabled, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-		st.ListenPort, st.Protocol, st.ForwardHost, st.ForwardPort, b2i(st.Enabled), st.CreatedAt, st.UpdatedAt)
+	cidrs, _ := json.Marshal(st.AllowedCIDRs)
+	res, err := s.db.Exec("INSERT INTO streams (listen_port, protocol, fwd_host, fwd_port, enabled, created_at, updated_at, allowed_cidrs) VALUES (?,?,?,?,?,?,?,?)",
+		st.ListenPort, st.Protocol, st.ForwardHost, st.ForwardPort, b2i(st.Enabled), st.CreatedAt, st.UpdatedAt, string(cidrs))
 	if err != nil {
 		return err
 	}
@@ -269,8 +289,9 @@ func (s *Store) UpdateStream(st *Stream, reserved []int) error {
 		return err
 	}
 	st.UpdatedAt = now()
-	res, err := s.db.Exec("UPDATE streams SET listen_port=?, protocol=?, fwd_host=?, fwd_port=?, enabled=?, updated_at=? WHERE id=?",
-		st.ListenPort, st.Protocol, st.ForwardHost, st.ForwardPort, b2i(st.Enabled), st.UpdatedAt, st.ID)
+	cidrs, _ := json.Marshal(st.AllowedCIDRs)
+	res, err := s.db.Exec("UPDATE streams SET listen_port=?, protocol=?, fwd_host=?, fwd_port=?, enabled=?, updated_at=?, allowed_cidrs=? WHERE id=?",
+		st.ListenPort, st.Protocol, st.ForwardHost, st.ForwardPort, b2i(st.Enabled), st.UpdatedAt, string(cidrs), st.ID)
 	if err != nil {
 		return err
 	}

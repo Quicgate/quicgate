@@ -93,7 +93,7 @@
     <div id="page-streams" hidden>
       <div class="card">
         <table class="table" id="streams-table">
-          <thead><tr><th>Listen</th><th>Protocol</th><th>Forward to</th><th>Enabled</th><th></th></tr></thead>
+          <thead><tr><th>Listen</th><th>Protocol</th><th>Forward to</th><th>Sources</th><th>Enabled</th><th></th></tr></thead>
           <tbody id="streams-body"></tbody>
         </table>
         <div id="streams-empty" class="empty" hidden>No streams. Add a TCP/UDP port forward.</div>
@@ -149,6 +149,8 @@
         <label class="field"><span>Forward host / IP</span><input id="s-fhost" class="mono" required></label>
         <label class="field field--sm"><span>Forward port</span><input id="s-fport" type="number" min="1" max="65535" required></label>
       </div>
+      <label class="field"><span>Allowed source IPs / CIDRs <em>(one per line, empty = anyone; UPnP may expose this port to the internet)</em></span>
+        <textarea id="s-cidrs" rows="3" class="mono" placeholder="192.168.178.0/24&#10;77.60.160.80/28"></textarea></label>
       <label class="check"><input type="checkbox" id="s-enabled" checked><span>Enabled</span></label>
       <div id="stream-error" class="form-error" hidden></div>
       <div class="modal-actions">

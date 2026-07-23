@@ -97,16 +97,19 @@ type AccessList struct {
 	Users    []AccessUser `json:"users"`
 }
 
-// Stream is one TCP/UDP port forward.
+// Stream is one TCP/UDP port forward. AllowedCIDRs is a source whitelist:
+// empty = anyone (needed since UPnP may expose the port to the WAN),
+// non-empty = only matching sources, everything else dropped at accept time.
 type Stream struct {
-	ID          int64  `json:"id"`
-	ListenPort  int    `json:"listenPort"`
-	Protocol    string `json:"protocol"` // tcp | udp | both
-	ForwardHost string `json:"forwardHost"`
-	ForwardPort int    `json:"forwardPort"`
-	Enabled     bool   `json:"enabled"`
-	CreatedAt   string `json:"createdAt,omitempty"`
-	UpdatedAt   string `json:"updatedAt,omitempty"`
+	ID           int64    `json:"id"`
+	ListenPort   int      `json:"listenPort"`
+	Protocol     string   `json:"protocol"` // tcp | udp | both
+	ForwardHost  string   `json:"forwardHost"`
+	ForwardPort  int      `json:"forwardPort"`
+	AllowedCIDRs []string `json:"allowedCidrs"`
+	Enabled      bool     `json:"enabled"`
+	CreatedAt    string   `json:"createdAt,omitempty"`
+	UpdatedAt    string   `json:"updatedAt,omitempty"`
 }
 
 type User struct {
@@ -247,10 +250,14 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 	if err != nil {
 		return err
 	}
-	// Pre-M2 databases lack the access_list_id column; duplicate-column is fine.
-	if _, err := s.db.Exec("ALTER TABLE hosts ADD COLUMN access_list_id INTEGER"); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column") {
-		return err
+	// Older databases lack later columns; duplicate-column errors are fine.
+	for _, stmt := range []string{
+		"ALTER TABLE hosts ADD COLUMN access_list_id INTEGER",
+		"ALTER TABLE streams ADD COLUMN allowed_cidrs TEXT NOT NULL DEFAULT '[]'",
+	} {
+		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
 	}
 	return nil
 }

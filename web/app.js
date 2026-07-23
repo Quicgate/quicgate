@@ -470,6 +470,11 @@ async function refreshStreams() {
     const tdFwd = document.createElement('td');
     tdFwd.className = 'domain';
     tdFwd.textContent = `${s.forwardHost}:${s.forwardPort}`;
+    const tdSources = document.createElement('td');
+    const nCidrs = (s.allowedCidrs || []).length;
+    tdSources.innerHTML = nCidrs
+      ? `<span class="badge badge--success">${nCidrs} CIDR${nCidrs > 1 ? 's' : ''}</span>`
+      : '<span class="badge badge--danger">open</span>';
     const tdEnabled = document.createElement('td');
     const sw = document.createElement('label');
     sw.className = 'switch';
@@ -502,7 +507,7 @@ async function refreshStreams() {
       refreshStreams();
     });
     tdActions.append(btnEdit, btnDel);
-    tr.append(tdListen, tdProto, tdFwd, tdEnabled, tdActions);
+    tr.append(tdListen, tdProto, tdFwd, tdSources, tdEnabled, tdActions);
     body.appendChild(tr);
   }
 }
@@ -515,6 +520,7 @@ function openStreamModal(s) {
   $('s-proto').value = s ? s.protocol : 'tcp';
   $('s-fhost').value = s ? s.forwardHost : '';
   $('s-fport').value = s ? s.forwardPort : '';
+  $('s-cidrs').value = s && s.allowedCidrs ? s.allowedCidrs.join('\n') : '';
   $('s-enabled').checked = s ? s.enabled : true;
   $('stream-modal').hidden = false;
 }
@@ -531,6 +537,7 @@ $('stream-form').addEventListener('submit', async (e) => {
     protocol: $('s-proto').value,
     forwardHost: $('s-fhost').value.trim(),
     forwardPort: parseInt($('s-fport').value, 10),
+    allowedCidrs: $('s-cidrs').value.split('\n').map((v) => v.trim()).filter(Boolean),
     enabled: $('s-enabled').checked,
   };
   try {

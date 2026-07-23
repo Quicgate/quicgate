@@ -26,45 +26,84 @@ func NewStreamManager() *StreamManager {
 type forwarder struct {
 	key    string
 	target string
+	sig    string
 	stop   func()
+}
+
+// streamSpec is the desired state of one forwarder; sig detects any change
+// (target or source whitelist) that requires a listener restart.
+type streamSpec struct {
+	target string
+	nets   []*net.IPNet
+	sig    string
+}
+
+// allowed reports whether a source address passes the whitelist.
+// No whitelist means everyone; malformed addresses never pass a whitelist.
+func (sp *streamSpec) allowed(addr net.Addr) bool {
+	if len(sp.nets) == 0 {
+		return true
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, n := range sp.nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // Sync starts/stops forwarders so the running set matches the store.
 func (m *StreamManager) Sync(streams []store.Stream) {
-	desired := map[string]string{} // key -> target
+	desired := map[string]*streamSpec{}
 	for _, s := range streams {
 		if !s.Enabled {
 			continue
 		}
-		target := fmt.Sprintf("%s:%d", s.ForwardHost, s.ForwardPort)
+		spec := &streamSpec{
+			target: fmt.Sprintf("%s:%d", s.ForwardHost, s.ForwardPort),
+			sig:    fmt.Sprintf("%s:%d|%v", s.ForwardHost, s.ForwardPort, s.AllowedCIDRs),
+		}
+		for _, c := range s.AllowedCIDRs {
+			if _, n, err := net.ParseCIDR(c); err == nil {
+				spec.nets = append(spec.nets, n)
+			}
+		}
 		protos := []string{s.Protocol}
 		if s.Protocol == "both" {
 			protos = []string{"tcp", "udp"}
 		}
 		for _, p := range protos {
-			desired[fmt.Sprintf("%s:%d", p, s.ListenPort)] = target
+			desired[fmt.Sprintf("%s:%d", p, s.ListenPort)] = spec
 		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for key, f := range m.active {
-		if desired[key] != f.target {
+		if spec, ok := desired[key]; !ok || spec.sig != f.sig {
 			f.stop()
 			delete(m.active, key)
 			log.Printf("stream: stopped %s -> %s", key, f.target)
 		}
 	}
-	for key, target := range desired {
+	for key, spec := range desired {
 		if _, running := m.active[key]; running {
 			continue
 		}
-		f, err := startForwarder(key, target)
+		f, err := startForwarder(key, spec)
 		if err != nil {
-			log.Printf("stream: cannot start %s -> %s: %v", key, target, err)
+			log.Printf("stream: cannot start %s -> %s: %v", key, spec.target, err)
 			continue
 		}
 		m.active[key] = f
-		log.Printf("stream: started %s -> %s", key, target)
+		log.Printf("stream: started %s -> %s (whitelist: %d rules)", key, spec.target, len(spec.nets))
 	}
 }
 
@@ -77,7 +116,7 @@ func (m *StreamManager) StopAll() {
 	}
 }
 
-func startForwarder(key, target string) (*forwarder, error) {
+func startForwarder(key string, spec *streamSpec) (*forwarder, error) {
 	var proto string
 	var port string
 	if _, err := fmt.Sscanf(key, "tcp:%s", &port); err == nil {
@@ -89,12 +128,12 @@ func startForwarder(key, target string) (*forwarder, error) {
 	}
 	addr := ":" + port
 	if proto == "tcp" {
-		return startTCP(key, addr, target)
+		return startTCP(key, addr, spec)
 	}
-	return startUDP(key, addr, target)
+	return startUDP(key, addr, spec)
 }
 
-func startTCP(key, addr, target string) (*forwarder, error) {
+func startTCP(key, addr string, spec *streamSpec) (*forwarder, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -112,10 +151,15 @@ func startTCP(key, addr, target string) (*forwarder, error) {
 					return
 				}
 			}
-			go pumpTCP(key, conn, target)
+			if !spec.allowed(conn.RemoteAddr()) {
+				log.Printf("stream %s: refused %s (not in whitelist)", key, conn.RemoteAddr())
+				conn.Close()
+				continue
+			}
+			go pumpTCP(key, conn, spec.target)
 		}
 	}()
-	return &forwarder{key: key, target: target, stop: func() { close(done); ln.Close() }}, nil
+	return &forwarder{key: key, target: spec.target, sig: spec.sig, stop: func() { close(done); ln.Close() }}, nil
 }
 
 func pumpTCP(key string, client net.Conn, target string) {
@@ -141,7 +185,8 @@ type udpSession struct {
 	lastSeen time.Time
 }
 
-func startUDP(key, addr, target string) (*forwarder, error) {
+func startUDP(key, addr string, spec *streamSpec) (*forwarder, error) {
+	target := spec.target
 	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		return nil, err
@@ -183,6 +228,9 @@ func startUDP(key, addr, target string) (*forwarder, error) {
 				}
 				return
 			}
+			if !spec.allowed(clientAddr) {
+				continue // silent drop: logging per scan packet would flood
+			}
 			ck := clientAddr.String()
 			mu.Lock()
 			sess, ok := sessions[ck]
@@ -219,7 +267,7 @@ func startUDP(key, addr, target string) (*forwarder, error) {
 			_, _ = sess.conn.Write(buf[:n])
 		}
 	}()
-	return &forwarder{key: key, target: target, stop: func() {
+	return &forwarder{key: key, target: target, sig: spec.sig, stop: func() {
 		close(done)
 		pc.Close()
 		mu.Lock()
