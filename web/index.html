@@ -41,34 +41,122 @@
 <!-- main app -->
 <div id="view-app" hidden>
   <header class="topbar">
-    <div class="topbar__brand"><span class="hs-kicker">quicgate</span><span class="topbar__title">Proxy Hosts</span></div>
+    <div class="topbar__brand">
+      <span class="hs-kicker">quicgate</span>
+      <nav class="pagenav" id="pagenav">
+        <button class="pagelink is-active" data-page="hosts">Proxy Hosts</button>
+        <button class="pagelink" data-page="access">Access Lists</button>
+        <button class="pagelink" data-page="streams">Streams</button>
+      </nav>
+    </div>
     <div class="topbar__actions">
       <span id="me-email" class="hs-muted mono"></span>
       <button id="btn-logout" class="btn btn--ghost btn--sm">Sign out</button>
       <button id="btn-add" class="btn btn--primary">Add proxy host</button>
+      <button id="btn-add-acl" class="btn btn--primary" hidden>Add access list</button>
+      <button id="btn-add-stream" class="btn btn--primary" hidden>Add stream</button>
     </div>
   </header>
 
   <main class="page">
-    <div class="card">
-      <table class="table" id="hosts-table">
-        <thead><tr>
-          <th>Domains</th><th>Upstream</th><th>TLS</th><th>Enabled</th><th></th>
-        </tr></thead>
-        <tbody id="hosts-body"></tbody>
-      </table>
-      <div id="hosts-empty" class="empty" hidden>No proxy hosts yet. Add the first one.</div>
+    <div id="page-hosts">
+      <div class="card">
+        <table class="table" id="hosts-table">
+          <thead><tr>
+            <th>Domains</th><th>Upstream</th><th>TLS</th><th>Access</th><th>Enabled</th><th></th>
+          </tr></thead>
+          <tbody id="hosts-body"></tbody>
+        </table>
+        <div id="hosts-empty" class="empty" hidden>No proxy hosts yet. Add the first one.</div>
+      </div>
+
+      <div class="card" style="margin-top:var(--sp-6)">
+        <div class="card-head"><h2>Certificates</h2><button id="btn-certs-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
+        <table class="table" id="certs-table">
+          <thead><tr><th>Domain</th><th>Status</th><th>Expires</th></tr></thead>
+          <tbody id="certs-body"></tbody>
+        </table>
+        <div id="certs-empty" class="empty" hidden>No managed certificates.</div>
+      </div>
     </div>
 
-    <div class="card" style="margin-top:var(--sp-6)">
-      <div class="card-head"><h2>Certificates</h2><button id="btn-certs-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
-      <table class="table" id="certs-table">
-        <thead><tr><th>Domain</th><th>Status</th><th>Expires</th></tr></thead>
-        <tbody id="certs-body"></tbody>
-      </table>
-      <div id="certs-empty" class="empty" hidden>No managed certificates.</div>
+    <div id="page-access" hidden>
+      <div class="card">
+        <table class="table" id="acl-table">
+          <thead><tr><th>Name</th><th>Satisfy</th><th>IP rules</th><th>Users</th><th></th></tr></thead>
+          <tbody id="acl-body"></tbody>
+        </table>
+        <div id="acl-empty" class="empty" hidden>No access lists. Add one, then assign it to a proxy host.</div>
+      </div>
+    </div>
+
+    <div id="page-streams" hidden>
+      <div class="card">
+        <table class="table" id="streams-table">
+          <thead><tr><th>Listen</th><th>Protocol</th><th>Forward to</th><th>Enabled</th><th></th></tr></thead>
+          <tbody id="streams-body"></tbody>
+        </table>
+        <div id="streams-empty" class="empty" hidden>No streams. Add a TCP/UDP port forward.</div>
+      </div>
     </div>
   </main>
+</div>
+
+<!-- access list modal -->
+<div id="acl-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="card-head"><h2 id="acl-modal-title">Add access list</h2><button id="acl-modal-close" class="btn btn--ghost btn--sm">&times;</button></div>
+    <form id="acl-form">
+      <label class="field"><span>Name</span><input id="a-name" required></label>
+      <div class="field-row">
+        <label class="field field--sm"><span>Satisfy</span>
+          <select id="a-satisfy">
+            <option value="any">any (IP or login)</option>
+            <option value="all">all (IP and login)</option>
+          </select></label>
+        <label class="check"><input type="checkbox" id="a-passauth"><span>Pass Authorization header to upstream</span></label>
+      </div>
+      <fieldset class="group">
+        <legend>IP rules (ordered, first match wins, no match denies)</legend>
+        <div id="acl-rules" class="hdr-rules"></div>
+        <button type="button" class="btn btn--ghost btn--sm" id="btn-add-aclrule">+ Add rule</button>
+      </fieldset>
+      <fieldset class="group">
+        <legend>Basic auth users (leave password empty to keep existing)</legend>
+        <div id="acl-users" class="hdr-rules"></div>
+        <button type="button" class="btn btn--ghost btn--sm" id="btn-add-acluser">+ Add user</button>
+      </fieldset>
+      <div id="acl-error" class="form-error" hidden></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn--secondary" id="acl-btn-cancel">Cancel</button>
+        <button type="submit" class="btn btn--primary">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- stream modal -->
+<div id="stream-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="card-head"><h2 id="stream-modal-title">Add stream</h2><button id="stream-modal-close" class="btn btn--ghost btn--sm">&times;</button></div>
+    <form id="stream-form">
+      <div class="field-row">
+        <label class="field field--sm"><span>Listen port</span><input id="s-port" type="number" min="1" max="65535" required></label>
+        <label class="field field--sm"><span>Protocol</span>
+          <select id="s-proto"><option>tcp</option><option>udp</option><option value="both">tcp + udp</option></select></label>
+      </div>
+      <div class="field-row">
+        <label class="field"><span>Forward host / IP</span><input id="s-fhost" class="mono" required></label>
+        <label class="field field--sm"><span>Forward port</span><input id="s-fport" type="number" min="1" max="65535" required></label>
+      </div>
+      <label class="check"><input type="checkbox" id="s-enabled" checked><span>Enabled</span></label>
+      <div id="stream-error" class="form-error" hidden></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn--secondary" id="stream-btn-cancel">Cancel</button>
+        <button type="submit" class="btn btn--primary">Save</button>
+      </div>
+    </form>
+  </div>
 </div>
 
 <!-- host modal -->
@@ -93,6 +181,8 @@
           <label class="field"><span>Forward host / IP</span><input id="f-uhost" class="mono" required></label>
           <label class="field field--sm"><span>Port</span><input id="f-uport" type="number" min="1" max="65535" required></label>
         </div>
+        <label class="field field--sm"><span>Access list</span>
+          <select id="f-accesslist"><option value="">Publicly accessible</option></select></label>
         <label class="check"><input type="checkbox" id="f-enabled" checked><span>Enabled</span></label>
       </section>
 

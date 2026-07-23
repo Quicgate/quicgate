@@ -60,16 +60,53 @@ type Options struct {
 
 // Host is one configured host of any type. M1 implements type "proxy".
 type Host struct {
-	ID        int64    `json:"id"`
-	Type      string   `json:"type"` // proxy (M2: redirect | stream | dead)
-	Domains   []string `json:"domains"`
-	Upstream  Upstream `json:"upstream"`
-	CertMode  string   `json:"certMode"` // auto (ACME) | none (plain http)
-	ForceSSL  bool     `json:"forceSsl"`
-	Enabled   bool     `json:"enabled"`
-	Options   Options  `json:"options"`
-	CreatedAt string   `json:"createdAt,omitempty"`
-	UpdatedAt string   `json:"updatedAt,omitempty"`
+	ID           int64    `json:"id"`
+	Type         string   `json:"type"` // proxy (M2: redirect | dead)
+	Domains      []string `json:"domains"`
+	Upstream     Upstream `json:"upstream"`
+	CertMode     string   `json:"certMode"` // auto (ACME) | none (plain http)
+	ForceSSL     bool     `json:"forceSsl"`
+	Enabled      bool     `json:"enabled"`
+	AccessListID *int64   `json:"accessListId"`
+	Options      Options  `json:"options"`
+	CreatedAt    string   `json:"createdAt,omitempty"`
+	UpdatedAt    string   `json:"updatedAt,omitempty"`
+}
+
+// AccessRule is one ordered CIDR rule; first match wins, no match denies.
+type AccessRule struct {
+	Action string `json:"action"` // allow | deny
+	CIDR   string `json:"cidr"`
+}
+
+// AccessUser carries a plaintext Password only inbound from the API; at rest
+// and outbound only Username and the bcrypt hash (never serialized) exist.
+type AccessUser struct {
+	Username string `json:"username"`
+	Password string `json:"password,omitempty"` // API input only
+	Hash     string `json:"-"`
+}
+
+// AccessList mirrors NPM's access lists: CIDR rules + basic auth users.
+type AccessList struct {
+	ID       int64        `json:"id"`
+	Name     string       `json:"name"`
+	Satisfy  string       `json:"satisfy"` // any | all
+	PassAuth bool         `json:"passAuth"`
+	Rules    []AccessRule `json:"rules"`
+	Users    []AccessUser `json:"users"`
+}
+
+// Stream is one TCP/UDP port forward.
+type Stream struct {
+	ID          int64  `json:"id"`
+	ListenPort  int    `json:"listenPort"`
+	Protocol    string `json:"protocol"` // tcp | udp | both
+	ForwardHost string `json:"forwardHost"`
+	ForwardPort int    `json:"forwardPort"`
+	Enabled     bool   `json:"enabled"`
+	CreatedAt   string `json:"createdAt,omitempty"`
+	UpdatedAt   string `json:"updatedAt,omitempty"`
 }
 
 type User struct {
@@ -188,8 +225,34 @@ CREATE TABLE IF NOT EXISTS users (
   hash TEXT NOT NULL,
   must_change INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS access_lists (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  satisfy TEXT NOT NULL DEFAULT 'any',
+  pass_auth INTEGER NOT NULL DEFAULT 0,
+  rules TEXT NOT NULL DEFAULT '[]',
+  users TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS streams (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  listen_port INTEGER NOT NULL,
+  protocol TEXT NOT NULL DEFAULT 'tcp',
+  fwd_host TEXT NOT NULL,
+  fwd_port INTEGER NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Pre-M2 databases lack the access_list_id column; duplicate-column is fine.
+	if _, err := s.db.Exec("ALTER TABLE hosts ADD COLUMN access_list_id INTEGER"); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -200,7 +263,7 @@ func scanHost(row interface{ Scan(...any) error }) (Host, error) {
 	var h Host
 	var domains, upstream, options string
 	var forceSSL, enabled int
-	err := row.Scan(&h.ID, &h.Type, &domains, &upstream, &h.CertMode, &forceSSL, &enabled, &options, &h.CreatedAt, &h.UpdatedAt)
+	err := row.Scan(&h.ID, &h.Type, &domains, &upstream, &h.CertMode, &forceSSL, &enabled, &options, &h.CreatedAt, &h.UpdatedAt, &h.AccessListID)
 	if err != nil {
 		return h, err
 	}
@@ -218,7 +281,7 @@ func scanHost(row interface{ Scan(...any) error }) (Host, error) {
 	return h, nil
 }
 
-const hostCols = "id, type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at"
+const hostCols = "id, type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at, access_list_id"
 
 func (s *Store) ListHosts() ([]Host, error) {
 	rows, err := s.db.Query("SELECT " + hostCols + " FROM hosts ORDER BY id")
@@ -257,8 +320,8 @@ func (s *Store) CreateHost(h *Host) error {
 	options, _ := json.Marshal(h.Options)
 	h.CreatedAt, h.UpdatedAt = now(), now()
 	res, err := s.db.Exec(
-		"INSERT INTO hosts (type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.CreatedAt, h.UpdatedAt)
+		"INSERT INTO hosts (type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at, access_list_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.CreatedAt, h.UpdatedAt, h.AccessListID)
 	if err != nil {
 		return err
 	}
@@ -275,8 +338,8 @@ func (s *Store) UpdateHost(h *Host) error {
 	options, _ := json.Marshal(h.Options)
 	h.UpdatedAt = now()
 	res, err := s.db.Exec(
-		"UPDATE hosts SET type=?, domains=?, upstream=?, cert_mode=?, force_ssl=?, enabled=?, options=?, updated_at=? WHERE id=?",
-		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.UpdatedAt, h.ID)
+		"UPDATE hosts SET type=?, domains=?, upstream=?, cert_mode=?, force_ssl=?, enabled=?, options=?, updated_at=?, access_list_id=? WHERE id=?",
+		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.UpdatedAt, h.AccessListID, h.ID)
 	if err != nil {
 		return err
 	}

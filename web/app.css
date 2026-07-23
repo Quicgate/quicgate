@@ -17,8 +17,15 @@ body { background: var(--c-bg); color: var(--c-text); font-family: var(--font-bo
   padding: var(--sp-4) var(--sp-6); border-bottom: 1px solid var(--c-border);
   background: var(--c-bg-2);
 }
-.topbar__brand { display: flex; align-items: baseline; gap: var(--sp-3); }
-.topbar__title { font-weight: var(--fw-bold); letter-spacing: var(--ls-tight); }
+.topbar__brand { display: flex; align-items: baseline; gap: var(--sp-4); }
+.pagenav { display: flex; gap: var(--sp-1); }
+.pagelink {
+  background: none; border: none; color: var(--c-text-muted); font: inherit;
+  font-weight: var(--fw-semibold); padding: var(--sp-2) var(--sp-3); cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.pagelink:hover { color: var(--c-text); }
+.pagelink.is-active { color: var(--c-accent); background: var(--c-accent-bg); }
 .topbar__actions { display: flex; align-items: center; gap: var(--sp-3); }
 
 .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-3); }

@@ -58,16 +58,17 @@ func (t *routingTable) lookup(hostport string) *route {
 
 // Engine owns the routing table and all data-plane listeners.
 type Engine struct {
-	cfg   Config
-	store *store.Store
-	table atomic.Pointer[routingTable]
-	magic *certmagic.Config
-	acme  *certmagic.ACMEIssuer
-	h3    *http3.Server
+	cfg     Config
+	store   *store.Store
+	table   atomic.Pointer[routingTable]
+	magic   *certmagic.Config
+	acme    *certmagic.ACMEIssuer
+	h3      *http3.Server
+	streams *StreamManager
 }
 
 func New(cfg Config, st *store.Store) *Engine {
-	e := &Engine{cfg: cfg, store: st}
+	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager()}
 	e.table.Store(&routingTable{exact: map[string]*route{}, wildcard: map[string]*route{}})
 
 	cache := certmagic.NewCache(certmagic.CacheOptions{
@@ -104,13 +105,29 @@ func (e *Engine) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	lists, err := e.store.ListAccessLists()
+	if err != nil {
+		return err
+	}
+	access := map[int64]*compiledAccess{}
+	for _, a := range lists {
+		access[a.ID] = compileAccess(a)
+	}
+	streams, err := e.store.ListStreams()
+	if err != nil {
+		return err
+	}
 	t := &routingTable{exact: map[string]*route{}, wildcard: map[string]*route{}}
 	var managed []string
 	for _, h := range hosts {
 		if !h.Enabled {
 			continue
 		}
-		r := buildRoute(h)
+		var acl *compiledAccess
+		if h.AccessListID != nil {
+			acl = access[*h.AccessListID]
+		}
+		r := buildRoute(h, acl)
 		for _, d := range h.Domains {
 			if strings.HasPrefix(d, "*.") {
 				t.wildcard[d[2:]] = r
@@ -123,6 +140,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 		}
 	}
 	e.table.Store(t)
+	e.streams.Sync(streams)
 	if len(managed) > 0 && !e.cfg.DisableTLS {
 		if err := e.magic.ManageAsync(ctx, managed); err != nil {
 			log.Printf("engine: cert management: %v", err)
@@ -133,7 +151,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 }
 
 // buildRoute compiles one host's typed options into a ready http.Handler chain.
-func buildRoute(h store.Host) *route {
+func buildRoute(h store.Host, acl *compiledAccess) *route {
 	o := h.Options
 	target := &url.URL{Scheme: h.Upstream.Scheme, Host: fmt.Sprintf("%s:%d", h.Upstream.Host, h.Upstream.Port)}
 
@@ -208,6 +226,9 @@ func buildRoute(h store.Host) *route {
 			r.Body = http.MaxBytesReader(w, r.Body, limit)
 			inner.ServeHTTP(w, r)
 		})
+	}
+	if acl != nil {
+		handler = acl.wrap(handler)
 	}
 	return &route{host: h, proxy: handler}
 }
@@ -356,10 +377,26 @@ func (e *Engine) Run(ctx context.Context) error {
 		if e.h3 != nil {
 			_ = e.h3.Close()
 		}
+		e.streams.StopAll()
 		return nil
 	case err := <-errCh:
 		return err
 	}
+}
+
+// ReservedPorts lists the ports the proxy engine itself occupies, so stream
+// validation can refuse them.
+func (e *Engine) ReservedPorts() []int {
+	var out []int
+	for _, addr := range []string{e.cfg.HTTPAddr, e.cfg.HTTPSAddr} {
+		if _, p, err := net.SplitHostPort(addr); err == nil {
+			var n int
+			if _, err := fmt.Sscanf(p, "%d", &n); err == nil {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
 }
 
 // CertStatus reports the state of the managed certificate for one domain.

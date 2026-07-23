@@ -70,8 +70,156 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/hosts/{id}", s.auth(s.handleUpdateHost))
 	mux.HandleFunc("DELETE /api/hosts/{id}", s.auth(s.handleDeleteHost))
 	mux.HandleFunc("GET /api/certs", s.auth(s.handleCerts))
+	mux.HandleFunc("GET /api/access-lists", s.auth(s.handleListAccessLists))
+	mux.HandleFunc("POST /api/access-lists", s.auth(s.handleCreateAccessList))
+	mux.HandleFunc("PUT /api/access-lists/{id}", s.auth(s.handleUpdateAccessList))
+	mux.HandleFunc("DELETE /api/access-lists/{id}", s.auth(s.handleDeleteAccessList))
+	mux.HandleFunc("GET /api/streams", s.auth(s.handleListStreams))
+	mux.HandleFunc("POST /api/streams", s.auth(s.handleCreateStream))
+	mux.HandleFunc("PUT /api/streams/{id}", s.auth(s.handleUpdateStream))
+	mux.HandleFunc("DELETE /api/streams/{id}", s.auth(s.handleDeleteStream))
 	mux.Handle("/", http.FileServerFS(s.webFS))
 	return mux
+}
+
+func pathID(r *http.Request) (int64, error) {
+	return strconv.ParseInt(r.PathValue("id"), 10, 64)
+}
+
+func (s *Server) handleListAccessLists(w http.ResponseWriter, r *http.Request) {
+	lists, err := s.store.ListAccessLists()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if lists == nil {
+		lists = []store.AccessList{}
+	}
+	writeJSON(w, http.StatusOK, lists)
+}
+
+func (s *Server) handleCreateAccessList(w http.ResponseWriter, r *http.Request) {
+	var a store.AccessList
+	if err := decodeStrict(r, &a); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.CreateAccessList(&a); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.reload(r.Context())
+	writeJSON(w, http.StatusCreated, a)
+}
+
+func (s *Server) handleUpdateAccessList(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var a store.AccessList
+	if err := decodeStrict(r, &a); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	a.ID = id
+	if err := s.store.UpdateAccessList(&a); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, http.StatusNotFound, "access list not found")
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.reload(r.Context())
+	writeJSON(w, http.StatusOK, a)
+}
+
+func (s *Server) handleDeleteAccessList(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if err := s.store.DeleteAccessList(id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, http.StatusNotFound, "access list not found")
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.reload(r.Context())
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleListStreams(w http.ResponseWriter, r *http.Request) {
+	streams, err := s.store.ListStreams()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if streams == nil {
+		streams = []store.Stream{}
+	}
+	writeJSON(w, http.StatusOK, streams)
+}
+
+func (s *Server) handleCreateStream(w http.ResponseWriter, r *http.Request) {
+	var st store.Stream
+	if err := decodeStrict(r, &st); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.CreateStream(&st, s.engine.ReservedPorts()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.reload(r.Context())
+	writeJSON(w, http.StatusCreated, st)
+}
+
+func (s *Server) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var st store.Stream
+	if err := decodeStrict(r, &st); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	st.ID = id
+	if err := s.store.UpdateStream(&st, s.engine.ReservedPorts()); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, http.StatusNotFound, "stream not found")
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.reload(r.Context())
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) handleDeleteStream(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if err := s.store.DeleteStream(id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, http.StatusNotFound, "stream not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.reload(r.Context())
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

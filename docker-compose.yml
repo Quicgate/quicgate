@@ -3,11 +3,11 @@ services:
     image: registry.example.com/quicgate:latest
     container_name: quicgate
     restart: unless-stopped
-    ports:
-      - "80:80/tcp"
-      - "443:443/tcp"
-      - "443:443/udp"
-      - "81:81/tcp"
+    # Host networking: stream forwards bind host ports dynamically (no
+    # pre-published port list) and the engine sees real client IPs, which
+    # access-list IP filtering depends on. Engine owns 80/443(tcp+udp),
+    # admin UI 81, plus any configured stream ports.
+    network_mode: host
     environment:
       - QG_ACME_EMAIL=you@example.com
     volumes:
