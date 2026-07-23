@@ -1,6 +1,7 @@
 /* quicgate admin UI, on top of huisstijl example tokens */
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; min-height: 100vh; }
 body { background: var(--c-bg); color: var(--c-text); font-family: var(--font-body); font-size: var(--fs-base); }
 
