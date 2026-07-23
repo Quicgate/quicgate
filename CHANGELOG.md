@@ -4,6 +4,19 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-07-23
+
+### Added
+- **Streams can reuse an access list as their source filter** instead of
+  retyping CIDRs — pick an access list on the stream, and its allow CIDR/host
+  rules become the source allowlist (only IP rules apply at L4).
+
+### Changed
+- Method-scoped access rules now use clickable **HTTP-verb chips** in the UI
+  instead of a free-text box (keyboard-accessible; none selected = all verbs).
+
+[1.1.0]: https://github.com/maferick/quicgate/releases/tag/v1.1.0
+
 ## [1.0.0] - 2026-07-23
 
 First public release. quicgate is a single-binary reverse-proxy manager: the
