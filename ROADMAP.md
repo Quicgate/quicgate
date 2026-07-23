@@ -11,6 +11,13 @@ Every item below is now built and deployed (stack 350 on docker01), across five 
 - **Phase 4** — load balancing + health checks (P1/P2), static hosting (P6), forward-auth (S2), mTLS (C8), dynamic-DNS + GeoIP access rules (S6/S5), auto-ban (S1), 2FA (S4), API tokens (A3), log viewer (L1), Prometheus metrics (L2), self-signed/from-file/custom-CA certs (C1/C4/C5), effective-config viewer (U3), declarative import (A2), OIDC + LDAP admin login (S3/S10).
 - **Phase 5** — PROXY protocol send+accept (T5), TLS termination (T3), SNI routing + passthrough (T2/C7), port ranges (T4), websocket support confirmed (P9).
 
+Post-completion audit (2026-07-23) found and fixed one genuine miss and several skipped sub-parts:
+- **P3** (custom locations + path rewrite) was marked done but never built — now implemented and verified.
+- **A3** documentation half was missing — added [API.md](API.md) + OpenAPI/Swagger (`/docs.html`, `/openapi.yaml`).
+- Filled skipped extras: **S7** bad-bot/scraper blocking, **P5** per-host custom 502 page, **L1** per-host log filter, **L2** per-host Prometheus counters.
+
+Genuinely deferred (small, low-value, or optional): **C6** next-attempt renewal time (certmagic manages retries internally, not cleanly surfaceable), **S7** Coraza WAF (flagged optional in the roadmap itself).
+
 Needs live infra to fully validate (wired + compile-verified, degrade safely): GeoIP (needs a MaxMind DB), OIDC/LDAP (need an IdP/directory), DNS-01 wildcards (needs the TransIP key), and real ACME issuance / public HTTP-3 (needs a public DNS + port-forward). Everything else was smoke-tested end to end.
 
 ---
