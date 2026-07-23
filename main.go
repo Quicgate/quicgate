@@ -47,6 +47,7 @@ func main() {
 		ACMEEmail:  os.Getenv("QG_ACME_EMAIL"),
 		ACMEStage:  os.Getenv("QG_ACME_STAGING") == "1",
 		DisableTLS: os.Getenv("QG_TLS") == "off",
+		UPnP:       os.Getenv("QG_UPNP") == "1",
 	}, st)
 
 	webFS, err := fs.Sub(webEmbed, "web")

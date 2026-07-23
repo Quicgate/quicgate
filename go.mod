@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/caddyserver/certmagic v0.25.4
+	github.com/huin/goupnp v1.3.0
 	github.com/quic-go/quic-go v0.60.0
 	golang.org/x/crypto v0.54.0
 	modernc.org/sqlite v1.54.0

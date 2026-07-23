@@ -28,6 +28,7 @@ type Config struct {
 	ACMEEmail  string
 	ACMEStage  bool // use Let's Encrypt staging CA
 	DisableTLS bool // dev mode: no TLS/QUIC listeners at all
+	UPnP       bool // request router port forwards via UPnP IGD
 }
 
 type route struct {
@@ -65,10 +66,14 @@ type Engine struct {
 	acme    *certmagic.ACMEIssuer
 	h3      *http3.Server
 	streams *StreamManager
+	upnp    *UPnPManager
 }
 
 func New(cfg Config, st *store.Store) *Engine {
 	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager()}
+	if cfg.UPnP {
+		e.upnp = NewUPnPManager(3600)
+	}
 	e.table.Store(&routingTable{exact: map[string]*route{}, wildcard: map[string]*route{}})
 
 	cache := certmagic.NewCache(certmagic.CacheOptions{
@@ -141,6 +146,29 @@ func (e *Engine) Reload(ctx context.Context) error {
 	}
 	e.table.Store(t)
 	e.streams.Sync(streams)
+	if e.upnp != nil {
+		var mappings []PortMapping
+		if p := portOf(e.cfg.HTTPAddr); p > 0 {
+			mappings = append(mappings, PortMapping{Proto: "TCP", Port: uint16(p)})
+		}
+		if p := portOf(e.cfg.HTTPSAddr); p > 0 && !e.cfg.DisableTLS {
+			mappings = append(mappings,
+				PortMapping{Proto: "TCP", Port: uint16(p)},
+				PortMapping{Proto: "UDP", Port: uint16(p)})
+		}
+		for _, s := range streams {
+			if !s.Enabled {
+				continue
+			}
+			if s.Protocol == "tcp" || s.Protocol == "both" {
+				mappings = append(mappings, PortMapping{Proto: "TCP", Port: uint16(s.ListenPort)})
+			}
+			if s.Protocol == "udp" || s.Protocol == "both" {
+				mappings = append(mappings, PortMapping{Proto: "UDP", Port: uint16(s.ListenPort)})
+			}
+		}
+		go e.upnp.Sync(mappings)
+	}
 	if len(managed) > 0 && !e.cfg.DisableTLS {
 		if err := e.magic.ManageAsync(ctx, managed); err != nil {
 			log.Printf("engine: cert management: %v", err)
@@ -378,10 +406,23 @@ func (e *Engine) Run(ctx context.Context) error {
 			_ = e.h3.Close()
 		}
 		e.streams.StopAll()
+		if e.upnp != nil {
+			e.upnp.Close()
+		}
 		return nil
 	case err := <-errCh:
 		return err
 	}
+}
+
+func portOf(addr string) int {
+	if _, p, err := net.SplitHostPort(addr); err == nil {
+		var n int
+		if _, err := fmt.Sscanf(p, "%d", &n); err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 // ReservedPorts lists the ports the proxy engine itself occupies, so stream
@@ -389,11 +430,8 @@ func (e *Engine) Run(ctx context.Context) error {
 func (e *Engine) ReservedPorts() []int {
 	var out []int
 	for _, addr := range []string{e.cfg.HTTPAddr, e.cfg.HTTPSAddr} {
-		if _, p, err := net.SplitHostPort(addr); err == nil {
-			var n int
-			if _, err := fmt.Sscanf(p, "%d", &n); err == nil {
-				out = append(out, n)
-			}
+		if p := portOf(addr); p > 0 {
+			out = append(out, p)
 		}
 	}
 	return out

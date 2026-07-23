@@ -10,5 +10,9 @@ services:
     network_mode: host
     environment:
       - QG_ACME_EMAIL=you@example.com
+      # Requests router forwards for 80/443 + stream ports via UPnP IGD.
+      # Needs "permit independent port sharing" for this device on the
+      # FRITZ!Box. 80/443 conflict while they still forward to .92; logged.
+      - QG_UPNP=1
     volumes:
       - /opt/quicgate:/data
