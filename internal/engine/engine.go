@@ -617,6 +617,16 @@ func (e *Engine) tlsConfig() *tls.Config {
 	base := e.magic.TLSConfig()
 	base.NextProtos = append([]string{"h2", "http/1.1"}, base.NextProtos...)
 	base.MinVersion = tls.VersionTLS12
+	// TLS 1.2 AEAD suites only — drop the CBC-SHA suites SSL Labs flags WEAK.
+	// (TLS 1.3 suites are fixed by Go and always strong.)
+	base.CipherSuites = []uint16{
+		tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+		tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+		tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+		tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+	}
 	base.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
 		r := e.table.Load().lookup(chi.ServerName)
 		if r == nil {
