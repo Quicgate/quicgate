@@ -55,6 +55,9 @@ textarea { resize: vertical; }
 
 .form-error { color: var(--c-danger); background: var(--c-danger-bg); border-radius: var(--r-sm); padding: var(--sp-2) var(--sp-3); margin: var(--sp-3) 0; font-size: var(--fs-sm); }
 
+/* search */
+.search { width: 100%; margin-bottom: var(--sp-3); font-family: var(--font-mono); font-size: var(--fs-sm); }
+
 /* table */
 .table { width: 100%; border-collapse: collapse; }
 .table th { text-align: left; font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--ls-wide); text-transform: uppercase; color: var(--c-text-faint); padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--c-border); }

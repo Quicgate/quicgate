@@ -8,17 +8,28 @@ let editingId = null;
 let editingAclId = null;
 let editingStreamId = null;
 
+/* ---- theme ---- */
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem('qg_theme', theme);
+}
+applyTheme(localStorage.getItem('qg_theme') || 'dark');
+$('btn-theme').addEventListener('click', () => {
+  applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
+});
+
 /* ---- page nav ---- */
-const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream' };
+const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', settings: null };
 function switchPage(name) {
   for (const b of $('pagenav').children) b.classList.toggle('is-active', b.dataset.page === name);
   for (const p of Object.keys(pages)) {
     $(`page-${p}`).hidden = p !== name;
-    $(pages[p]).hidden = p !== name;
+    if (pages[p]) $(pages[p]).hidden = p !== name;
   }
   if (name === 'hosts') refresh();
   if (name === 'access') refreshAcls();
   if (name === 'streams') refreshStreams();
+  if (name === 'settings') loadSettings();
 }
 $('pagenav').addEventListener('click', (e) => {
   if (e.target.dataset.page) switchPage(e.target.dataset.page);
@@ -98,12 +109,31 @@ $('btn-logout').addEventListener('click', async () => {
 });
 
 /* ---- hosts table ---- */
+function hostMatches(h, q) {
+  if (!q) return true;
+  const acl = accessLists.find((a) => a.id === h.accessListId);
+  const hay = h.domains.join(' ') + ' ' + `${h.upstream.host}:${h.upstream.port}` + ' ' + (acl ? acl.name : 'public');
+  return hay.toLowerCase().includes(q);
+}
+
+$('host-search').addEventListener('input', () => renderHosts());
+
 async function refresh() {
   [hosts, accessLists] = await Promise.all([api('GET', '/api/hosts'), api('GET', '/api/access-lists')]);
+  renderHosts();
+  refreshCerts();
+}
+
+function renderHosts() {
+  const q = $('host-search').value.trim().toLowerCase();
+  const shown = hosts.filter((h) => hostMatches(h, q));
   const body = $('hosts-body');
   body.innerHTML = '';
-  $('hosts-empty').hidden = hosts.length > 0;
-  for (const h of hosts) {
+  $('hosts-empty').hidden = shown.length > 0;
+  $('hosts-empty').textContent = hosts.length === 0
+    ? 'No proxy hosts yet. Add the first one.'
+    : 'No hosts match the filter.';
+  for (const h of shown) {
     const tr = document.createElement('tr');
 
     const tdDomains = document.createElement('td');
@@ -166,7 +196,6 @@ async function refresh() {
     tr.append(tdDomains, tdUpstream, tdTLS, tdAccess, tdEnabled, tdActions);
     body.appendChild(tr);
   }
-  refreshCerts();
 }
 
 async function refreshCerts() {
@@ -256,6 +285,7 @@ function openModal(h) {
   $('f-hsts-age').value = (o.hsts && o.hsts.maxAge) || 15552000;
   $('f-hsts-sub').checked = !!(o.hsts && o.hsts.includeSubdomains);
   $('f-hsts-preload').checked = !!(o.hsts && o.hsts.preload);
+  $('f-noindex').checked = !!o.blockIndexing;
   $('f-preservehost').checked = !!o.preserveHost;
   $('f-hostoverride').value = o.hostOverride || '';
   $('f-skipverify').checked = !!o.skipTlsVerify;
@@ -305,6 +335,7 @@ $('host-form').addEventListener('submit', async (e) => {
       idleTimeoutSec: parseInt($('f-idleto').value, 10) || 0,
       maxBodyMb: parseInt($('f-maxbody').value, 10) || 0,
       buffering: $('f-buffering').checked ? undefined : false,
+      blockIndexing: $('f-noindex').checked,
       requestHeaders: readHdrRows('req-headers'),
       responseHeaders: readHdrRows('resp-headers'),
       hsts: {
@@ -547,6 +578,26 @@ $('stream-form').addEventListener('submit', async (e) => {
     refreshStreams();
   } catch (err) {
     setError('stream-error', err);
+  }
+});
+
+/* ---- settings page ---- */
+async function loadSettings() {
+  const s = await api('GET', '/api/settings');
+  $('set-acme-email').value = s.acme_email || '';
+  $('set-acme-staging').checked = s.acme_staging === '1';
+}
+
+$('settings-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  setError('settings-error', null);
+  try {
+    await api('PUT', '/api/settings', {
+      acme_email: $('set-acme-email').value.trim(),
+      acme_staging: $('set-acme-staging').checked ? '1' : '0',
+    });
+  } catch (err) {
+    setError('settings-error', err);
   }
 });
 

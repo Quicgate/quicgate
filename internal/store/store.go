@@ -52,6 +52,9 @@ type Options struct {
 	RequestHeaders  []HeaderRule `json:"requestHeaders,omitempty"`
 	ResponseHeaders []HeaderRule `json:"responseHeaders,omitempty"`
 
+	// Security group
+	BlockIndexing bool `json:"blockIndexing"` // send X-Robots-Tag: noindex, nofollow
+
 	// TLS group
 	HSTS          HSTS   `json:"hsts"`
 	MinTLSVersion string `json:"minTlsVersion,omitempty"` // "" (default 1.2) | "1.2" | "1.3"
@@ -389,5 +392,40 @@ func (s *Store) CreateUser(email, hash string, mustChange bool) error {
 
 func (s *Store) SetPassword(id int64, hash string) error {
 	_, err := s.db.Exec("UPDATE users SET hash=?, must_change=0 WHERE id=?", hash, id)
+	return err
+}
+
+// GetSetting returns a stored setting or def if unset.
+func (s *Store) GetSetting(key, def string) string {
+	var v string
+	if err := s.db.QueryRow("SELECT value FROM settings WHERE key=?", key).Scan(&v); err != nil {
+		return def
+	}
+	return v
+}
+
+// AllSettings returns every stored setting as a map.
+func (s *Store) AllSettings() (map[string]string, error) {
+	rows, err := s.db.Query("SELECT key, value FROM settings")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}
+
+// SetSetting upserts one setting.
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(
+		"INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+		key, value)
 	return err
 }

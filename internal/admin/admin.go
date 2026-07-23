@@ -74,6 +74,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/access-lists", s.auth(s.handleCreateAccessList))
 	mux.HandleFunc("PUT /api/access-lists/{id}", s.auth(s.handleUpdateAccessList))
 	mux.HandleFunc("DELETE /api/access-lists/{id}", s.auth(s.handleDeleteAccessList))
+	mux.HandleFunc("GET /api/settings", s.auth(s.handleGetSettings))
+	mux.HandleFunc("PUT /api/settings", s.auth(s.handlePutSettings))
 	mux.HandleFunc("GET /api/streams", s.auth(s.handleListStreams))
 	mux.HandleFunc("POST /api/streams", s.auth(s.handleCreateStream))
 	mux.HandleFunc("PUT /api/streams/{id}", s.auth(s.handleUpdateStream))
@@ -84,6 +86,48 @@ func (s *Server) Handler() http.Handler {
 
 func pathID(r *http.Request) (int64, error) {
 	return strconv.ParseInt(r.PathValue("id"), 10, 64)
+}
+
+// settingsKeys is the closed set of UI-editable settings; unknown keys are
+// rejected, in keeping with the no-silent-drop contract.
+var settingsKeys = map[string]bool{
+	"acme_staging": true, // "1" = Let's Encrypt staging CA
+	"acme_email":   true,
+}
+
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	all, err := s.store.AllSettings()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := map[string]string{}
+	for k := range settingsKeys {
+		out[k] = all[k]
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
+	var body map[string]string
+	if err := decodeStrict(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	for k := range body {
+		if !settingsKeys[k] {
+			writeErr(w, http.StatusBadRequest, "unsupported setting: "+k)
+			return
+		}
+	}
+	for k, v := range body {
+		if err := s.store.SetSetting(k, v); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	s.reload(r.Context())
+	s.handleGetSettings(w, r)
 }
 
 func (s *Server) handleListAccessLists(w http.ResponseWriter, r *http.Request) {

@@ -47,10 +47,12 @@
         <button class="pagelink is-active" data-page="hosts">Proxy Hosts</button>
         <button class="pagelink" data-page="access">Access Lists</button>
         <button class="pagelink" data-page="streams">Streams</button>
+        <button class="pagelink" data-page="settings">Settings</button>
       </nav>
     </div>
     <div class="topbar__actions">
       <span id="me-email" class="hs-muted mono"></span>
+      <button id="btn-theme" class="btn btn--ghost btn--sm" title="Toggle light/dark">◐</button>
       <button id="btn-logout" class="btn btn--ghost btn--sm">Sign out</button>
       <button id="btn-add" class="btn btn--primary">Add proxy host</button>
       <button id="btn-add-acl" class="btn btn--primary" hidden>Add access list</button>
@@ -61,6 +63,7 @@
   <main class="page">
     <div id="page-hosts">
       <div class="card">
+        <input id="host-search" class="search" type="search" placeholder="Filter by domain, upstream or access list...">
         <table class="table" id="hosts-table">
           <thead><tr>
             <th>Domains</th><th>Upstream</th><th>TLS</th><th>Access</th><th>Enabled</th><th></th>
@@ -97,6 +100,18 @@
           <tbody id="streams-body"></tbody>
         </table>
         <div id="streams-empty" class="empty" hidden>No streams. Add a TCP/UDP port forward.</div>
+      </div>
+    </div>
+
+    <div id="page-settings" hidden>
+      <div class="card" style="max-width:560px">
+        <div class="card-head"><h2>ACME / Let's Encrypt</h2></div>
+        <form id="settings-form">
+          <label class="field"><span>Account email</span><input id="set-acme-email" type="email" class="mono"></label>
+          <label class="check"><input type="checkbox" id="set-acme-staging"><span>Use the staging CA <em>(test certs, no rate limits; browsers will warn)</em></span></label>
+          <div id="settings-error" class="form-error" hidden></div>
+          <div class="modal-actions"><button type="submit" class="btn btn--primary">Save</button></div>
+        </form>
       </div>
     </div>
   </main>
@@ -185,6 +200,7 @@
         </div>
         <label class="field field--sm"><span>Access list</span>
           <select id="f-accesslist"><option value="">Publicly accessible</option></select></label>
+        <label class="check"><input type="checkbox" id="f-noindex"><span>Block search engine indexing <em>(X-Robots-Tag: noindex)</em></span></label>
         <label class="check"><input type="checkbox" id="f-enabled" checked><span>Enabled</span></label>
       </section>
 

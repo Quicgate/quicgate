@@ -67,10 +67,15 @@ type Engine struct {
 	h3      *http3.Server
 	streams *StreamManager
 	upnp    *UPnPManager
+
+	acmeStaging bool
+	acmeEmail   string
 }
 
 func New(cfg Config, st *store.Store) *Engine {
 	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager()}
+	e.acmeStaging = cfg.ACMEStage
+	e.acmeEmail = cfg.ACMEEmail
 	if cfg.UPnP {
 		e.upnp = NewUPnPManager(3600)
 	}
@@ -90,22 +95,46 @@ func New(cfg Config, st *store.Store) *Engine {
 			},
 		},
 	})
+	e.buildIssuer()
+	return e
+}
+
+// buildIssuer (re)creates the ACME issuer from the current staging/email
+// fields and wires it into the magic config. Called at startup and whenever
+// those settings change.
+func (e *Engine) buildIssuer() {
 	ca := certmagic.LetsEncryptProductionCA
-	if cfg.ACMEStage {
+	if e.acmeStaging {
 		ca = certmagic.LetsEncryptStagingCA
 	}
 	e.acme = certmagic.NewACMEIssuer(e.magic, certmagic.ACMEIssuer{
 		CA:     ca,
-		Email:  cfg.ACMEEmail,
+		Email:  e.acmeEmail,
 		Agreed: true,
 	})
 	e.magic.Issuers = []certmagic.Issuer{e.acme}
-	return e
+}
+
+// applyACMESettings reads staging/email overrides from the store and rebuilds
+// the issuer only when they changed.
+func (e *Engine) applyACMESettings() {
+	staging := e.store.GetSetting("acme_staging", "") == "1"
+	email := e.store.GetSetting("acme_email", e.cfg.ACMEEmail)
+	if e.store.GetSetting("acme_staging", "") == "" {
+		staging = e.cfg.ACMEStage // no override stored: keep env default
+	}
+	if staging == e.acmeStaging && email == e.acmeEmail {
+		return
+	}
+	e.acmeStaging, e.acmeEmail = staging, email
+	e.buildIssuer()
+	log.Printf("engine: ACME settings changed (staging=%v, email=%q), issuer rebuilt", staging, email)
 }
 
 // Reload rebuilds the routing table from the store and swaps it in atomically,
 // then kicks off cert management for any new domains. No listener restarts.
 func (e *Engine) Reload(ctx context.Context) error {
+	e.applyACMESettings()
 	hosts, err := e.store.ListHosts()
 	if err != nil {
 		return err
@@ -231,6 +260,9 @@ func buildRoute(h store.Host, acl *compiledAccess) *route {
 			applyHeaderRules(pr.Out.Header, o.RequestHeaders, pr.In)
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			if o.BlockIndexing {
+				resp.Header.Set("X-Robots-Tag", "noindex, nofollow, nosnippet, noarchive")
+			}
 			applyHeaderRules(resp.Header, o.ResponseHeaders, nil)
 			return nil
 		},
