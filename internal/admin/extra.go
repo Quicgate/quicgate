@@ -207,7 +207,10 @@ func (s *Server) handleSelfSignedCert(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, c)
 }
 
@@ -222,7 +225,10 @@ func (s *Server) handleCertFromFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, c)
 }
 
@@ -268,6 +274,9 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		}
 		created["streams"]++
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, created)
 }

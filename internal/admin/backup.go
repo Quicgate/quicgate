@@ -151,6 +151,9 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "restored"})
 }

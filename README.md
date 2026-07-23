@@ -85,7 +85,6 @@ Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (a passwo
 - Young project with one production deployment (mine), so expect rough edges. Issues welcome.
 - No WireGuard tunneling — quicgate proxies to network-reachable upstreams only.
 - Single admin user (with 2FA/OIDC/LDAP), no multi-tenant roles.
-- Access-list changes currently need a container restart to fully apply (known bug, being fixed).
 
 ## HTTP/3 notes
 

@@ -189,7 +189,10 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	s.handleGetSettings(w, r)
 }
 
@@ -215,7 +218,10 @@ func (s *Server) handleCreateAccessList(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, a)
 }
 
@@ -239,7 +245,10 @@ func (s *Server) handleUpdateAccessList(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, a)
 }
 
@@ -257,7 +266,10 @@ func (s *Server) handleDeleteAccessList(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -283,7 +295,10 @@ func (s *Server) handleCreateStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, st)
 }
 
@@ -307,7 +322,10 @@ func (s *Server) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, st)
 }
 
@@ -325,7 +343,10 @@ func (s *Server) handleDeleteStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -351,7 +372,10 @@ func (s *Server) handleCreatePortForward(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, p)
 }
 
@@ -375,7 +399,10 @@ func (s *Server) handleUpdatePortForward(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, p)
 }
 
@@ -393,7 +420,10 @@ func (s *Server) handleDeletePortForward(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -560,7 +590,10 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, h)
 }
 
@@ -584,7 +617,10 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, h)
 }
 
@@ -602,7 +638,10 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -636,7 +675,10 @@ func (s *Server) handleCreateCustomCert(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, c)
 }
 
@@ -659,7 +701,10 @@ func (s *Server) handleUpdateCustomCert(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, c)
 }
 
@@ -677,14 +722,26 @@ func (s *Server) handleDeleteCustomCert(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.reload(r.Context())
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-func (s *Server) reload(ctx context.Context) {
-	if err := s.engine.Reload(ctx); err != nil {
+// reload applies the stored config to the engine. A change that saves but
+// fails to apply must be loud: a silent failure leaves the engine serving a
+// stale config until the next reload, which reads as "needs a restart".
+func (s *Server) reload(ctx context.Context) error {
+	err := s.engine.Reload(ctx)
+	if err != nil {
+		log.Printf("admin: reload failed, retrying once: %v", err)
+		err = s.engine.Reload(ctx)
+	}
+	if err != nil {
 		log.Printf("admin: reload after change failed: %v", err)
 	}
+	return err
 }
 
 // decodeStrict rejects unknown fields so a typo'd or removed option can never
