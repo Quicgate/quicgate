@@ -21,7 +21,7 @@ $('btn-theme').addEventListener('click', () => {
 });
 
 /* ---- page nav ---- */
-const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', certs: 'btn-add-cert', system: null, settings: null, profile: null };
+const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', certs: 'btn-add-cert', system: null, settings: null, profile: null, help: null };
 function switchPage(name) {
   for (const b of $('pagenav').children) b.classList.toggle('is-active', b.dataset.page === name);
   for (const p of Object.keys(pages)) {
@@ -40,6 +40,7 @@ $('pagenav').addEventListener('click', (e) => {
   if (e.target.dataset.page) switchPage(e.target.dataset.page);
 });
 $('me-email').addEventListener('click', () => switchPage('profile'));
+$('btn-help').addEventListener('click', () => switchPage('help'));
 
 function show(view) {
   for (const v of views) $(v).hidden = v !== view;

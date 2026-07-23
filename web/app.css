@@ -109,3 +109,14 @@ textarea { resize: vertical; }
 }
 .mchip:hover { border-color: var(--c-accent-border); color: var(--c-text-muted); }
 .mchip.on { color: var(--c-text-invert); background: var(--c-accent); border-color: var(--c-accent); }
+
+/* help & FAQ page */
+.help { max-width: 760px; }
+.help h3 { margin: var(--sp-5) 0 var(--sp-2); font-size: var(--fs-base); color: var(--c-accent); font-family: var(--font-mono); text-transform: uppercase; letter-spacing: var(--ls-wide); }
+.help details { border: 1px solid var(--c-border); border-radius: var(--r-sm); padding: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-2); }
+.help details[open] { border-color: var(--c-border-strong); }
+.help summary { cursor: pointer; font-weight: var(--fw-semibold); list-style-position: inside; }
+.help summary:hover { color: var(--c-accent); }
+.help details p { margin: var(--sp-2) 0 0; color: var(--c-text-muted); line-height: var(--lh-base); }
+.help code { font-family: var(--font-mono); font-size: var(--fs-sm); background: var(--c-surface-2); padding: 1px 5px; border-radius: var(--r-sm); color: var(--c-text); }
+.help a { color: var(--c-accent); }

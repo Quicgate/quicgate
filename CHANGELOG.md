@@ -4,6 +4,15 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-07-23
+
+### Added
+- In-app **Help & FAQ** page (the `?` icon in the top bar): common recipes and
+  concepts (access-list evaluation, the GET-from-everywhere pattern, hosts vs
+  streams, certs/HTTP-3, admin-port safety, API tokens). Embedded, works offline.
+
+[1.1.1]: https://github.com/maferick/quicgate/releases/tag/v1.1.1
+
 ## [1.1.0] - 2026-07-23
 
 ### Added

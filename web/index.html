@@ -61,6 +61,7 @@
     <div class="topbar__actions">
       <a id="qg-version" class="hs-muted mono" href="https://github.com/maferick/quicgate/releases" target="_blank" rel="noopener" style="font-size:var(--fs-xs);text-decoration:none" title="quicgate version — view releases"></a>
       <button id="me-email" class="hs-muted mono" data-page="profile" style="background:none;border:none;cursor:pointer;font:inherit" title="Profile"></button>
+      <button id="btn-help" class="btn btn--ghost btn--sm" title="Help &amp; FAQ" aria-label="Help">?</button>
       <button id="btn-theme" class="btn btn--ghost btn--sm" title="Toggle light/dark">◐</button>
       <button id="btn-logout" class="btn btn--ghost btn--sm">Sign out</button>
       <button id="btn-add" class="btn btn--primary">Add host</button>
@@ -277,6 +278,47 @@
         </div>
         <div id="restore-status" class="form-error" hidden></div>
       </div>
+      </div>
+    </div>
+
+    <div id="page-help" hidden>
+      <div class="card help">
+        <div class="card-head"><h2>Help &amp; FAQ</h2><a class="btn btn--ghost btn--sm" href="docs.html" target="_blank" rel="noopener">API docs</a></div>
+        <p class="hs-muted">Short answers to the things people ask most. Everything here is also in the <a href="https://github.com/maferick/quicgate" target="_blank" rel="noopener">README</a> and the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>.</p>
+
+        <h3>Access lists</h3>
+        <details><summary>How is an access list evaluated?</summary>
+          <p>IP rules are checked <b>top to bottom, first match wins</b>. If no rule matches, the request is <b>denied</b>. A list with no IP rules imposes no IP restriction. Basic-auth users are checked separately; <b>Satisfy</b> decides whether a request needs IP <em>or</em> login (<code>any</code>) or IP <em>and</em> login (<code>all</code>).</p></details>
+        <details><summary>Allow just GET from everywhere (public read-only)?</summary>
+          <p>One rule: <code>allow</code> · <code>IP/CIDR</code> <code>0.0.0.0/0</code> · click the <b>GET</b> chip (and <b>HEAD</b> — browsers and monitors send it). Everything else matches no rule and gets a 403. Add a twin rule with <code>::/0</code> if you serve IPv6.</p></details>
+        <details><summary>What do the method chips do?</summary>
+          <p>They scope a rule to specific HTTP verbs. None selected = the rule applies to every method. Lit chips = only those verbs. Combine with <code>Satisfy: any</code> + a basic-auth user to get "reads public, writes require login": <code>allow 0.0.0.0/0</code> with <b>GET, HEAD</b> lit.</p></details>
+        <details><summary>Country / dynamic-DNS rules?</summary>
+          <p>A rule's type can be <b>Country</b> (needs a <code>GeoLite2-Country.mmdb</code> in the data dir) or <b>Hostname</b> (a dynamic-DNS name, re-resolved periodically) instead of a CIDR.</p></details>
+
+        <h3>Proxy hosts vs streams</h3>
+        <details><summary>When do I use a proxy host vs a stream?</summary>
+          <p><b>Proxy host</b> = HTTP(S) reverse proxy (L7): TLS, HTTP/3, headers, paths, access lists. Use it for websites and APIs. <b>Stream</b> = raw TCP/UDP forward (L4): use it for non-HTTP services (game servers, databases, mail, SSH). Streams see the raw connection, not HTTP.</p></details>
+        <details><summary>Reuse an allowlist on a stream?</summary>
+          <p>On a stream, set <b>Source restriction</b> to an existing access list instead of retyping CIDRs — its allow CIDR/host rules become the source filter (only IP rules apply at L4; basic-auth/GeoIP/method rules are ignored there).</p></details>
+
+        <h3>Certificates &amp; HTTP/3</h3>
+        <details><summary>How do certificates work?</summary>
+          <p>Set a host's cert mode to <b>Automatic</b> for Let's Encrypt (HTTP-01, or DNS-01 for wildcards once a DNS provider is configured in Settings), <b>Custom</b> to use an uploaded cert, or <b>None</b> for plain HTTP. Watch issuance on the <b>Certificates</b> page.</p></details>
+        <details><summary>HTTP/3 isn't working from outside?</summary>
+          <p>HTTP/3 needs <b>UDP 443</b> forwarded to this host (TCP 443 alone isn't enough). Browsers upgrade via <code>Alt-Svc</code> and cache the hint ~30 days; a host's per-host HTTP/3 toggle sends <code>Alt-Svc: clear</code> to drop it. Let <code>QG_UPNP=1</code> open the ports, or forward them manually.</p></details>
+
+        <h3>Security &amp; ops</h3>
+        <details><summary>Is it safe to expose the admin UI?</summary>
+          <p><b>No.</b> Never expose the admin port (81) to the internet. Put it behind quicgate itself with an access list, a VPN, or a firewall rule — treat it like any other private service. Change the default <code>admin@example.com</code>/<code>changeme</code> on first run and enable 2FA (Profile).</p></details>
+        <details><summary>How do I script quicgate / use the API?</summary>
+          <p>Create a bearer token in <b>Profile → API tokens</b> and send <code>Authorization: Bearer &lt;token&gt;</code>. Everything the UI does is a REST call — see the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>. <code>POST /api/import</code> does idempotent bulk config-as-code.</p></details>
+        <details><summary>Forward-auth / SSO in front of a host?</summary>
+          <p>On a proxy host, enable <b>Forward authentication</b> and point it at an Authelia / Authentik / Keycloak verify endpoint. quicgate itself stays password + optional OIDC/LDAP for the admin login.</p></details>
+        <details><summary>Backup, metrics, logs?</summary>
+          <p><b>System</b> page has the JSON access-log viewer (per-host logs are on each host's <em>Logs</em> button). <b>Settings</b> has one-click backup/restore. Prometheus scrape at <code>/metrics</code> (needs a bearer token).</p></details>
+
+        <p class="hs-muted" style="margin-top:var(--sp-4)">Found a bug or have an idea? <a href="https://github.com/maferick/quicgate/issues" target="_blank" rel="noopener">Open an issue</a>. Security problems: see the repo's <a href="https://github.com/maferick/quicgate/security/policy" target="_blank" rel="noopener">security policy</a> (don't use public issues).</p>
       </div>
     </div>
   </main>
