@@ -47,6 +47,7 @@
         <button class="pagelink is-active" data-page="hosts">Proxy Hosts</button>
         <button class="pagelink" data-page="access">Access Lists</button>
         <button class="pagelink" data-page="streams">Streams</button>
+        <button class="pagelink" data-page="certs">Certificates</button>
         <button class="pagelink" data-page="settings">Settings</button>
       </nav>
     </div>
@@ -54,9 +55,10 @@
       <span id="me-email" class="hs-muted mono"></span>
       <button id="btn-theme" class="btn btn--ghost btn--sm" title="Toggle light/dark">◐</button>
       <button id="btn-logout" class="btn btn--ghost btn--sm">Sign out</button>
-      <button id="btn-add" class="btn btn--primary">Add proxy host</button>
+      <button id="btn-add" class="btn btn--primary">Add host</button>
       <button id="btn-add-acl" class="btn btn--primary" hidden>Add access list</button>
       <button id="btn-add-stream" class="btn btn--primary" hidden>Add stream</button>
+      <button id="btn-add-cert" class="btn btn--primary" hidden>Upload certificate</button>
     </div>
   </header>
 
@@ -103,12 +105,26 @@
       </div>
     </div>
 
+    <div id="page-certs" hidden>
+      <div class="card">
+        <table class="table" id="ccerts-table">
+          <thead><tr><th>Name</th><th>Domains</th><th>Expires</th><th></th></tr></thead>
+          <tbody id="ccerts-body"></tbody>
+        </table>
+        <div id="ccerts-empty" class="empty" hidden>No uploaded certificates. Upload one to use certMode "custom" on a host.</div>
+      </div>
+    </div>
+
     <div id="page-settings" hidden>
       <div class="card" style="max-width:560px">
         <div class="card-head"><h2>ACME / Let's Encrypt</h2></div>
         <form id="settings-form">
           <label class="field"><span>Account email</span><input id="set-acme-email" type="email" class="mono"></label>
           <label class="check"><input type="checkbox" id="set-acme-staging"><span>Use the staging CA <em>(test certs, no rate limits; browsers will warn)</em></span></label>
+          <label class="field field--sm"><span>DNS provider <em>(for wildcard certs)</em></span>
+            <select id="set-dns-provider"><option value="">None (HTTP-01)</option><option value="transip">TransIP (DNS-01)</option></select></label>
+          <label class="field" id="dns-config-field" hidden><span>TransIP credentials <em>(JSON: {"login":"...","private_key":"..."})</em></span>
+            <textarea id="set-dns-config" rows="3" class="mono" placeholder='{"login":"maferick","private_key":"-----BEGIN PRIVATE KEY-----\n..."}'></textarea></label>
           <label class="field"><span>Alert webhook URL <em>(ntfy/Gotify style; POSTed on certificate failures)</em></span>
             <input id="set-notify-url" type="url" class="mono" placeholder="https://ntfy.sh/your-topic"></label>
           <div id="settings-error" class="form-error" hidden></div>
@@ -116,6 +132,22 @@
             <button type="button" id="btn-notify-test" class="btn btn--secondary">Send test alert</button>
             <button type="submit" class="btn btn--primary">Save</button>
           </div>
+        </form>
+      </div>
+
+      <div class="card" style="max-width:560px; margin-top:var(--sp-6)">
+        <div class="card-head"><h2>Default site</h2></div>
+        <p class="hs-muted">What to serve for hostnames that match no configured host.</p>
+        <form id="defaultsite-form">
+          <label class="field field--sm"><span>Behaviour</span>
+            <select id="set-default-site">
+              <option value="404">404 page</option>
+              <option value="html">Custom HTML</option>
+              <option value="redirect">Redirect</option>
+            </select></label>
+          <label class="field" id="default-site-value-field" hidden><span id="default-site-value-label">Value</span>
+            <textarea id="set-default-site-value" rows="3" class="mono"></textarea></label>
+          <div class="modal-actions"><button type="submit" class="btn btn--primary">Save</button></div>
         </form>
       </div>
 
@@ -191,6 +223,25 @@
   </div>
 </div>
 
+<!-- custom cert modal -->
+<div id="cert-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="card-head"><h2 id="cert-modal-title">Upload certificate</h2><button id="cert-modal-close" class="btn btn--ghost btn--sm">&times;</button></div>
+    <form id="cert-form">
+      <label class="field"><span>Name</span><input id="c-name" required></label>
+      <label class="field"><span>Certificate (PEM, full chain)</span>
+        <textarea id="c-cert" rows="6" class="mono" required placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+      <label class="field"><span>Private key (PEM) <em id="c-key-hint"></em></span>
+        <textarea id="c-key" rows="5" class="mono" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
+      <div id="cert-error" class="form-error" hidden></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn--secondary" id="cert-btn-cancel">Cancel</button>
+        <button type="submit" class="btn btn--primary">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- host modal -->
 <div id="modal" class="modal-backdrop" hidden>
   <div class="modal card">
@@ -199,32 +250,67 @@
     <nav class="tabs" id="modal-tabs">
       <button class="tab is-active" data-tab="general">General</button>
       <button class="tab" data-tab="tls">TLS</button>
-      <button class="tab" data-tab="upstream">Upstream</button>
-      <button class="tab" data-tab="headers">Headers</button>
+      <button class="tab" data-tab="upstream" data-proxyonly>Upstream</button>
+      <button class="tab" data-tab="headers" data-proxyonly>Headers</button>
+      <button class="tab" data-tab="security">Security</button>
     </nav>
 
     <form id="host-form">
       <section class="tabpane" data-pane="general">
+        <div class="field-row">
+          <label class="field field--sm"><span>Type</span>
+            <select id="f-type">
+              <option value="proxy">Proxy host</option>
+              <option value="redirect">Redirection</option>
+              <option value="dead">404 (dead) host</option>
+            </select></label>
+        </div>
         <label class="field"><span>Domain names <em>(one per line, *.wildcards allowed)</em></span>
           <textarea id="f-domains" rows="3" class="mono" required></textarea></label>
-        <div class="field-row">
+        <div class="field-row" id="f-upstream-row">
           <label class="field field--sm"><span>Scheme</span>
             <select id="f-scheme"><option>http</option><option>https</option></select></label>
-          <label class="field"><span>Forward host / IP</span><input id="f-uhost" class="mono" required></label>
-          <label class="field field--sm"><span>Port</span><input id="f-uport" type="number" min="1" max="65535" required></label>
+          <label class="field"><span>Forward host / IP</span><input id="f-uhost" class="mono"></label>
+          <label class="field field--sm"><span>Port</span><input id="f-uport" type="number" min="1" max="65535"></label>
+        </div>
+        <div id="f-redirect-block" hidden>
+          <div class="field-row">
+            <label class="field field--sm"><span>HTTP code</span>
+              <select id="f-rcode"><option>301</option><option>302</option><option>307</option><option>308</option><option>300</option></select></label>
+            <label class="field field--sm"><span>Scheme</span>
+              <select id="f-rscheme"><option value="auto">auto</option><option value="https">https</option><option value="http">http</option></select></label>
+            <label class="field"><span>Target host <em>(no scheme)</em></span><input id="f-rhost" class="mono" placeholder="example.com"></label>
+          </div>
+          <label class="check"><input type="checkbox" id="f-rpath" checked><span>Preserve path and query</span></label>
         </div>
         <label class="field field--sm"><span>Access list</span>
           <select id="f-accesslist"><option value="">Publicly accessible</option></select></label>
-        <label class="check"><input type="checkbox" id="f-noindex"><span>Block search engine indexing <em>(X-Robots-Tag: noindex)</em></span></label>
         <label class="check"><input type="checkbox" id="f-enabled" checked><span>Enabled</span></label>
+      </section>
+
+      <section class="tabpane" data-pane="security" hidden>
+        <label class="check"><input type="checkbox" id="f-noindex"><span>Block search engine indexing <em>(X-Robots-Tag: noindex)</em></span></label>
+        <label class="check"><input type="checkbox" id="f-exploits"><span>Block common exploits <em>(SQLi / traversal / injection tripwire)</em></span></label>
+        <label class="check" data-proxyonly><input type="checkbox" id="f-compress"><span>Compress responses <em>(gzip)</em></span></label>
+        <fieldset class="group">
+          <legend>Rate limit (per client IP)</legend>
+          <label class="check"><input type="checkbox" id="f-ratelimit"><span>Enable</span></label>
+          <div class="field-row">
+            <label class="field field--sm"><span>Requests / sec</span><input id="f-rate-rps" type="number" min="1" step="0.5" placeholder="10"></label>
+            <label class="field field--sm"><span>Burst</span><input id="f-rate-burst" type="number" min="1" placeholder="20"></label>
+          </div>
+        </fieldset>
       </section>
 
       <section class="tabpane" data-pane="tls" hidden>
         <label class="field"><span>Certificate</span>
           <select id="f-certmode">
             <option value="auto">Automatic (Let's Encrypt)</option>
+            <option value="custom">Custom (uploaded)</option>
             <option value="none">None (plain HTTP only)</option>
           </select></label>
+        <label class="field" id="f-certid-field" hidden><span>Uploaded certificate</span>
+          <select id="f-certid"></select></label>
         <label class="check"><input type="checkbox" id="f-forcessl" checked><span>Force SSL (redirect port 80 to https)</span></label>
         <label class="check"><input type="checkbox" id="f-http3" checked><span>Advertise HTTP/3 (Alt-Svc)</span></label>
         <label class="field field--sm"><span>Minimum TLS version</span>

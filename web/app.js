@@ -4,9 +4,11 @@ const $ = (id) => document.getElementById(id);
 const views = ['view-login', 'view-password', 'view-app'];
 let hosts = [];
 let accessLists = [];
+let customCerts = [];
 let editingId = null;
 let editingAclId = null;
 let editingStreamId = null;
+let editingCertId = null;
 
 /* ---- theme ---- */
 function applyTheme(theme) {
@@ -19,7 +21,7 @@ $('btn-theme').addEventListener('click', () => {
 });
 
 /* ---- page nav ---- */
-const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', settings: null };
+const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', certs: 'btn-add-cert', settings: null };
 function switchPage(name) {
   for (const b of $('pagenav').children) b.classList.toggle('is-active', b.dataset.page === name);
   for (const p of Object.keys(pages)) {
@@ -29,6 +31,7 @@ function switchPage(name) {
   if (name === 'hosts') refresh();
   if (name === 'access') refreshAcls();
   if (name === 'streams') refreshStreams();
+  if (name === 'certs') refreshCustomCerts();
   if (name === 'settings') loadSettings();
 }
 $('pagenav').addEventListener('click', (e) => {
@@ -119,7 +122,9 @@ function hostMatches(h, q) {
 $('host-search').addEventListener('input', () => renderHosts());
 
 async function refresh() {
-  [hosts, accessLists] = await Promise.all([api('GET', '/api/hosts'), api('GET', '/api/access-lists')]);
+  [hosts, accessLists, customCerts] = await Promise.all([
+    api('GET', '/api/hosts'), api('GET', '/api/access-lists'), api('GET', '/api/custom-certs'),
+  ]);
   renderHosts();
   refreshCerts();
 }
@@ -143,12 +148,20 @@ function renderHosts() {
 
     const tdUpstream = document.createElement('td');
     tdUpstream.className = 'domain';
-    tdUpstream.textContent = `${h.upstream.scheme}://${h.upstream.host}:${h.upstream.port}`;
+    if (h.type === 'redirect' && h.redirect) {
+      tdUpstream.innerHTML = `<span class="badge">${h.redirect.httpCode} redirect</span> ${h.redirect.targetHost}`;
+    } else if (h.type === 'dead') {
+      tdUpstream.innerHTML = '<span class="badge badge--danger">404 host</span>';
+    } else {
+      tdUpstream.textContent = `${h.upstream.scheme}://${h.upstream.host}:${h.upstream.port}`;
+    }
 
     const tdTLS = document.createElement('td');
     const badge = document.createElement('span');
-    badge.className = 'badge' + (h.certMode === 'auto' ? ' badge--success' : '');
-    badge.textContent = h.certMode === 'auto' ? (h.forceSsl ? 'auto + force ssl' : 'auto') : 'http only';
+    const cm = h.certMode;
+    badge.className = 'badge' + (cm === 'auto' || cm === 'custom' ? ' badge--success' : '');
+    badge.textContent = cm === 'auto' ? (h.forceSsl ? 'auto + force ssl' : 'auto')
+      : cm === 'custom' ? 'custom cert' : 'http only';
     tdTLS.appendChild(badge);
 
     const tdAccess = document.createElement('td');
@@ -262,15 +275,36 @@ $('modal-tabs').addEventListener('click', (e) => {
   if (e.target.dataset.tab) switchTab(e.target.dataset.tab);
 });
 
+function syncHostType() {
+  const t = $('f-type').value;
+  $('f-upstream-row').hidden = t !== 'proxy';
+  $('f-redirect-block').hidden = t !== 'redirect';
+  for (const el of document.querySelectorAll('#modal [data-proxyonly]')) {
+    el.style.display = t === 'proxy' ? '' : 'none';
+  }
+}
+$('f-type').addEventListener('change', syncHostType);
+
+function syncCertMode() {
+  $('f-certid-field').hidden = $('f-certmode').value !== 'custom';
+}
+$('f-certmode').addEventListener('change', syncCertMode);
+
 function openModal(h) {
   editingId = h ? h.id : null;
-  $('modal-title').textContent = h ? 'Edit proxy host' : 'Add proxy host';
+  $('modal-title').textContent = h ? 'Edit host' : 'Add host';
   setError('host-error', null);
   const o = (h && h.options) || {};
+  $('f-type').value = h ? h.type : 'proxy';
   $('f-domains').value = h ? h.domains.join('\n') : '';
-  $('f-scheme').value = h ? h.upstream.scheme : 'http';
-  $('f-uhost').value = h ? h.upstream.host : '';
-  $('f-uport').value = h ? h.upstream.port : '';
+  $('f-scheme').value = h && h.upstream ? h.upstream.scheme : 'http';
+  $('f-uhost').value = h && h.upstream ? h.upstream.host : '';
+  $('f-uport').value = h && h.upstream && h.upstream.port ? h.upstream.port : '';
+  const rd = (h && h.redirect) || {};
+  $('f-rcode').value = rd.httpCode || 301;
+  $('f-rscheme').value = rd.targetScheme || 'auto';
+  $('f-rhost').value = rd.targetHost || '';
+  $('f-rpath').checked = rd.preservePath !== false;
   $('f-enabled').checked = h ? h.enabled : true;
   const sel = $('f-accesslist');
   sel.innerHTML = '<option value="">Publicly accessible</option>';
@@ -282,6 +316,15 @@ function openModal(h) {
   }
   sel.value = h && h.accessListId ? String(h.accessListId) : '';
   $('f-certmode').value = h ? h.certMode : 'auto';
+  const csel = $('f-certid');
+  csel.innerHTML = '';
+  for (const c of customCerts) {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.textContent = `${c.name} (${(c.domains || []).join(', ')})`;
+    csel.appendChild(opt);
+  }
+  csel.value = h && h.certId ? String(h.certId) : '';
   $('f-forcessl').checked = h ? h.forceSsl : true;
   $('f-http3').checked = o.http3 !== false;
   $('f-mintls').value = o.minTlsVersion || '';
@@ -290,6 +333,11 @@ function openModal(h) {
   $('f-hsts-sub').checked = !!(o.hsts && o.hsts.includeSubdomains);
   $('f-hsts-preload').checked = !!(o.hsts && o.hsts.preload);
   $('f-noindex').checked = !!o.blockIndexing;
+  $('f-exploits').checked = !!o.blockExploits;
+  $('f-compress').checked = !!o.compression;
+  $('f-ratelimit').checked = !!o.rateLimit;
+  $('f-rate-rps').value = o.rateLimit ? o.rateLimit.rps : '';
+  $('f-rate-burst').value = o.rateLimit ? o.rateLimit.burst : '';
   $('f-preservehost').checked = !!o.preserveHost;
   $('f-hostoverride').value = o.hostOverride || '';
   $('f-skipverify').checked = !!o.skipTlsVerify;
@@ -303,6 +351,8 @@ function openModal(h) {
   $('resp-headers').innerHTML = '';
   for (const r of o.requestHeaders || []) addHdrRow('req-headers', r);
   for (const r of o.responseHeaders || []) addHdrRow('resp-headers', r);
+  syncHostType();
+  syncCertMode();
   switchTab('general');
   $('modal').hidden = false;
 }
@@ -317,16 +367,25 @@ $('btn-cancel').addEventListener('click', closeModal);
 $('host-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   setError('host-error', null);
+  const type = $('f-type').value;
+  const certMode = $('f-certmode').value;
   const host = {
-    type: 'proxy',
+    type,
     domains: $('f-domains').value.split('\n').map((s) => s.trim()).filter(Boolean),
-    upstream: {
+    upstream: type === 'proxy' ? {
       scheme: $('f-scheme').value,
       host: $('f-uhost').value.trim(),
       port: parseInt($('f-uport').value, 10),
-    },
-    certMode: $('f-certmode').value,
-    forceSsl: $('f-certmode').value === 'auto' && $('f-forcessl').checked,
+    } : { scheme: 'http', host: '', port: 0 },
+    redirect: type === 'redirect' ? {
+      httpCode: parseInt($('f-rcode').value, 10),
+      targetScheme: $('f-rscheme').value,
+      targetHost: $('f-rhost').value.trim(),
+      preservePath: $('f-rpath').checked,
+    } : null,
+    certMode,
+    certId: certMode === 'custom' && $('f-certid').value ? parseInt($('f-certid').value, 10) : null,
+    forceSsl: (certMode === 'auto' || certMode === 'custom') && $('f-forcessl').checked,
     enabled: $('f-enabled').checked,
     accessListId: $('f-accesslist').value ? parseInt($('f-accesslist').value, 10) : null,
     options: {
@@ -340,6 +399,11 @@ $('host-form').addEventListener('submit', async (e) => {
       maxBodyMb: parseInt($('f-maxbody').value, 10) || 0,
       buffering: $('f-buffering').checked ? undefined : false,
       blockIndexing: $('f-noindex').checked,
+      blockExploits: $('f-exploits').checked,
+      compression: $('f-compress').checked,
+      rateLimit: $('f-ratelimit').checked
+        ? { rps: parseFloat($('f-rate-rps').value) || 10, burst: parseInt($('f-rate-burst').value, 10) || 20 }
+        : null,
       requestHeaders: readHdrRows('req-headers'),
       responseHeaders: readHdrRows('resp-headers'),
       hsts: {
@@ -585,12 +649,96 @@ $('stream-form').addEventListener('submit', async (e) => {
   }
 });
 
+/* ---- custom certificates page ---- */
+async function refreshCustomCerts() {
+  customCerts = await api('GET', '/api/custom-certs');
+  const body = $('ccerts-body');
+  body.innerHTML = '';
+  $('ccerts-empty').hidden = customCerts.length > 0;
+  for (const c of customCerts) {
+    const tr = document.createElement('tr');
+    const expired = c.notAfter && new Date(c.notAfter) < new Date();
+    tr.innerHTML =
+      `<td>${c.name}</td>` +
+      `<td class="domain">${(c.domains || []).join(', ')}</td>` +
+      `<td class="domain"><span class="badge ${expired ? 'badge--danger' : 'badge--success'}">${c.notAfter ? new Date(c.notAfter).toLocaleDateString() : '-'}</span></td>`;
+    const tdActions = document.createElement('td');
+    tdActions.style.textAlign = 'right';
+    const btnEdit = document.createElement('button');
+    btnEdit.className = 'btn btn--secondary btn--sm';
+    btnEdit.textContent = 'Replace';
+    btnEdit.addEventListener('click', () => openCertModal(c));
+    const btnDel = document.createElement('button');
+    btnDel.className = 'btn btn--danger btn--sm';
+    btnDel.textContent = 'Delete';
+    btnDel.style.marginLeft = '8px';
+    btnDel.addEventListener('click', async () => {
+      if (!confirm(`Delete certificate "${c.name}"?`)) return;
+      try {
+        await api('DELETE', `/api/custom-certs/${c.id}`);
+        refreshCustomCerts();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+    tdActions.append(btnEdit, btnDel);
+    tr.appendChild(tdActions);
+    body.appendChild(tr);
+  }
+}
+
+function openCertModal(c) {
+  editingCertId = c ? c.id : null;
+  $('cert-modal-title').textContent = c ? 'Replace certificate' : 'Upload certificate';
+  setError('cert-error', null);
+  $('c-name').value = c ? c.name : '';
+  $('c-cert').value = '';
+  $('c-key').value = '';
+  $('c-key-hint').textContent = c ? '(re-paste both cert and key to replace)' : '';
+  $('cert-modal').hidden = false;
+}
+$('btn-add-cert').addEventListener('click', () => openCertModal(null));
+$('cert-modal-close').addEventListener('click', () => { $('cert-modal').hidden = true; });
+$('cert-btn-cancel').addEventListener('click', () => { $('cert-modal').hidden = true; });
+
+$('cert-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  setError('cert-error', null);
+  const c = { name: $('c-name').value.trim(), certPem: $('c-cert').value, keyPem: $('c-key').value };
+  try {
+    if (editingCertId) await api('PUT', `/api/custom-certs/${editingCertId}`, c);
+    else await api('POST', '/api/custom-certs', c);
+    $('cert-modal').hidden = true;
+    refreshCustomCerts();
+  } catch (err) {
+    setError('cert-error', err);
+  }
+});
+
 /* ---- settings page ---- */
+function syncDnsField() {
+  $('dns-config-field').hidden = $('set-dns-provider').value === '';
+}
+$('set-dns-provider').addEventListener('change', syncDnsField);
+
+function syncDefaultSiteField() {
+  const v = $('set-default-site').value;
+  $('default-site-value-field').hidden = v === '404';
+  $('default-site-value-label').textContent = v === 'redirect' ? 'Redirect URL' : 'HTML';
+}
+$('set-default-site').addEventListener('change', syncDefaultSiteField);
+
 async function loadSettings() {
   const s = await api('GET', '/api/settings');
   $('set-acme-email').value = s.acme_email || '';
   $('set-acme-staging').checked = s.acme_staging === '1';
   $('set-notify-url').value = s.notify_url || '';
+  $('set-dns-provider').value = s.acme_dns_provider || '';
+  $('set-dns-config').value = s.acme_dns_config || '';
+  $('set-default-site').value = s.default_site || '404';
+  $('set-default-site-value').value = s.default_site_value || '';
+  syncDnsField();
+  syncDefaultSiteField();
 }
 
 $('settings-form').addEventListener('submit', async (e) => {
@@ -601,9 +749,24 @@ $('settings-form').addEventListener('submit', async (e) => {
       acme_email: $('set-acme-email').value.trim(),
       acme_staging: $('set-acme-staging').checked ? '1' : '0',
       notify_url: $('set-notify-url').value.trim(),
+      acme_dns_provider: $('set-dns-provider').value,
+      acme_dns_config: $('set-dns-config').value.trim(),
     });
+    setError('settings-error', 'Saved.');
   } catch (err) {
     setError('settings-error', err);
+  }
+});
+
+$('defaultsite-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('PUT', '/api/settings', {
+      default_site: $('set-default-site').value,
+      default_site_value: $('set-default-site-value').value,
+    });
+  } catch (err) {
+    alert(err.message);
   }
 });
 

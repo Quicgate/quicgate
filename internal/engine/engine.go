@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"github.com/libdns/transip"
+	"github.com/mholt/acmez/v3"
 	"github.com/quic-go/quic-go/http3"
 
 	"quicgate/internal/store"
@@ -68,10 +71,12 @@ type Engine struct {
 	streams *StreamManager
 	upnp    *UPnPManager
 
-	acmeStaging bool
-	acmeEmail   string
-	certs       *certTracker
-	accessLog   *accessLogger
+	acmeStaging   bool
+	acmeEmail     string
+	acmeDNS       string
+	acmeDNSConfig string
+	certs         *certTracker
+	accessLog     *accessLogger
 }
 
 func New(cfg Config, st *store.Store) *Engine {
@@ -105,35 +110,61 @@ func New(cfg Config, st *store.Store) *Engine {
 }
 
 // buildIssuer (re)creates the ACME issuer from the current staging/email
-// fields and wires it into the magic config. Called at startup and whenever
-// those settings change.
+// fields plus any configured DNS-01 provider, and wires it into the magic
+// config. Called at startup and whenever those settings change.
 func (e *Engine) buildIssuer() {
 	ca := certmagic.LetsEncryptProductionCA
 	if e.acmeStaging {
 		ca = certmagic.LetsEncryptStagingCA
 	}
-	e.acme = certmagic.NewACMEIssuer(e.magic, certmagic.ACMEIssuer{
+	tmpl := certmagic.ACMEIssuer{
 		CA:     ca,
 		Email:  e.acmeEmail,
 		Agreed: true,
-	})
+	}
+	if solver := e.dnsSolver(); solver != nil {
+		tmpl.DNS01Solver = solver
+		log.Printf("engine: DNS-01 solver active (%s), wildcard certs enabled", e.acmeDNS)
+	}
+	e.acme = certmagic.NewACMEIssuer(e.magic, tmpl)
 	e.magic.Issuers = []certmagic.Issuer{e.acme}
 }
 
-// applyACMESettings reads staging/email overrides from the store and rebuilds
-// the issuer only when they changed.
-func (e *Engine) applyACMESettings() {
-	staging := e.store.GetSetting("acme_staging", "") == "1"
-	email := e.store.GetSetting("acme_email", e.cfg.ACMEEmail)
-	if e.store.GetSetting("acme_staging", "") == "" {
-		staging = e.cfg.ACMEStage // no override stored: keep env default
+// dnsSolver builds a DNS-01 solver from the configured provider, or nil.
+func (e *Engine) dnsSolver() acmez.Solver {
+	switch e.acmeDNS {
+	case "transip":
+		var cfg struct {
+			Login      string `json:"login"`
+			PrivateKey string `json:"private_key"`
+		}
+		if err := json.Unmarshal([]byte(e.acmeDNSConfig), &cfg); err != nil || cfg.Login == "" || cfg.PrivateKey == "" {
+			log.Printf("engine: transip DNS config invalid, DNS-01 disabled")
+			return nil
+		}
+		return &certmagic.DNS01Solver{DNSManager: certmagic.DNSManager{
+			DNSProvider: &transip.Provider{AuthLogin: cfg.Login, PrivateKey: cfg.PrivateKey},
+		}}
 	}
-	if staging == e.acmeStaging && email == e.acmeEmail {
+	return nil
+}
+
+// applyACMESettings reads ACME overrides from the store and rebuilds the
+// issuer only when any of them changed.
+func (e *Engine) applyACMESettings() {
+	staging := e.cfg.ACMEStage
+	if v := e.store.GetSetting("acme_staging", ""); v != "" {
+		staging = v == "1"
+	}
+	email := e.store.GetSetting("acme_email", e.cfg.ACMEEmail)
+	dns := e.store.GetSetting("acme_dns_provider", "")
+	dnsConfig := e.store.GetSetting("acme_dns_config", "")
+	if staging == e.acmeStaging && email == e.acmeEmail && dns == e.acmeDNS && dnsConfig == e.acmeDNSConfig {
 		return
 	}
-	e.acmeStaging, e.acmeEmail = staging, email
+	e.acmeStaging, e.acmeEmail, e.acmeDNS, e.acmeDNSConfig = staging, email, dns, dnsConfig
 	e.buildIssuer()
-	log.Printf("engine: ACME settings changed (staging=%v, email=%q), issuer rebuilt", staging, email)
+	log.Printf("engine: ACME settings changed (staging=%v, email=%q, dns=%q), issuer rebuilt", staging, email, dns)
 }
 
 // Reload rebuilds the routing table from the store and swaps it in atomically,
@@ -156,6 +187,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	e.loadCustomCerts(hosts)
 	t := &routingTable{exact: map[string]*route{}, wildcard: map[string]*route{}}
 	var managed []string
 	for _, h := range hosts {
@@ -212,9 +244,46 @@ func (e *Engine) Reload(ctx context.Context) error {
 	return nil
 }
 
+// loadCustomCerts caches any user-uploaded certificates so the TLS listener
+// serves them for their host without ACME. Idempotent across reloads.
+func (e *Engine) loadCustomCerts(hosts []store.Host) {
+	if e.cfg.DisableTLS {
+		return
+	}
+	seen := map[int64]bool{}
+	for _, h := range hosts {
+		if h.CertMode != "custom" || h.CertID == nil || seen[*h.CertID] {
+			continue
+		}
+		seen[*h.CertID] = true
+		certPEM, keyPEM, err := e.store.GetCustomCertPEM(*h.CertID)
+		if err != nil {
+			log.Printf("engine: custom cert %d: %v", *h.CertID, err)
+			continue
+		}
+		if _, err := e.magic.CacheUnmanagedCertificatePEMBytes(context.Background(), []byte(certPEM), []byte(keyPEM), nil); err != nil {
+			log.Printf("engine: cache custom cert %d: %v", *h.CertID, err)
+		}
+	}
+}
+
 // buildRoute compiles one host's typed options into a ready http.Handler chain.
 func buildRoute(h store.Host, acl *compiledAccess) *route {
 	o := h.Options
+
+	// Redirect and dead hosts skip the proxy machinery entirely, but still
+	// get the access-list, rate-limit and exploit-filter wrappers.
+	if h.Type == "redirect" || h.Type == "dead" {
+		var handler http.Handler
+		if h.Type == "redirect" && h.Redirect != nil {
+			handler = buildRedirectHandler(*h.Redirect)
+		} else {
+			handler = deadHandler()
+		}
+		handler = wrapCommon(handler, o, acl)
+		return &route{host: h, proxy: handler}
+	}
+
 	target := &url.URL{Scheme: h.Upstream.Scheme, Host: fmt.Sprintf("%s:%d", h.Upstream.Host, h.Upstream.Port)}
 
 	dialTimeout := 10 * time.Second
@@ -284,6 +353,9 @@ func buildRoute(h store.Host, acl *compiledAccess) *route {
 	}
 
 	var handler http.Handler = proxy
+	if o.Compression {
+		handler = gzipWrap(handler)
+	}
 	if o.MaxBodyMB > 0 {
 		limit := int64(o.MaxBodyMB) << 20
 		inner := handler
@@ -292,10 +364,23 @@ func buildRoute(h store.Host, acl *compiledAccess) *route {
 			inner.ServeHTTP(w, r)
 		})
 	}
+	handler = wrapCommon(handler, o, acl)
+	return &route{host: h, proxy: handler}
+}
+
+// wrapCommon applies the middleware shared by every host type, outermost
+// first: access list -> rate limit -> exploit filter -> handler.
+func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess) http.Handler {
+	if o.BlockExploits {
+		handler = blockExploits(handler)
+	}
+	if o.RateLimit != nil {
+		handler = newRateLimiter(o.RateLimit).wrap(handler)
+	}
 	if acl != nil {
 		handler = acl.wrap(handler)
 	}
-	return &route{host: h, proxy: handler}
+	return handler
 }
 
 // applyHeaderRules runs the ordered typed header mutations. Values support
@@ -329,11 +414,30 @@ func expandPlaceholders(v string, in *http.Request) string {
 	return repl.Replace(v)
 }
 
+// serveUnmatched handles requests for hostnames with no configured host,
+// per the default-site setting: 404 page (default), custom HTML, or redirect.
+func (e *Engine) serveUnmatched(w http.ResponseWriter, r *http.Request) {
+	switch e.store.GetSetting("default_site", "404") {
+	case "html":
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, e.store.GetSetting("default_site_value", ""))
+	case "redirect":
+		if url := e.store.GetSetting("default_site_value", ""); url != "" {
+			http.Redirect(w, r, url, http.StatusFound)
+			return
+		}
+		serveDefault404(w)
+	default:
+		serveDefault404(w)
+	}
+}
+
 // serveHTTPS is the shared handler behind the TLS (TCP) and QUIC (UDP) listeners.
 func (e *Engine) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 	rt := e.table.Load().lookup(r.Host)
 	if rt == nil {
-		serveDefault404(w)
+		e.serveUnmatched(w, r)
 		return
 	}
 	o := rt.host.Options
@@ -361,7 +465,7 @@ func (e *Engine) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 func (e *Engine) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	rt := e.table.Load().lookup(r.Host)
 	if rt == nil {
-		serveDefault404(w)
+		e.serveUnmatched(w, r)
 		return
 	}
 	if rt.host.ForceSSL {

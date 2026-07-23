@@ -71,6 +71,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/hosts/{id}", s.auth(s.handleUpdateHost))
 	mux.HandleFunc("DELETE /api/hosts/{id}", s.auth(s.handleDeleteHost))
 	mux.HandleFunc("GET /api/certs", s.auth(s.handleCerts))
+	mux.HandleFunc("GET /api/custom-certs", s.auth(s.handleListCustomCerts))
+	mux.HandleFunc("POST /api/custom-certs", s.auth(s.handleCreateCustomCert))
+	mux.HandleFunc("PUT /api/custom-certs/{id}", s.auth(s.handleUpdateCustomCert))
+	mux.HandleFunc("DELETE /api/custom-certs/{id}", s.auth(s.handleDeleteCustomCert))
 	mux.HandleFunc("GET /api/access-lists", s.auth(s.handleListAccessLists))
 	mux.HandleFunc("POST /api/access-lists", s.auth(s.handleCreateAccessList))
 	mux.HandleFunc("PUT /api/access-lists/{id}", s.auth(s.handleUpdateAccessList))
@@ -98,9 +102,13 @@ func pathID(r *http.Request) (int64, error) {
 // settingsKeys is the closed set of UI-editable settings; unknown keys are
 // rejected, in keeping with the no-silent-drop contract.
 var settingsKeys = map[string]bool{
-	"acme_staging": true, // "1" = Let's Encrypt staging CA
-	"acme_email":   true,
-	"notify_url":   true, // webhook (ntfy/Gotify style) for failure alerts
+	"acme_staging":       true, // "1" = Let's Encrypt staging CA
+	"acme_email":         true,
+	"notify_url":         true, // webhook (ntfy/Gotify style) for failure alerts
+	"default_site":       true, // 404 | html | redirect for unmatched hosts
+	"default_site_value": true, // custom HTML or redirect URL
+	"acme_dns_provider":  true, // "" | transip  (DNS-01 for wildcards)
+	"acme_dns_config":    true, // provider credentials (JSON)
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -464,6 +472,73 @@ func (s *Server) handleCerts(w http.ResponseWriter, r *http.Request) {
 		statuses = []engine.CertStatus{}
 	}
 	writeJSON(w, http.StatusOK, statuses)
+}
+
+func (s *Server) handleListCustomCerts(w http.ResponseWriter, r *http.Request) {
+	certs, err := s.store.ListCustomCerts()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if certs == nil {
+		certs = []store.CustomCert{}
+	}
+	writeJSON(w, http.StatusOK, certs)
+}
+
+func (s *Server) handleCreateCustomCert(w http.ResponseWriter, r *http.Request) {
+	var c store.CustomCert
+	if err := decodeStrict(r, &c); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.CreateCustomCert(&c); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.reload(r.Context())
+	writeJSON(w, http.StatusCreated, c)
+}
+
+func (s *Server) handleUpdateCustomCert(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var c store.CustomCert
+	if err := decodeStrict(r, &c); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.UpdateCustomCertPEM(id, &c); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, http.StatusNotFound, "certificate not found")
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.reload(r.Context())
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Server) handleDeleteCustomCert(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if err := s.store.DeleteCustomCert(id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, http.StatusNotFound, "certificate not found")
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.reload(r.Context())
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) reload(ctx context.Context) {

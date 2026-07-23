@@ -5,8 +5,12 @@ go 1.25.0
 require (
 	github.com/caddyserver/certmagic v0.25.4
 	github.com/huin/goupnp v1.3.0
+	github.com/klauspost/compress v1.19.1
+	github.com/libdns/transip v1.1.2
+	github.com/mholt/acmez/v3 v3.1.6
 	github.com/quic-go/quic-go v0.60.0
 	golang.org/x/crypto v0.54.0
+	golang.org/x/time v0.15.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	modernc.org/sqlite v1.54.0
 )
@@ -18,9 +22,9 @@ require (
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/libdns/libdns v1.1.1 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/mholt/acmez/v3 v3.1.6 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/pbergman/provider v1.1.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
