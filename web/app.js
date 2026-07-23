@@ -259,6 +259,7 @@ async function refreshCerts() {
   const body = $('certs-body');
   body.innerHTML = '';
   $('certs-empty').hidden = certs.length > 0;
+  certs.sort((a, b) => a.domain.localeCompare(b.domain));
   for (const c of certs) {
     const tr = document.createElement('tr');
     const badgeClass = c.status === 'issued' ? 'badge badge--success'
