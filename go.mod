@@ -11,6 +11,7 @@ require (
 	github.com/libdns/transip v1.1.2
 	github.com/mholt/acmez/v3 v3.1.6
 	github.com/oschwald/maxminddb-golang v1.13.1
+	github.com/pires/go-proxyproto v0.15.0
 	github.com/pquerna/otp v1.5.0
 	github.com/quic-go/quic-go v0.60.0
 	golang.org/x/crypto v0.54.0

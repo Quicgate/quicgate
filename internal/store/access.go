@@ -216,16 +216,45 @@ func (st *Stream) Validate(others []Stream, reserved []int) error {
 	if st.ListenPort < 1 || st.ListenPort > 65535 {
 		return fmt.Errorf("listen port %d out of range", st.ListenPort)
 	}
+	if st.ListenPortEnd != 0 {
+		if st.ListenPortEnd < st.ListenPort || st.ListenPortEnd > 65535 {
+			return fmt.Errorf("listen port range end %d invalid", st.ListenPortEnd)
+		}
+		if st.Protocol == "udp" || st.Protocol == "both" {
+			return errors.New("port ranges are TCP-only")
+		}
+	}
+	lastPort := st.ListenPort
+	if st.ListenPortEnd > 0 {
+		lastPort = st.ListenPortEnd
+	}
 	for _, p := range reserved {
-		if st.ListenPort == p {
+		if p >= st.ListenPort && p <= lastPort {
 			return fmt.Errorf("port %d is reserved by the proxy engine", p)
 		}
 	}
-	if strings.TrimSpace(st.ForwardHost) == "" {
+	if strings.TrimSpace(st.ForwardHost) == "" && len(st.SNIRoutes) == 0 {
 		return errors.New("forward host is required")
 	}
-	if st.ForwardPort < 1 || st.ForwardPort > 65535 {
+	if st.ForwardPort != 0 && (st.ForwardPort < 1 || st.ForwardPort > 65535) {
 		return fmt.Errorf("forward port %d out of range", st.ForwardPort)
+	}
+	switch st.SendProxyProtocol {
+	case "", "v1", "v2":
+	default:
+		return fmt.Errorf("sendProxyProtocol must be v1 or v2, got %q", st.SendProxyProtocol)
+	}
+	if st.TerminateTLS && st.CertID == nil {
+		return errors.New("TLS termination requires a certificate")
+	}
+	tcpOnly := st.SendProxyProtocol != "" || st.AcceptProxyProtocol || st.TerminateTLS || len(st.SNIRoutes) > 0
+	if tcpOnly && st.Protocol != "tcp" {
+		return errors.New("PROXY protocol, TLS termination and SNI routing are TCP-only")
+	}
+	for i, sr := range st.SNIRoutes {
+		if strings.TrimSpace(sr.Host) == "" || strings.TrimSpace(sr.ForwardHost) == "" || sr.ForwardPort < 1 {
+			return fmt.Errorf("SNI route %d: host, forwardHost and forwardPort are required", i+1)
+		}
 	}
 	for i, c := range st.AllowedCIDRs {
 		cidr := strings.TrimSpace(c)
@@ -241,29 +270,65 @@ func (st *Stream) Validate(others []Stream, reserved []int) error {
 		}
 		st.AllowedCIDRs[i] = cidr
 	}
-	overlaps := func(a, b string) bool { return a == "both" || b == "both" || a == b }
+	protoOverlaps := func(a, b string) bool { return a == "both" || b == "both" || a == b }
+	rangeEnd := func(s Stream) int {
+		if s.ListenPortEnd > 0 {
+			return s.ListenPortEnd
+		}
+		return s.ListenPort
+	}
 	for _, o := range others {
-		if o.ID != st.ID && o.ListenPort == st.ListenPort && overlaps(o.Protocol, st.Protocol) {
-			return fmt.Errorf("port %d/%s is already used by stream %d", st.ListenPort, st.Protocol, o.ID)
+		if o.ID == st.ID || !protoOverlaps(o.Protocol, st.Protocol) {
+			continue
+		}
+		if st.ListenPort <= rangeEnd(o) && o.ListenPort <= lastPort {
+			return fmt.Errorf("port range %d-%d/%s overlaps stream %d", st.ListenPort, lastPort, st.Protocol, o.ID)
 		}
 	}
 	return nil
 }
 
+// streamExtra holds the round-2 fields serialized into the streams.extra column.
+type streamExtra struct {
+	ListenPortEnd       int        `json:"listenPortEnd,omitempty"`
+	SendProxyProtocol   string     `json:"sendProxyProtocol,omitempty"`
+	AcceptProxyProtocol bool       `json:"acceptProxyProtocol,omitempty"`
+	TerminateTLS        bool       `json:"terminateTls,omitempty"`
+	CertID              *int64     `json:"certId,omitempty"`
+	SNIRoutes           []SNIRoute `json:"sniRoutes,omitempty"`
+}
+
 func scanStream(row interface{ Scan(...any) error }) (Stream, error) {
 	var st Stream
 	var enabled int
-	var cidrs string
-	err := row.Scan(&st.ID, &st.ListenPort, &st.Protocol, &st.ForwardHost, &st.ForwardPort, &enabled, &st.CreatedAt, &st.UpdatedAt, &cidrs)
+	var cidrs, extra string
+	err := row.Scan(&st.ID, &st.ListenPort, &st.Protocol, &st.ForwardHost, &st.ForwardPort, &enabled, &st.CreatedAt, &st.UpdatedAt, &cidrs, &extra)
 	if err != nil {
 		return st, err
 	}
 	st.Enabled = enabled == 1
-	err = json.Unmarshal([]byte(cidrs), &st.AllowedCIDRs)
-	return st, err
+	if err := json.Unmarshal([]byte(cidrs), &st.AllowedCIDRs); err != nil {
+		return st, err
+	}
+	var e streamExtra
+	if err := json.Unmarshal([]byte(extra), &e); err != nil {
+		return st, err
+	}
+	st.ListenPortEnd, st.SendProxyProtocol, st.AcceptProxyProtocol = e.ListenPortEnd, e.SendProxyProtocol, e.AcceptProxyProtocol
+	st.TerminateTLS, st.CertID, st.SNIRoutes = e.TerminateTLS, e.CertID, e.SNIRoutes
+	return st, nil
 }
 
-const streamCols = "id, listen_port, protocol, fwd_host, fwd_port, enabled, created_at, updated_at, allowed_cidrs"
+func (st *Stream) extraJSON() string {
+	b, _ := json.Marshal(streamExtra{
+		ListenPortEnd: st.ListenPortEnd, SendProxyProtocol: st.SendProxyProtocol,
+		AcceptProxyProtocol: st.AcceptProxyProtocol, TerminateTLS: st.TerminateTLS,
+		CertID: st.CertID, SNIRoutes: st.SNIRoutes,
+	})
+	return string(b)
+}
+
+const streamCols = "id, listen_port, protocol, fwd_host, fwd_port, enabled, created_at, updated_at, allowed_cidrs, extra"
 
 func (s *Store) ListStreams() ([]Stream, error) {
 	rows, err := s.db.Query("SELECT " + streamCols + " FROM streams ORDER BY listen_port")
@@ -292,8 +357,8 @@ func (s *Store) CreateStream(st *Stream, reserved []int) error {
 	}
 	st.CreatedAt, st.UpdatedAt = now(), now()
 	cidrs, _ := json.Marshal(st.AllowedCIDRs)
-	res, err := s.db.Exec("INSERT INTO streams (listen_port, protocol, fwd_host, fwd_port, enabled, created_at, updated_at, allowed_cidrs) VALUES (?,?,?,?,?,?,?,?)",
-		st.ListenPort, st.Protocol, st.ForwardHost, st.ForwardPort, b2i(st.Enabled), st.CreatedAt, st.UpdatedAt, string(cidrs))
+	res, err := s.db.Exec("INSERT INTO streams (listen_port, protocol, fwd_host, fwd_port, enabled, created_at, updated_at, allowed_cidrs, extra) VALUES (?,?,?,?,?,?,?,?,?)",
+		st.ListenPort, st.Protocol, st.ForwardHost, st.ForwardPort, b2i(st.Enabled), st.CreatedAt, st.UpdatedAt, string(cidrs), st.extraJSON())
 	if err != nil {
 		return err
 	}
@@ -311,8 +376,8 @@ func (s *Store) UpdateStream(st *Stream, reserved []int) error {
 	}
 	st.UpdatedAt = now()
 	cidrs, _ := json.Marshal(st.AllowedCIDRs)
-	res, err := s.db.Exec("UPDATE streams SET listen_port=?, protocol=?, fwd_host=?, fwd_port=?, enabled=?, updated_at=?, allowed_cidrs=? WHERE id=?",
-		st.ListenPort, st.Protocol, st.ForwardHost, st.ForwardPort, b2i(st.Enabled), st.UpdatedAt, string(cidrs), st.ID)
+	res, err := s.db.Exec("UPDATE streams SET listen_port=?, protocol=?, fwd_host=?, fwd_port=?, enabled=?, updated_at=?, allowed_cidrs=?, extra=? WHERE id=?",
+		st.ListenPort, st.Protocol, st.ForwardHost, st.ForwardPort, b2i(st.Enabled), st.UpdatedAt, string(cidrs), st.extraJSON(), st.ID)
 	if err != nil {
 		return err
 	}

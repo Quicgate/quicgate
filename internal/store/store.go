@@ -142,19 +142,36 @@ type AccessList struct {
 	Users    []AccessUser `json:"users"`
 }
 
+// SNIRoute maps a TLS SNI hostname to a backend for SNI-based passthrough
+// routing (many TLS services sharing one port without termination).
+type SNIRoute struct {
+	Host        string `json:"host"`
+	ForwardHost string `json:"forwardHost"`
+	ForwardPort int    `json:"forwardPort"`
+}
+
 // Stream is one TCP/UDP port forward. AllowedCIDRs is a source whitelist:
 // empty = anyone (needed since UPnP may expose the port to the WAN),
 // non-empty = only matching sources, everything else dropped at accept time.
 type Stream struct {
 	ID           int64    `json:"id"`
 	ListenPort   int      `json:"listenPort"`
+	ListenPortEnd int     `json:"listenPortEnd,omitempty"` // >0: listen on the whole range
 	Protocol     string   `json:"protocol"` // tcp | udp | both
 	ForwardHost  string   `json:"forwardHost"`
 	ForwardPort  int      `json:"forwardPort"`
 	AllowedCIDRs []string `json:"allowedCidrs"`
-	Enabled      bool     `json:"enabled"`
-	CreatedAt    string   `json:"createdAt,omitempty"`
-	UpdatedAt    string   `json:"updatedAt,omitempty"`
+
+	// Round-2 options (all TCP-only).
+	SendProxyProtocol   string     `json:"sendProxyProtocol,omitempty"`   // "" | v1 | v2 (prepend PROXY header to backend)
+	AcceptProxyProtocol bool       `json:"acceptProxyProtocol,omitempty"` // parse inbound PROXY header for real client IP
+	TerminateTLS        bool       `json:"terminateTls,omitempty"`        // terminate TLS with CertID, forward plaintext
+	CertID              *int64     `json:"certId,omitempty"`
+	SNIRoutes           []SNIRoute `json:"sniRoutes,omitempty"` // TLS passthrough by SNI
+
+	Enabled   bool   `json:"enabled"`
+	CreatedAt string `json:"createdAt,omitempty"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
 }
 
 type User struct {
@@ -375,6 +392,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 		"ALTER TABLE hosts ADD COLUMN upstreams TEXT NOT NULL DEFAULT '[]'",
 		"ALTER TABLE hosts ADD COLUMN static_root TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE users ADD COLUMN totp_secret TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE streams ADD COLUMN extra TEXT NOT NULL DEFAULT '{}'",
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err

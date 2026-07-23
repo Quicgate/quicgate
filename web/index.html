@@ -293,15 +293,26 @@
     <form id="stream-form">
       <div class="field-row">
         <label class="field field--sm"><span>Listen port</span><input id="s-port" type="number" min="1" max="65535" required></label>
+        <label class="field field--sm"><span>Range end <em>(optional, TCP)</em></span><input id="s-port-end" type="number" min="1" max="65535" placeholder="single"></label>
         <label class="field field--sm"><span>Protocol</span>
           <select id="s-proto"><option>tcp</option><option>udp</option><option value="both">tcp + udp</option></select></label>
       </div>
       <div class="field-row">
-        <label class="field"><span>Forward host / IP</span><input id="s-fhost" class="mono" required></label>
-        <label class="field field--sm"><span>Forward port</span><input id="s-fport" type="number" min="1" max="65535" required></label>
+        <label class="field"><span>Forward host / IP</span><input id="s-fhost" class="mono"></label>
+        <label class="field field--sm"><span>Forward port</span><input id="s-fport" type="number" min="1" max="65535"></label>
       </div>
       <label class="field"><span>Allowed source IPs / CIDRs <em>(one per line, empty = anyone; UPnP may expose this port to the internet)</em></span>
-        <textarea id="s-cidrs" rows="3" class="mono" placeholder="192.168.178.0/24&#10;77.60.160.80/28"></textarea></label>
+        <textarea id="s-cidrs" rows="2" class="mono" placeholder="192.168.178.0/24&#10;77.60.160.80/28"></textarea></label>
+      <fieldset class="group">
+        <legend>Advanced (TCP)</legend>
+        <label class="field field--sm"><span>Send PROXY protocol</span>
+          <select id="s-sendproxy"><option value="">Off</option><option value="v1">v1</option><option value="v2">v2</option></select></label>
+        <label class="check"><input type="checkbox" id="s-acceptproxy"><span>Accept inbound PROXY header <em>(real client IP from upstream proxy)</em></span></label>
+        <label class="check"><input type="checkbox" id="s-terminatetls"><span>Terminate TLS <em>(forward plaintext to backend)</em></span></label>
+        <label class="field" id="s-cert-field" hidden><span>TLS certificate</span><select id="s-certid"></select></label>
+        <label class="field"><span>SNI routes <em>(TLS passthrough; one "sni.host = backend:port" per line)</em></span>
+          <textarea id="s-sni" rows="2" class="mono" placeholder="app.example.com = 10.0.0.2:8443&#10;db.example.com = 10.0.0.3:8443"></textarea></label>
+      </fieldset>
       <label class="check"><input type="checkbox" id="s-enabled" checked><span>Enabled</span></label>
       <div id="stream-error" class="form-error" hidden></div>
       <div class="modal-actions">

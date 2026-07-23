@@ -232,7 +232,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	}
 	e.table.Store(t)
 	e.health.setTargets(healthTargets)
-	e.streams.Sync(streams)
+	e.streams.Sync(streams, e.loadStreamCert)
 	if e.upnp != nil {
 		var mappings []PortMapping
 		if p := portOf(e.cfg.HTTPAddr); p > 0 {
@@ -247,11 +247,17 @@ func (e *Engine) Reload(ctx context.Context) error {
 			if !s.Enabled {
 				continue
 			}
-			if s.Protocol == "tcp" || s.Protocol == "both" {
-				mappings = append(mappings, PortMapping{Proto: "TCP", Port: uint16(s.ListenPort)})
+			last := s.ListenPort
+			if s.ListenPortEnd > 0 {
+				last = s.ListenPortEnd
 			}
-			if s.Protocol == "udp" || s.Protocol == "both" {
-				mappings = append(mappings, PortMapping{Proto: "UDP", Port: uint16(s.ListenPort)})
+			for port := s.ListenPort; port <= last; port++ {
+				if s.Protocol == "tcp" || s.Protocol == "both" {
+					mappings = append(mappings, PortMapping{Proto: "TCP", Port: uint16(port)})
+				}
+				if s.Protocol == "udp" || s.Protocol == "both" {
+					mappings = append(mappings, PortMapping{Proto: "UDP", Port: uint16(port)})
+				}
 			}
 		}
 		go e.upnp.Sync(mappings)
@@ -286,6 +292,20 @@ func (e *Engine) loadCustomCerts(hosts []store.Host) {
 			log.Printf("engine: cache custom cert %d: %v", *h.CertID, err)
 		}
 	}
+}
+
+// loadStreamCert resolves a custom cert id to a tls.Certificate for TLS
+// termination on streams.
+func (e *Engine) loadStreamCert(id int64) (tls.Certificate, bool) {
+	certPEM, keyPEM, err := e.store.GetCustomCertPEM(id)
+	if err != nil {
+		return tls.Certificate{}, false
+	}
+	cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		return tls.Certificate{}, false
+	}
+	return cert, true
 }
 
 // buildRoute compiles one host's typed options into a ready http.Handler chain.

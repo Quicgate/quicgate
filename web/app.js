@@ -631,7 +631,8 @@ $('acl-form').addEventListener('submit', async (e) => {
 
 /* ---- streams page ---- */
 async function refreshStreams() {
-  const streams = await api('GET', '/api/streams');
+  let streams;
+  [streams, customCerts] = await Promise.all([api('GET', '/api/streams'), api('GET', '/api/custom-certs')]);
   const body = $('streams-body');
   body.innerHTML = '';
   $('streams-empty').hidden = streams.length > 0;
@@ -639,7 +640,12 @@ async function refreshStreams() {
     const tr = document.createElement('tr');
     const tdListen = document.createElement('td');
     tdListen.className = 'domain';
-    tdListen.textContent = `:${s.listenPort}`;
+    tdListen.textContent = s.listenPortEnd ? `:${s.listenPort}-${s.listenPortEnd}` : `:${s.listenPort}`;
+    const badges = [];
+    if (s.sendProxyProtocol) badges.push('proxy-' + s.sendProxyProtocol);
+    if (s.terminateTls) badges.push('tls-term');
+    if (s.sniRoutes && s.sniRoutes.length) badges.push('sni');
+    if (badges.length) tdListen.innerHTML += ' ' + badges.map((b) => `<span class="badge">${b}</span>`).join(' ');
     const tdProto = document.createElement('td');
     tdProto.innerHTML = `<span class="badge">${s.protocol === 'both' ? 'tcp + udp' : s.protocol}</span>`;
     const tdFwd = document.createElement('td');
@@ -692,13 +698,28 @@ function openStreamModal(s) {
   $('stream-modal-title').textContent = s ? 'Edit stream' : 'Add stream';
   setError('stream-error', null);
   $('s-port').value = s ? s.listenPort : '';
+  $('s-port-end').value = s && s.listenPortEnd ? s.listenPortEnd : '';
   $('s-proto').value = s ? s.protocol : 'tcp';
   $('s-fhost').value = s ? s.forwardHost : '';
   $('s-fport').value = s ? s.forwardPort : '';
   $('s-cidrs').value = s && s.allowedCidrs ? s.allowedCidrs.join('\n') : '';
+  $('s-sendproxy').value = s ? (s.sendProxyProtocol || '') : '';
+  $('s-acceptproxy').checked = s ? !!s.acceptProxyProtocol : false;
+  $('s-terminatetls').checked = s ? !!s.terminateTls : false;
+  const csel = $('s-certid');
+  csel.innerHTML = '';
+  for (const c of customCerts) {
+    const opt = document.createElement('option');
+    opt.value = c.id; opt.textContent = c.name;
+    csel.appendChild(opt);
+  }
+  csel.value = s && s.certId ? String(s.certId) : '';
+  $('s-cert-field').hidden = !(s && s.terminateTls);
+  $('s-sni').value = s && s.sniRoutes ? s.sniRoutes.map((r) => `${r.host} = ${r.forwardHost}:${r.forwardPort}`).join('\n') : '';
   $('s-enabled').checked = s ? s.enabled : true;
   $('stream-modal').hidden = false;
 }
+$('s-terminatetls').addEventListener('change', () => { $('s-cert-field').hidden = !$('s-terminatetls').checked; });
 
 $('btn-add-stream').addEventListener('click', () => openStreamModal(null));
 $('stream-modal-close').addEventListener('click', () => { $('stream-modal').hidden = true; });
@@ -707,12 +728,23 @@ $('stream-btn-cancel').addEventListener('click', () => { $('stream-modal').hidde
 $('stream-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   setError('stream-error', null);
+  const sniRoutes = [];
+  for (const line of $('s-sni').value.split('\n').map((v) => v.trim()).filter(Boolean)) {
+    const m = line.match(/^(\S+)\s*=\s*(\S+):(\d+)$/);
+    if (m) sniRoutes.push({ host: m[1], forwardHost: m[2], forwardPort: parseInt(m[3], 10) });
+  }
   const s = {
     listenPort: parseInt($('s-port').value, 10),
+    listenPortEnd: parseInt($('s-port-end').value, 10) || 0,
     protocol: $('s-proto').value,
     forwardHost: $('s-fhost').value.trim(),
-    forwardPort: parseInt($('s-fport').value, 10),
+    forwardPort: parseInt($('s-fport').value, 10) || 0,
     allowedCidrs: $('s-cidrs').value.split('\n').map((v) => v.trim()).filter(Boolean),
+    sendProxyProtocol: $('s-sendproxy').value,
+    acceptProxyProtocol: $('s-acceptproxy').checked,
+    terminateTls: $('s-terminatetls').checked,
+    certId: $('s-terminatetls').checked && $('s-certid').value ? parseInt($('s-certid').value, 10) : null,
+    sniRoutes,
     enabled: $('s-enabled').checked,
   };
   try {
