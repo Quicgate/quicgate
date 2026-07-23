@@ -21,7 +21,7 @@ $('btn-theme').addEventListener('click', () => {
 });
 
 /* ---- page nav ---- */
-const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', certs: 'btn-add-cert', system: null, settings: null };
+const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', certs: 'btn-add-cert', system: null, settings: null, profile: null };
 function switchPage(name) {
   for (const b of $('pagenav').children) b.classList.toggle('is-active', b.dataset.page === name);
   for (const p of Object.keys(pages)) {
@@ -34,10 +34,12 @@ function switchPage(name) {
   if (name === 'certs') refreshCustomCerts();
   if (name === 'system') loadSystem();
   if (name === 'settings') loadSettings();
+  if (name === 'profile') loadProfile();
 }
 $('pagenav').addEventListener('click', (e) => {
   if (e.target.dataset.page) switchPage(e.target.dataset.page);
 });
+$('me-email').addEventListener('click', () => switchPage('profile'));
 
 function show(view) {
   for (const v of views) $(v).hidden = v !== view;
@@ -867,9 +869,26 @@ $('cert-form').addEventListener('submit', async (e) => {
 function loadSystem() {
   refreshLogs();
   refreshEffConfig();
+}
+
+/* ---- profile page ---- */
+function loadProfile() {
   refreshTokens();
   refresh2FA();
 }
+
+$('profile-pw-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  setError('pp-error', null);
+  try {
+    await api('POST', '/api/password', { current: $('pp-current').value, new: $('pp-new').value });
+    $('pp-current').value = '';
+    $('pp-new').value = '';
+    setError('pp-error', 'Password updated.');
+  } catch (err) {
+    setError('pp-error', err);
+  }
+});
 
 async function refreshLogs() {
   const logs = await api('GET', '/api/logs?n=200').catch(() => []);

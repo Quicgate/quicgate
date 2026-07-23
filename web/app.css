@@ -10,7 +10,17 @@ body { background: var(--c-bg); color: var(--c-text); font-family: var(--font-bo
 /* layout */
 .center-wrap { min-height: 100vh; display: grid; place-items: center; padding: var(--sp-6); }
 .login-card { width: min(380px, 100%); }
-.page { max-width: 1080px; margin: 0 auto; padding: var(--sp-6); }
+.page { max-width: 1280px; margin: 0 auto; padding: var(--sp-6); }
+
+/* multi-column card layout for settings/profile — fills the width */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  gap: var(--sp-6);
+  align-items: start;
+}
+.card-grid .card { margin: 0 !important; max-width: none !important; }
+.card-grid .col-span-2 { grid-column: 1 / -1; }
 
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
