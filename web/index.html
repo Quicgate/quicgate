@@ -20,6 +20,7 @@
       <div id="login-error" class="form-error" hidden></div>
       <button class="btn btn--primary btn--lg" type="submit">Sign in</button>
     </form>
+    <a id="login-oidc" class="btn btn--secondary btn--lg" href="/api/oidc/login" style="margin-top:var(--sp-2);display:none">Sign in with SSO</a>
   </div>
 </div>
 
@@ -178,6 +179,33 @@
             <button type="button" id="btn-notify-test" class="btn btn--secondary">Send test alert</button>
             <button type="submit" class="btn btn--primary">Save</button>
           </div>
+        </form>
+      </div>
+
+      <div class="card" style="max-width:560px; margin-top:var(--sp-6)">
+        <div class="card-head"><h2>Admin SSO (OIDC)</h2></div>
+        <p class="hs-muted">Additive: password login always keeps working, so a misconfigured IdP cannot lock you out.</p>
+        <form id="oidc-form">
+          <label class="check"><input type="checkbox" id="set-oidc-enabled"><span>Enable OIDC login</span></label>
+          <label class="field"><span>Issuer URL</span><input id="set-oidc-issuer" type="url" class="mono" placeholder="https://auth.example.com/application/o/quicgate/"></label>
+          <div class="field-row">
+            <label class="field"><span>Client ID</span><input id="set-oidc-client-id" class="mono"></label>
+            <label class="field"><span>Client secret</span><input id="set-oidc-client-secret" type="password" class="mono"></label>
+          </div>
+          <label class="field"><span>Redirect URL</span><input id="set-oidc-redirect" type="url" class="mono" placeholder="https://quicgate.example.com/api/oidc/callback"></label>
+          <label class="field"><span>Allowed emails <em>(comma-separated; blank = any verified)</em></span><input id="set-oidc-emails" class="mono"></label>
+          <div class="modal-actions"><button type="submit" class="btn btn--primary">Save</button></div>
+        </form>
+      </div>
+
+      <div class="card" style="max-width:560px; margin-top:var(--sp-6)">
+        <div class="card-head"><h2>Admin LDAP</h2></div>
+        <p class="hs-muted">Additive fallback checked only when local password auth fails.</p>
+        <form id="ldap-form">
+          <label class="check"><input type="checkbox" id="set-ldap-enabled"><span>Enable LDAP login</span></label>
+          <label class="field"><span>Server URL</span><input id="set-ldap-url" class="mono" placeholder="ldaps://ldap.example.com:636"></label>
+          <label class="field"><span>Bind DN template <em>(%s = username)</em></span><input id="set-ldap-dn" class="mono" placeholder="uid=%s,ou=people,dc=example,dc=com"></label>
+          <div class="modal-actions"><button type="submit" class="btn btn--primary">Save</button></div>
         </form>
       </div>
 

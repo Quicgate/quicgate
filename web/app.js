@@ -72,6 +72,9 @@ function setError(id, err) {
 
 /* ---- boot ---- */
 async function boot() {
+  api('GET', '/api/auth-methods').then((m) => {
+    if (m.oidc) $('login-oidc').style.display = '';
+  }).catch(() => {});
   try {
     const me = await api('GET', '/api/me');
     afterLogin(me);
@@ -958,9 +961,43 @@ async function loadSettings() {
   $('set-ban-threshold').value = s.ban_threshold || '';
   $('set-ban-window').value = s.ban_window_sec || '';
   $('set-ban-duration').value = s.ban_duration_sec || '';
+  $('set-oidc-enabled').checked = s.oidc_enabled === '1';
+  $('set-oidc-issuer').value = s.oidc_issuer || '';
+  $('set-oidc-client-id').value = s.oidc_client_id || '';
+  $('set-oidc-client-secret').value = s.oidc_client_secret || '';
+  $('set-oidc-redirect').value = s.oidc_redirect_url || '';
+  $('set-oidc-emails').value = s.oidc_allowed_emails || '';
+  $('set-ldap-enabled').checked = s.ldap_enabled === '1';
+  $('set-ldap-url').value = s.ldap_url || '';
+  $('set-ldap-dn').value = s.ldap_bind_dn_template || '';
   syncDnsField();
   syncDefaultSiteField();
 }
+
+$('oidc-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('PUT', '/api/settings', {
+      oidc_enabled: $('set-oidc-enabled').checked ? '1' : '0',
+      oidc_issuer: $('set-oidc-issuer').value.trim(),
+      oidc_client_id: $('set-oidc-client-id').value.trim(),
+      oidc_client_secret: $('set-oidc-client-secret').value,
+      oidc_redirect_url: $('set-oidc-redirect').value.trim(),
+      oidc_allowed_emails: $('set-oidc-emails').value.trim(),
+    });
+  } catch (err) { alert(err.message); }
+});
+
+$('ldap-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('PUT', '/api/settings', {
+      ldap_enabled: $('set-ldap-enabled').checked ? '1' : '0',
+      ldap_url: $('set-ldap-url').value.trim(),
+      ldap_bind_dn_template: $('set-ldap-dn').value.trim(),
+    });
+  } catch (err) { alert(err.message); }
+});
 
 $('ban-form').addEventListener('submit', async (e) => {
   e.preventDefault();

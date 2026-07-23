@@ -64,6 +64,14 @@ func (s *Server) EnsureAdmin() error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.HandleFunc("GET /api/oidc/login", s.handleOIDCLogin)
+	mux.HandleFunc("GET /api/oidc/callback", s.handleOIDCCallback)
+	mux.HandleFunc("GET /api/auth-methods", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]bool{
+			"oidc": s.store.GetSetting("oidc_enabled", "") == "1",
+			"ldap": s.ldapConfigured(),
+		})
+	})
 	mux.HandleFunc("POST /api/logout", s.auth(s.handleLogout))
 	mux.HandleFunc("GET /api/me", s.auth(s.handleMe))
 	mux.HandleFunc("POST /api/password", s.auth(s.handlePassword))
@@ -133,6 +141,17 @@ var settingsKeys = map[string]bool{
 	"ban_threshold":      true,
 	"ban_window_sec":     true,
 	"ban_duration_sec":   true,
+	// OIDC admin login (additive; password always works)
+	"oidc_enabled":        true,
+	"oidc_issuer":         true,
+	"oidc_client_id":      true,
+	"oidc_client_secret":  true,
+	"oidc_redirect_url":   true,
+	"oidc_allowed_emails": true,
+	// LDAP admin login (additive)
+	"ldap_enabled":          true,
+	"ldap_url":              true,
+	"ldap_bind_dn_template": true,
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -358,10 +377,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := s.store.GetUserByEmail(body.Email)
-	if err != nil || bcrypt.CompareHashAndPassword([]byte(u.Hash), []byte(body.Password)) != nil {
-		time.Sleep(400 * time.Millisecond) // flat cost for wrong email and wrong password alike
-		writeErr(w, http.StatusUnauthorized, "invalid credentials")
-		return
+	localOK := err == nil && bcrypt.CompareHashAndPassword([]byte(u.Hash), []byte(body.Password)) == nil
+	if !localOK {
+		// Additive LDAP fallback; local admin always still works.
+		if !s.ldapAuth(body.Email, body.Password) {
+			time.Sleep(400 * time.Millisecond) // flat cost for wrong email and wrong password alike
+			writeErr(w, http.StatusUnauthorized, "invalid credentials")
+			return
+		}
+		u.Email = "ldap:" + body.Email // directory user, no local record
 	}
 	// Second factor, when enabled.
 	if u.TOTPSecret != "" {
