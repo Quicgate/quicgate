@@ -7,7 +7,7 @@ A single-binary reverse proxy manager in Go. The feature set and UI flow of Ngin
 - Full functional parity with Nginx Proxy Manager (v2.12.x feature set).
 - Everything NPM users reach for in the "Advanced" custom-nginx box becomes a first-class form field. There is deliberately NO raw-config escape hatch: if an option is missing, it gets added to the engine as a typed option.
 - One binary, one SQLite file. Config changes apply instantly (atomic in-memory swap, no reload).
-- UI in huisstijl style, vanilla JS, no build step, embedded via go:embed.
+- UI: dark "Console" design language (near-black + lime, Geist), vanilla JS, no build step, embedded via go:embed.
 
 ## Non-goals (explicitly out)
 

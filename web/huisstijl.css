@@ -1,11 +1,9 @@
 @import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;700&display=swap');
 
 /* ============================================================
-   Huisstijl example — design tokens
-   The single source of truth for every internal project.
-   Theme: "Console" — example's own product language: near-black
-   surfaces, a single lime accent, Geist + Geist Mono. Drawn from
-   the DNS Console (dns-ui.example.com) and SITS. Light theme below.
+   Design tokens
+   Theme: "Console" — near-black surfaces, a single lime accent,
+   Geist + Geist Mono. Light theme below.
    ============================================================ */
 
 :root {
@@ -128,7 +126,7 @@
 }
 
 /* ============================================================
-   Huisstijl example — components
+   Components
    Consumes tokens.css. Plain CSS, no build, no framework.
    Import order: tokens.css first, then this file.
    ============================================================ */
