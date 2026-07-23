@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -138,6 +139,15 @@ func (w *statusWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Hijack lets ReverseProxy take over the connection for WebSocket upgrades;
+// without it the wrapper silently downgrades every ws:// route to plain HTTP.
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
 }
 
 // wrap returns next wrapped with JSON access logging.

@@ -102,17 +102,13 @@ func New(cfg Config, st *store.Store) *Engine {
 	cache := certmagic.NewCache(certmagic.CacheOptions{
 		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) { return e.magic, nil },
 	})
+	// No OnDemand: the domain set is known, so ManageAsync obtains every
+	// managed cert proactively in the background. This also makes unknown-SNI
+	// noise (scanners, retired hostnames) fail the handshake fast instead of
+	// contending with real issuance on the on-demand path.
 	e.magic = certmagic.New(cache, certmagic.Config{
 		Storage: &certmagic.FileStorage{Path: cfg.DataDir + "/certs"},
 		OnEvent: e.certs.handle,
-		OnDemand: &certmagic.OnDemandConfig{
-			DecisionFunc: func(ctx context.Context, name string) error {
-				if r := e.table.Load().lookup(name); r != nil && r.host.Enabled && r.host.CertMode == "auto" {
-					return nil
-				}
-				return fmt.Errorf("host %q is not configured for managed TLS", name)
-			},
-		},
 	})
 	e.buildIssuer()
 	return e
