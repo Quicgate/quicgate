@@ -25,6 +25,20 @@ type RateLimit struct {
 	Burst int     `json:"burst"` // bucket size
 }
 
+// ForwardAuth delegates per-request authorization to an external endpoint
+// (Authelia / Authentik / Keycloak-style), mirroring Traefik's forwardAuth.
+type ForwardAuth struct {
+	URL              string   `json:"url"`              // auth endpoint
+	ResponseHeaders  []string `json:"responseHeaders"`  // copied from auth 2xx to upstream request
+	SkipTLSVerify    bool     `json:"skipTlsVerify"`    // for https auth endpoints with self-signed certs
+}
+
+// ClientCert configures mutual TLS for a host.
+type ClientCert struct {
+	Mode  string `json:"mode"`  // require | request
+	CAPEM string `json:"caPem"` // PEM bundle of accepted client CAs
+}
+
 // Redirect describes where a redirect-type host sends visitors.
 type Redirect struct {
 	HTTPCode     int    `json:"httpCode"`     // 300, 301, 302, 307, 308
@@ -67,9 +81,11 @@ type Options struct {
 	ResponseHeaders []HeaderRule `json:"responseHeaders,omitempty"`
 
 	// Security group
-	BlockIndexing bool       `json:"blockIndexing"` // send X-Robots-Tag: noindex, nofollow
-	BlockExploits bool       `json:"blockExploits"` // filter common attack patterns
-	RateLimit     *RateLimit `json:"rateLimit,omitempty"`
+	BlockIndexing bool         `json:"blockIndexing"` // send X-Robots-Tag: noindex, nofollow
+	BlockExploits bool         `json:"blockExploits"` // filter common attack patterns
+	RateLimit     *RateLimit   `json:"rateLimit,omitempty"`
+	ForwardAuth   *ForwardAuth `json:"forwardAuth,omitempty"`
+	ClientCert    *ClientCert  `json:"clientCert,omitempty"` // mTLS
 
 	// Response group
 	Compression bool `json:"compression"` // gzip responses when the client accepts it
@@ -99,10 +115,13 @@ type Host struct {
 	UpdatedAt    string    `json:"updatedAt,omitempty"`
 }
 
-// AccessRule is one ordered CIDR rule; first match wins, no match denies.
+// AccessRule is one ordered rule; first match wins, no match denies. Exactly
+// one of CIDR, Host (dynamic DNS) or Country (GeoIP) is set.
 type AccessRule struct {
-	Action string `json:"action"` // allow | deny
-	CIDR   string `json:"cidr"`
+	Action  string `json:"action"` // allow | deny
+	CIDR    string `json:"cidr,omitempty"`
+	Host    string `json:"host,omitempty"`    // hostname, re-resolved periodically
+	Country string `json:"country,omitempty"` // ISO 3166-1 alpha-2, needs GeoIP DB
 }
 
 // AccessUser carries a plaintext Password only inbound from the API; at rest

@@ -36,18 +36,39 @@ func (a *AccessList) Validate(prev *AccessList) error {
 		if r.Action != "allow" && r.Action != "deny" {
 			return fmt.Errorf("rule %d: action must be allow or deny", i+1)
 		}
-		cidr := strings.TrimSpace(r.CIDR)
-		if !strings.Contains(cidr, "/") {
-			if strings.Contains(cidr, ":") {
-				cidr += "/128"
-			} else {
-				cidr += "/32"
+		set := 0
+		if strings.TrimSpace(r.CIDR) != "" {
+			set++
+		}
+		if strings.TrimSpace(r.Host) != "" {
+			set++
+		}
+		if strings.TrimSpace(r.Country) != "" {
+			set++
+		}
+		if set != 1 {
+			return fmt.Errorf("rule %d: set exactly one of CIDR, host or country", i+1)
+		}
+		if r.CIDR != "" {
+			cidr := strings.TrimSpace(r.CIDR)
+			if !strings.Contains(cidr, "/") {
+				if strings.Contains(cidr, ":") {
+					cidr += "/128"
+				} else {
+					cidr += "/32"
+				}
 			}
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				return fmt.Errorf("rule %d: invalid CIDR %q", i+1, r.CIDR)
+			}
+			a.Rules[i].CIDR = cidr
 		}
-		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			return fmt.Errorf("rule %d: invalid CIDR %q", i+1, r.CIDR)
+		if r.Country != "" {
+			a.Rules[i].Country = strings.ToUpper(strings.TrimSpace(r.Country))
 		}
-		a.Rules[i].CIDR = cidr
+		if r.Host != "" {
+			a.Rules[i].Host = strings.ToLower(strings.TrimSpace(r.Host))
+		}
 	}
 	prevHashes := map[string]string{}
 	if prev != nil {

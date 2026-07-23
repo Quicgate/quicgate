@@ -8,6 +8,7 @@ require (
 	github.com/klauspost/compress v1.19.1
 	github.com/libdns/transip v1.1.2
 	github.com/mholt/acmez/v3 v3.1.6
+	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/quic-go/quic-go v0.60.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/time v0.15.0

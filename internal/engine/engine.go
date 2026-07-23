@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -78,6 +80,9 @@ type Engine struct {
 	certs         *certTracker
 	accessLog     *accessLogger
 	health        *healthChecker
+	geo           *geoDB
+	ban           *banManager
+	caPoolCache   sync.Map
 }
 
 func New(cfg Config, st *store.Store) *Engine {
@@ -86,6 +91,8 @@ func New(cfg Config, st *store.Store) *Engine {
 	e.acmeEmail = cfg.ACMEEmail
 	e.certs = newCertTracker(func() string { return st.GetSetting("notify_url", "") })
 	e.accessLog = newAccessLogger(cfg.DataDir)
+	e.geo = openGeoDB(cfg.DataDir + "/GeoLite2-Country.mmdb")
+	e.ban = newBanManager(func() banConfig { return e.banConfig() }, e.certs.send)
 	if cfg.UPnP {
 		e.upnp = NewUPnPManager(3600)
 	}
@@ -182,7 +189,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	}
 	access := map[int64]*compiledAccess{}
 	for _, a := range lists {
-		access[a.ID] = compileAccess(a)
+		access[a.ID] = compileAccess(a, e.geo, e.ban)
 	}
 	streams, err := e.store.ListStreams()
 	if err != nil {
@@ -397,13 +404,16 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 }
 
 // wrapCommon applies the middleware shared by every host type, outermost
-// first: access list -> rate limit -> exploit filter -> handler.
+// first: access list -> forward-auth -> rate limit -> exploit filter.
 func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess) http.Handler {
 	if o.BlockExploits {
 		handler = blockExploits(handler)
 	}
 	if o.RateLimit != nil {
 		handler = newRateLimiter(o.RateLimit).wrap(handler)
+	}
+	if o.ForwardAuth != nil && o.ForwardAuth.URL != "" {
+		handler = forwardAuth(o.ForwardAuth, handler)
 	}
 	if acl != nil {
 		handler = acl.wrap(handler)
@@ -518,15 +528,50 @@ func (e *Engine) tlsConfig() *tls.Config {
 	base.NextProtos = append([]string{"h2", "http/1.1"}, base.NextProtos...)
 	base.MinVersion = tls.VersionTLS12
 	base.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
-		if r := e.table.Load().lookup(chi.ServerName); r != nil && r.host.Options.MinTLSVersion == "1.3" {
-			c := base.Clone()
-			c.GetConfigForClient = nil
-			c.MinVersion = tls.VersionTLS13
-			return c, nil
+		r := e.table.Load().lookup(chi.ServerName)
+		if r == nil {
+			return nil, nil
 		}
-		return nil, nil
+		o := r.host.Options
+		needClone := o.MinTLSVersion == "1.3" || o.ClientCert != nil
+		if !needClone {
+			return nil, nil
+		}
+		c := base.Clone()
+		c.GetConfigForClient = nil
+		if o.MinTLSVersion == "1.3" {
+			c.MinVersion = tls.VersionTLS13
+		}
+		if o.ClientCert != nil {
+			if pool := e.clientCAPool(o.ClientCert.CAPEM); pool != nil {
+				c.ClientCAs = pool
+				if o.ClientCert.Mode == "request" {
+					c.ClientAuth = tls.VerifyClientCertIfGiven
+				} else {
+					c.ClientAuth = tls.RequireAndVerifyClientCert
+				}
+			}
+		}
+		return c, nil
 	}
 	return base
+}
+
+// clientCAPool parses and caches a PEM CA bundle for mTLS verification.
+func (e *Engine) clientCAPool(pemStr string) *x509.CertPool {
+	if pemStr == "" {
+		return nil
+	}
+	if v, ok := e.caPoolCache.Load(pemStr); ok {
+		return v.(*x509.CertPool)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(pemStr)) {
+		log.Printf("engine: mTLS CA bundle did not parse")
+		return nil
+	}
+	e.caPoolCache.Store(pemStr, pool)
+	return pool
 }
 
 // Run starts the data-plane listeners and blocks until ctx is cancelled.
@@ -535,7 +580,23 @@ func (e *Engine) Run(ctx context.Context) error {
 		return err
 	}
 
-	httpHandler := e.acme.HTTPChallengeHandler(e.accessLog.wrap(e.serveHTTP))
+	// Periodic reload re-resolves dynamic-DNS access-list hostnames.
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := e.Reload(ctx); err != nil {
+					log.Printf("engine: periodic reload: %v", err)
+				}
+			}
+		}
+	}()
+
+	httpHandler := e.acme.HTTPChallengeHandler(e.ban.wrap(e.accessLog.wrap(e.serveHTTP)))
 	httpSrv := &http.Server{Addr: e.cfg.HTTPAddr, Handler: httpHandler, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 3)
 	go func() { errCh <- fmt.Errorf("http listener: %w", httpSrv.ListenAndServe()) }()
@@ -544,7 +605,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	var httpsSrv *http.Server
 	if !e.cfg.DisableTLS {
 		tlsCfg := e.tlsConfig()
-		httpsHandler := e.accessLog.wrap(e.serveHTTPS)
+		httpsHandler := e.ban.wrap(e.accessLog.wrap(e.serveHTTPS))
 		httpsSrv = &http.Server{
 			Addr:              e.cfg.HTTPSAddr,
 			Handler:           httpsHandler,
@@ -618,6 +679,23 @@ type CertStatus struct {
 
 // NotifyTest sends a test message to the configured webhook.
 func (e *Engine) NotifyTest() { e.certs.SendTest() }
+
+// banConfig reads the auto-ban settings live from the store.
+func (e *Engine) banConfig() banConfig {
+	atoi := func(key string, def int) int {
+		var n int
+		if _, err := fmt.Sscanf(e.store.GetSetting(key, ""), "%d", &n); err == nil && n > 0 {
+			return n
+		}
+		return def
+	}
+	return banConfig{
+		enabled:   e.store.GetSetting("ban_enabled", "") == "1",
+		threshold: atoi("ban_threshold", 5),
+		window:    time.Duration(atoi("ban_window_sec", 300)) * time.Second,
+		banFor:    time.Duration(atoi("ban_duration_sec", 3600)) * time.Second,
+	}
+}
 
 // CertStatuses inspects certmagic storage for every auto-TLS domain.
 func (e *Engine) CertStatuses(ctx context.Context) []CertStatus {

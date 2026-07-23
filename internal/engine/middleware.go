@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"crypto/tls"
+	"io"
 	"net"
 	"net/http"
 	"regexp"
@@ -13,6 +15,69 @@ import (
 
 	"quicgate/internal/store"
 )
+
+// forwardAuth delegates authorization to an external endpoint before the
+// request reaches the upstream (Authelia/Authentik/Keycloak-style).
+func forwardAuth(fa *store.ForwardAuth, next http.Handler) http.Handler {
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: fa.SkipTLSVerify},
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		areq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, fa.URL, nil)
+		if err != nil {
+			http.Error(w, "auth misconfigured", http.StatusInternalServerError)
+			return
+		}
+		// Give the auth server the original request context.
+		copyForwardAuthHeaders(areq, r)
+		resp, err := client.Do(areq)
+		if err != nil {
+			http.Error(w, "auth backend unreachable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// Authorized: copy selected headers (e.g. Remote-User) upstream.
+			for _, h := range fa.ResponseHeaders {
+				if v := resp.Header.Get(h); v != "" {
+					r.Header.Set(h, v)
+				}
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Not authorized: relay the auth response (often a login redirect).
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	})
+}
+
+func copyForwardAuthHeaders(areq, r *http.Request) {
+	scheme := "https"
+	if r.TLS == nil {
+		scheme = "http"
+	}
+	areq.Header.Set("X-Forwarded-Method", r.Method)
+	areq.Header.Set("X-Forwarded-Proto", scheme)
+	areq.Header.Set("X-Forwarded-Host", r.Host)
+	areq.Header.Set("X-Forwarded-Uri", r.URL.RequestURI())
+	areq.Header.Set("X-Forwarded-For", clientIP(r.RemoteAddr))
+	if c := r.Header.Get("Cookie"); c != "" {
+		areq.Header.Set("Cookie", c)
+	}
+	if a := r.Header.Get("Authorization"); a != "" {
+		areq.Header.Set("Authorization", a)
+	}
+}
 
 // gzipWrap compresses responses when the client sent Accept-Encoding: gzip
 // and the content type is compressible. Streaming (flush) is preserved.

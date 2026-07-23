@@ -112,6 +112,10 @@ var settingsKeys = map[string]bool{
 	"default_site_value": true, // custom HTML or redirect URL
 	"acme_dns_provider":  true, // "" | transip  (DNS-01 for wildcards)
 	"acme_dns_config":    true, // provider credentials (JSON)
+	"ban_enabled":        true, // "1" = auto-ban on repeated auth failures
+	"ban_threshold":      true,
+	"ban_window_sec":     true,
+	"ban_duration_sec":   true,
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {

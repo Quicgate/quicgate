@@ -314,6 +314,7 @@ function syncCertMode() {
   $('f-certid-field').hidden = $('f-certmode').value !== 'custom';
 }
 $('f-certmode').addEventListener('change', syncCertMode);
+$('f-mtls-mode').addEventListener('change', () => { $('f-mtls-ca-field').hidden = !$('f-mtls-mode').value; });
 
 function openModal(h) {
   editingId = h ? h.id : null;
@@ -365,6 +366,15 @@ function openModal(h) {
   $('f-ratelimit').checked = !!o.rateLimit;
   $('f-rate-rps').value = o.rateLimit ? o.rateLimit.rps : '';
   $('f-rate-burst').value = o.rateLimit ? o.rateLimit.burst : '';
+  const fa = o.forwardAuth || {};
+  $('f-fauth').checked = !!o.forwardAuth;
+  $('f-fauth-url').value = fa.url || '';
+  $('f-fauth-headers').value = (fa.responseHeaders || []).join(',');
+  $('f-fauth-skipverify').checked = !!fa.skipTlsVerify;
+  const cc = o.clientCert || {};
+  $('f-mtls-mode').value = cc.mode || '';
+  $('f-mtls-ca').value = cc.caPem || '';
+  $('f-mtls-ca-field').hidden = !cc.mode;
   $('f-preservehost').checked = !!o.preserveHost;
   $('f-hostoverride').value = o.hostOverride || '';
   $('f-skipverify').checked = !!o.skipTlsVerify;
@@ -433,6 +443,16 @@ $('host-form').addEventListener('submit', async (e) => {
       rateLimit: $('f-ratelimit').checked
         ? { rps: parseFloat($('f-rate-rps').value) || 10, burst: parseInt($('f-rate-burst').value, 10) || 20 }
         : null,
+      forwardAuth: $('f-fauth').checked && $('f-fauth-url').value.trim()
+        ? {
+            url: $('f-fauth-url').value.trim(),
+            responseHeaders: $('f-fauth-headers').value.split(',').map((s) => s.trim()).filter(Boolean),
+            skipTlsVerify: $('f-fauth-skipverify').checked,
+          }
+        : null,
+      clientCert: $('f-mtls-mode').value
+        ? { mode: $('f-mtls-mode').value, caPem: $('f-mtls-ca').value }
+        : null,
       requestHeaders: readHdrRows('req-headers'),
       responseHeaders: readHdrRows('resp-headers'),
       hsts: {
@@ -469,7 +489,7 @@ async function refreshAcls() {
     tdSatisfy.innerHTML = `<span class="badge">${a.satisfy}</span>`;
     const tdRules = document.createElement('td');
     tdRules.className = 'domain';
-    tdRules.textContent = (a.rules || []).map((r) => `${r.action} ${r.cidr}`).join('\n') || '-';
+    tdRules.textContent = (a.rules || []).map((r) => `${r.action} ${r.cidr || r.host || ('country:' + r.country)}`).join('\n') || '-';
     tdRules.style.whiteSpace = 'pre';
     const tdUsers = document.createElement('td');
     tdUsers.className = 'domain';
@@ -503,14 +523,21 @@ function addAclRuleRow(rule) {
   const row = document.createElement('div');
   row.className = 'hdr-rule';
   row.innerHTML =
-    '<select><option value="allow">allow</option><option value="deny">deny</option></select>' +
-    '<input placeholder="192.168.178.0/24 or single IP">' +
+    '<select class="r-action"><option value="allow">allow</option><option value="deny">deny</option></select>' +
+    '<select class="r-kind"><option value="cidr">IP/CIDR</option><option value="host">Hostname (DDNS)</option><option value="country">Country</option></select>' +
+    '<input class="r-value" placeholder="192.168.178.0/24">' +
     '<button type="button" class="btn btn--ghost btn--sm">&times;</button>';
+  const [action, kind, value] = [row.querySelector('.r-action'), row.querySelector('.r-kind'), row.querySelector('.r-value')];
+  const hints = { cidr: '192.168.178.0/24 or single IP', host: 'home.duckdns.org', country: 'NL' };
+  kind.addEventListener('change', () => { value.placeholder = hints[kind.value]; });
   if (rule) {
-    row.children[0].value = rule.action;
-    row.children[1].value = rule.cidr;
+    action.value = rule.action;
+    if (rule.host) { kind.value = 'host'; value.value = rule.host; }
+    else if (rule.country) { kind.value = 'country'; value.value = rule.country; }
+    else { kind.value = 'cidr'; value.value = rule.cidr; }
+    value.placeholder = hints[kind.value];
   }
-  row.children[2].addEventListener('click', () => row.remove());
+  row.children[3].addEventListener('click', () => row.remove());
   $('acl-rules').appendChild(row);
 }
 
@@ -554,8 +581,11 @@ $('acl-form').addEventListener('submit', async (e) => {
   setError('acl-error', null);
   const rules = [];
   for (const row of $('acl-rules').children) {
-    const cidr = row.children[1].value.trim();
-    if (cidr) rules.push({ action: row.children[0].value, cidr });
+    const action = row.querySelector('.r-action').value;
+    const kind = row.querySelector('.r-kind').value;
+    const val = row.querySelector('.r-value').value.trim();
+    if (!val) continue;
+    rules.push({ action, [kind]: val });
   }
   const users = [];
   for (const row of $('acl-users').children) {
@@ -766,9 +796,27 @@ async function loadSettings() {
   $('set-dns-config').value = s.acme_dns_config || '';
   $('set-default-site').value = s.default_site || '404';
   $('set-default-site-value').value = s.default_site_value || '';
+  $('set-ban-enabled').checked = s.ban_enabled === '1';
+  $('set-ban-threshold').value = s.ban_threshold || '';
+  $('set-ban-window').value = s.ban_window_sec || '';
+  $('set-ban-duration').value = s.ban_duration_sec || '';
   syncDnsField();
   syncDefaultSiteField();
 }
+
+$('ban-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('PUT', '/api/settings', {
+      ban_enabled: $('set-ban-enabled').checked ? '1' : '0',
+      ban_threshold: $('set-ban-threshold').value || '5',
+      ban_window_sec: $('set-ban-window').value || '300',
+      ban_duration_sec: $('set-ban-duration').value || '3600',
+    });
+  } catch (err) {
+    alert(err.message);
+  }
+});
 
 $('settings-form').addEventListener('submit', async (e) => {
   e.preventDefault();

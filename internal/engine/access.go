@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"log"
 	"net"
 	"net/http"
 
@@ -10,8 +11,9 @@ import (
 )
 
 type compiledRule struct {
-	allow bool
-	net   *net.IPNet
+	allow   bool
+	net     *net.IPNet // CIDR or resolved DDNS host
+	country string     // GeoIP country code, if this is a country rule
 }
 
 type compiledAccess struct {
@@ -20,16 +22,38 @@ type compiledAccess struct {
 	passAuth bool
 	rules    []compiledRule
 	users    map[string]string // username -> bcrypt hash
+	geo      *geoDB
+	ban      *banManager
 }
 
-func compileAccess(a store.AccessList) *compiledAccess {
-	c := &compiledAccess{name: a.Name, satisfy: a.Satisfy, passAuth: a.PassAuth, users: map[string]string{}}
+// compileAccess builds the runtime matcher. Hostname rules are resolved now
+// (a periodic reload re-resolves them for dynamic DNS); country rules keep
+// the code and match against the GeoIP DB at request time.
+func compileAccess(a store.AccessList, geo *geoDB, ban *banManager) *compiledAccess {
+	c := &compiledAccess{name: a.Name, satisfy: a.Satisfy, passAuth: a.PassAuth, users: map[string]string{}, geo: geo, ban: ban}
 	for _, r := range a.Rules {
-		_, ipnet, err := net.ParseCIDR(r.CIDR)
-		if err != nil {
-			continue // validated at save time; defensive
+		allow := r.Action == "allow"
+		switch {
+		case r.CIDR != "":
+			if _, ipnet, err := net.ParseCIDR(r.CIDR); err == nil {
+				c.rules = append(c.rules, compiledRule{allow: allow, net: ipnet})
+			}
+		case r.Host != "":
+			ips, err := net.LookupIP(r.Host)
+			if err != nil {
+				log.Printf("access %q: cannot resolve %q: %v", a.Name, r.Host, err)
+				continue
+			}
+			for _, ip := range ips {
+				bits := 32
+				if ip.To4() == nil {
+					bits = 128
+				}
+				c.rules = append(c.rules, compiledRule{allow: allow, net: &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}})
+			}
+		case r.Country != "":
+			c.rules = append(c.rules, compiledRule{allow: allow, country: r.Country})
 		}
-		c.rules = append(c.rules, compiledRule{allow: r.Action == "allow", net: ipnet})
 	}
 	for _, u := range a.Users {
 		c.users[u.Username] = u.Hash
@@ -51,8 +75,18 @@ func (c *compiledAccess) ipAllowed(remoteAddr string) bool {
 	if ip == nil {
 		return false
 	}
+	var country string
 	for _, r := range c.rules {
-		if r.net.Contains(ip) {
+		if r.country != "" {
+			if country == "" && c.geo != nil {
+				country = c.geo.country(ip)
+			}
+			if country == r.country {
+				return r.allow
+			}
+			continue
+		}
+		if r.net != nil && r.net.Contains(ip) {
 			return r.allow
 		}
 	}
@@ -86,6 +120,9 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 			allowed = ipOK || authOK
 		}
 		if !allowed {
+			if c.ban != nil {
+				c.ban.recordFailure(r.RemoteAddr)
+			}
 			if len(c.users) > 0 && !authOK {
 				w.Header().Set("WWW-Authenticate", `Basic realm="`+c.name+`"`)
 				http.Error(w, "authentication required", http.StatusUnauthorized)
