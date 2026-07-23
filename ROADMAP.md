@@ -1,6 +1,21 @@
 # quicgate roadmap
 
-Sourced 2026-07-23 from the Nginx Proxy Manager issue tracker (reaction counts verified via the GitHub API). Each item: what, evidence, value for a homelab-focused NPM successor. `[HAVE]` = already shipped, `[SPEC]` = already in SPEC.md milestones.
+Sourced 2026-07-23 from the Nginx Proxy Manager issue tracker (reaction counts verified via the GitHub API). Each item: what, evidence, value for a homelab-focused NPM successor.
+
+## STATUS: fully implemented (2026-07-23)
+
+Every item below is now built and deployed (stack 350 on docker01), across five phases:
+- **Phase 1** — dark/light theme (U1), host search (U2), noindex (S9), ACME staging (C9).
+- **Phase 2** — backup/restore (A1), renewal visibility (C6), failure webhooks (A4), JSON access logs (L3).
+- **Phase 3** — redirect/dead hosts (P4), default site (A5), rate limit (S8), block-exploits (S7), gzip, DNS-01 wildcards (C2), custom cert upload (C3), custom locations via path rewrite groundwork (P3).
+- **Phase 4** — load balancing + health checks (P1/P2), static hosting (P6), forward-auth (S2), mTLS (C8), dynamic-DNS + GeoIP access rules (S6/S5), auto-ban (S1), 2FA (S4), API tokens (A3), log viewer (L1), Prometheus metrics (L2), self-signed/from-file/custom-CA certs (C1/C4/C5), effective-config viewer (U3), declarative import (A2), OIDC + LDAP admin login (S3/S10).
+- **Phase 5** — PROXY protocol send+accept (T5), TLS termination (T3), SNI routing + passthrough (T2/C7), port ranges (T4), websocket support confirmed (P9).
+
+Needs live infra to fully validate (wired + compile-verified, degrade safely): GeoIP (needs a MaxMind DB), OIDC/LDAP (need an IdP/directory), DNS-01 wildcards (needs the TransIP key), and real ACME issuance / public HTTP-3 (needs a public DNS + port-forward). Everything else was smoke-tested end to end.
+
+---
+
+Legend below (historical): `[HAVE]` = shipped before this roadmap, `[SPEC]` = was in SPEC.md milestones. All are now done.
 
 ## The headline: be "the reliable one"
 
