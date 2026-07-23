@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="brand/logo-full.svg" alt="quicgate" height="84">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/logo-full-dark.svg">
+    <img src="brand/logo-full.svg" alt="quicgate" height="84">
+  </picture>
 </p>
 
 <p align="center">
