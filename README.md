@@ -89,6 +89,10 @@ Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (a passwo
 - No WireGuard tunneling — quicgate proxies to network-reachable upstreams only.
 - Single admin user (with 2FA/OIDC/LDAP), no multi-tenant roles.
 
+## Benchmarks
+
+On an AMD Ryzen 7 9800X3D, one quicgate instance handles **~45,000 proxied requests/sec** to a local backend (loopback, no TLS) and **~180,000/sec** for cache hits, with a routing lookup costing ~9 ns and access lists adding no measurable overhead. Reproduce with `go test -bench=. ./internal/engine`; full methodology and numbers in [BENCHMARKS.md](BENCHMARKS.md).
+
 ## HTTP/3 notes
 
 The TLS listener serves h1/h2 on TCP 443 and h3 on UDP 443 from the same certificates. Browsers upgrade via `Alt-Svc` and cache that hint for 30 days; disabling h3 per host therefore sends `Alt-Svc: clear` to actively evict the cached hint. Remember to forward **UDP 443** on your router or firewall (or let `QG_UPNP=1` do it).
