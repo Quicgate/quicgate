@@ -71,3 +71,60 @@ Keep the backend trivial (a static file or a tiny "ok" responder) so you measure
 quicgate, not the app behind it. Run the load generator from a *different*
 machine than quicgate for a true server-capacity number. HTTP/3 (UDP 443) needs
 a client that speaks h3.
+
+## Real-world (live homelab)
+
+Measured against the live deployment: one LAN client -> quicgate on a **6-vCPU
+homelab VM that also runs ~50 other containers** -> an nginx backend serving a
+real **90 KB** page, over real TLS (HTTP/2), LAN-direct.
+
+| Test | Result |
+|---|---|
+| GET the 90 KB page (200) | **566 req/s, 51 MB/s (~408 Mbit/s)**, p50 70 ms, p99 79 ms |
+| Small responses over TLS, single client | **~5,000 req/s**, p50 7 ms, p99 19 ms |
+
+Page-serving throughput stayed **flat at ~566 req/s from 40 to 200 concurrent
+connections** while latency grew linearly (70 -> 177 -> 354 ms) -- the signature
+of a fixed pipe *upstream* of the proxy. Here that pipe is the **single client's
+~400 Mbit/s link**, not quicgate, which rejected small requests at 5,000+/s with
+CPU to spare. Serving a real page it saturated the available bandwidth and had
+headroom left; its true page-serving ceiling needs several off-box clients (one
+machine maxes its own link first).
+
+## How it compares to nginx / Traefik / Pangolin
+
+quicgate's engine is Go `net/http` + `httputil.ReverseProxy` -- the **same class
+as Traefik and Zoraxy** (both Go). Expect it to sit in Traefik's ballpark,
+behind bare **nginx** (C, the throughput reference), and ahead of heavier stacks
+that add layers: Nginx Proxy Manager, or **Pangolin**, which runs on Traefik
+*plus* a WireGuard tunnel layer, so its proxy ceiling is Traefik's minus tunnel
+overhead.
+
+Published figures, for orientation only -- **different hardware, payloads, TLS
+settings and tools, so not a head-to-head:**
+
+| Proxy | req/s | p99 | Setup | Source |
+|---|---:|---:|---|---|
+| nginx | ~100,600 | 28 ms | 16 vCPU, no TLS, 1000 conns | hhf.technology |
+| Traefik v3 | ~74,000 | 36 ms | 16 vCPU, no TLS, 1000 conns | hhf.technology |
+| **quicgate** | **~45,000** proxied / **~180,000** cache-hit | -- | dedicated 8-core, small response, loopback (client + backend share the cores, so a floor) | this repo, `go test -bench` |
+| Zoraxy (Go) | 155 | 263 ms | 1 vCPU / 1 GB, TLS, real backend | deployn.de |
+| NPM+ (nginx) | 102 | 413 ms | 1 vCPU / 1 GB, TLS, real backend | deployn.de |
+| NPM (nginx) | 91 | 605 ms | 1 vCPU / 1 GB, TLS, real backend | deployn.de |
+
+Those are two different scenarios: the top rows are a 16-vCPU, no-TLS
+raw-throughput test (tens of thousands of req/s); the bottom rows are a
+constrained 1-core box with TLS in front of a real app (everything collapses to
+double digits, and the Go proxy Zoraxy edges out the nginx-based NPM). The honest
+reading: for any modern proxy under ~10k req/s per instance -- which covers
+essentially all self-hosted and small-fleet use -- the choice is not
+throughput-bound, and quicgate is comfortably in that range. quicgate's own
+micro-benchmark (~45k proxied req/s on a shared 8-core, a floor) puts it in the
+Go-proxy class alongside Traefik/Zoraxy, well clear of the layered NPM/Pangolin
+stacks. Run `go test -bench=. ./internal/engine` on your own hardware for a
+number that's actually comparable to your workload.
+
+Sources: nginx / Traefik figures from
+[hhf.technology's Traefik v3 vs Nginx analysis](https://hhf.technology/blog/traefik-vs-nginx);
+NPM / Zoraxy figures from
+[deployn.de's 2025 reverse-proxy benchmark](https://deployn.de/en/blog/reverse-proxy-benchmark-2025/).
