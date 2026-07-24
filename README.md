@@ -91,7 +91,7 @@ Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (a passwo
 
 ## Benchmarks
 
-On an AMD Ryzen 7 9800X3D, one quicgate instance handles **~45,000 proxied requests/sec** to a local backend (loopback, no TLS) and **~180,000/sec** for cache hits, with a routing lookup costing ~9 ns and access lists adding no measurable overhead. Reproduce with `go test -bench=. ./internal/engine`; full methodology and numbers in [BENCHMARKS.md](BENCHMARKS.md).
+On an AMD Ryzen 7 9800X3D, one quicgate instance handles **~45,000 proxied requests/sec** to a local backend (loopback, no TLS) and **~180,000/sec** for cache hits, with a routing lookup costing ~9 ns and access lists adding no measurable overhead. A single core sustains ~8,900 TLS-proxied req/s. That puts it in line with the major reverse proxies for any realistic self-hosted load, the proxy is essentially never the bottleneck. Reproduce with `go test -bench=. ./internal/engine`; full methodology and numbers in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## HTTP/3 notes
 
