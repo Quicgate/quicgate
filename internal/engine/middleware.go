@@ -19,10 +19,23 @@ import (
 // forwardAuth delegates authorization to an external endpoint before the
 // request reaches the upstream (Authelia/Authentik/Keycloak-style).
 func forwardAuth(fa *store.ForwardAuth, next http.Handler) http.Handler {
+	// Every inbound request to a forward-auth host fans out a subrequest to the
+	// auth endpoint, so this client needs the same keep-alive pool the main proxy
+	// transport got. A bare http.Transport defaults to 2 idle conns per host and
+	// churns a fresh dial plus TLS handshake per burst under load, which on
+	// Windows exhausts ephemeral ports. The auth endpoint is effectively a single
+	// backend, so a fixed pool is enough and there is no per-host Options knob;
+	// MaxIdleConns equals the per-host cap for that reason. ForceAttemptHTTP2 lets
+	// an h2 auth server multiplex subrequests over one connection (Go otherwise
+	// disables h2 once TLSClientConfig is set).
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: fa.SkipTLSVerify},
+			TLSClientConfig:     &tls.Config{InsecureSkipVerify: fa.SkipTLSVerify},
+			MaxIdleConnsPerHost: defaultMaxIdleConnsPerHost,
+			MaxIdleConns:        defaultMaxIdleConnsPerHost,
+			IdleConnTimeout:     90 * time.Second,
+			ForceAttemptHTTP2:   true,
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
