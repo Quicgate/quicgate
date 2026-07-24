@@ -20,6 +20,7 @@ import (
 	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 
+	"quicgate/internal/docker"
 	"quicgate/internal/engine"
 	"quicgate/internal/store"
 )
@@ -36,6 +37,7 @@ type session struct {
 type Server struct {
 	store    *store.Store
 	engine   *engine.Engine
+	docker   *docker.Provider // nil unless the Docker label provider is enabled
 	webFS    fs.FS
 	dataDir  string
 	mu       sync.Mutex
@@ -45,6 +47,10 @@ type Server struct {
 func New(st *store.Store, eng *engine.Engine, webFS fs.FS, dataDir string) *Server {
 	return &Server{store: st, engine: eng, webFS: webFS, dataDir: dataDir, sessions: map[string]session{}}
 }
+
+// SetDocker attaches the Docker label provider so the API can report its status
+// and adopt derived routes. Called before Handler().
+func (s *Server) SetDocker(p *docker.Provider) { s.docker = p }
 
 // EnsureAdmin seeds the NPM-style default admin on first run.
 func (s *Server) EnsureAdmin() error {
@@ -125,6 +131,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
 	mux.HandleFunc("POST /api/custom-certs/self-signed", s.auth(s.handleSelfSignedCert))
 	mux.HandleFunc("POST /api/custom-certs/from-file", s.auth(s.handleCertFromFile))
+	mux.HandleFunc("GET /api/docker/status", s.auth(s.handleDockerStatus))
+	mux.HandleFunc("POST /api/docker/adopt", s.auth(s.handleDockerAdopt))
 	mux.HandleFunc("GET /metrics", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		w.Write([]byte(s.engine.MetricsText()))
@@ -163,6 +171,10 @@ var settingsKeys = map[string]bool{
 	"ldap_enabled":          true,
 	"ldap_url":              true,
 	"ldap_bind_dn_template": true,
+	// Docker label provider (live tunables; enabling/socket are boot settings)
+	"docker_connect_mode":   true, // auto | network | published
+	"docker_host_address":   true, // where published/host-net ports are reachable
+	"docker_default_domain": true, // base domain for containers without quicgate.host
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -200,7 +212,68 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
 		return
 	}
+	// A changed Docker tunable (connect-mode, host address, default domain) only
+	// takes effect on the next reconcile; poke the provider so it is immediate.
+	if s.docker != nil {
+		for k := range body {
+			if strings.HasPrefix(k, "docker_") {
+				s.docker.Trigger()
+				break
+			}
+		}
+	}
 	s.handleGetSettings(w, r)
+}
+
+// handleDockerStatus reports the Docker label provider's live state, or that it
+// is disabled when the provider is not running.
+func (s *Server) handleDockerStatus(w http.ResponseWriter, r *http.Request) {
+	if s.docker == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.docker.Status())
+}
+
+// handleDockerAdopt persists the host and streams derived for one container as
+// editable configuration. The manual-wins rule then makes the provider drop its
+// derived version on the next reconcile, so nothing is ever served twice.
+func (s *Server) handleDockerAdopt(w http.ResponseWriter, r *http.Request) {
+	if s.docker == nil {
+		writeErr(w, http.StatusBadRequest, "docker integration is not enabled")
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := decodeStrict(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	host, streams, ok := s.docker.Adopt(body.Name)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "no routable container named "+body.Name)
+		return
+	}
+	if host != nil {
+		if err := s.store.CreateHost(host); err != nil {
+			writeErr(w, http.StatusBadRequest, "create host: "+err.Error())
+			return
+		}
+	}
+	reserved := s.engine.ReservedPorts()
+	for i := range streams {
+		if err := s.store.CreateStream(&streams[i], reserved); err != nil {
+			writeErr(w, http.StatusBadRequest, "create stream: "+err.Error())
+			return
+		}
+	}
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "adopted, but applying it failed: "+err.Error())
+		return
+	}
+	s.docker.Trigger() // re-derive so the container immediately shows as managed
+	writeJSON(w, http.StatusCreated, map[string]any{"host": host, "streams": streams})
 }
 
 func (s *Server) handleListAccessLists(w http.ResponseWriter, r *http.Request) {

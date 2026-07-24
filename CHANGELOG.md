@@ -4,6 +4,32 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-07-24
+
+### Added
+- **Docker label provider** (opt-in via `QG_DOCKER=1`): derive proxy hosts and
+  TCP/UDP streams from container labels — Traefik's provider idea with a flat
+  label set, no router/service/middleware graph.
+  - Labels: `quicgate.enable`, `quicgate.host`, `quicgate.port`,
+    `quicgate.exclude-ports`, `quicgate.scheme`, `quicgate.tls-skip-verify`,
+    `quicgate.tls`, `quicgate.access-list`, and `quicgate.streams` (raw L4
+    forwards). Stream ports are excluded from web-port auto-detection, so a
+    container with a web port and a game/DB port needs no manual excludes.
+  - Optional `QG_DOCKER_DOMAIN` derives the hostname from the container name.
+    Access lists are reused by name. A container can be HTTP-only, streams-only,
+    or both.
+  - `auto` / `network` / `published` connect-modes resolve the upstream address
+    per container, so it works whether quicgate runs on a bridge network or
+    `network_mode: host`.
+  - Manual hosts always win a naming conflict; derived routes are never
+    persisted (re-derived from live containers). A **Docker** page shows every
+    container with the exact reason it is or isn't routed, plus one-click
+    **Convert to host** to graduate a container to editable configuration.
+  - Read-only Docker client over the socket (list / inspect / events), no
+    third-party SDK, zero new dependencies.
+
+[1.2.0]: https://github.com/maferick/quicgate/releases/tag/v1.2.0
+
 ## [1.1.1] - 2026-07-23
 
 ### Added

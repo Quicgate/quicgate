@@ -305,3 +305,42 @@ func TestTCPStreamForward(t *testing.T) {
 		t.Fatalf("echo returned %q, want ping", buf)
 	}
 }
+
+// --- Docker label provider merge ---
+
+// TestDockerHostRoutesAndManualWinsConflict proves that hosts pushed by the
+// Docker provider route through the same pipeline as database hosts, and that a
+// manual host always wins a domain conflict (the docker route for that domain is
+// dropped rather than overriding explicit config).
+func TestDockerHostRoutesAndManualWinsConflict(t *testing.T) {
+	e, st := newTestEngine(t)
+	manual := backend(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("M")) })
+	dockerUp := backend(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("D")) })
+	other := backend(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("X")) })
+
+	// A manual host owns manual.test.
+	mustCreateHost(t, st, &store.Host{Type: "proxy", Domains: []string{"manual.test"}, Upstream: manual})
+	reload(t, e)
+
+	// Docker adds a fresh host and also tries to claim manual.test.
+	e.SetDockerRoutes([]store.Host{
+		{Type: "proxy", Domains: []string{"docker.test"}, Upstream: dockerUp, CertMode: "none", Enabled: true},
+		{Type: "proxy", Domains: []string{"manual.test"}, Upstream: other, CertMode: "none", Enabled: true},
+	}, nil)
+
+	if rr := req(e, "GET", "docker.test", "/", "127.0.0.1", nil); rr.Code != http.StatusOK || rr.Body.String() != "D" {
+		t.Fatalf("docker.test: status %d body %q, want 200 D", rr.Code, rr.Body.String())
+	}
+	if rr := req(e, "GET", "manual.test", "/", "127.0.0.1", nil); rr.Body.String() != "M" {
+		t.Fatalf("manual.test: body %q, want M (manual host must win the conflict)", rr.Body.String())
+	}
+
+	// Clearing docker routes removes docker.test but leaves the manual host.
+	e.SetDockerRoutes(nil, nil)
+	if rr := req(e, "GET", "docker.test", "/", "127.0.0.1", nil); rr.Code == http.StatusOK {
+		t.Fatalf("docker.test should be gone after clearing docker routes, got %d", rr.Code)
+	}
+	if rr := req(e, "GET", "manual.test", "/", "127.0.0.1", nil); rr.Body.String() != "M" {
+		t.Fatalf("manual.test should remain after clearing docker routes, body %q", rr.Body.String())
+	}
+}
