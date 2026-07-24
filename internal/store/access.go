@@ -23,6 +23,11 @@ var validHTTPMethods = map[string]bool{
 	"PATCH": true, "DELETE": true, "OPTIONS": true, "CONNECT": true, "TRACE": true,
 }
 
+// isCountryCode reports whether s is a 2-letter A-Z ISO 3166-1 alpha-2 code.
+func isCountryCode(s string) bool {
+	return len(s) == 2 && s[0] >= 'A' && s[0] <= 'Z' && s[1] >= 'A' && s[1] <= 'Z'
+}
+
 func (a *AccessList) Validate(prev *AccessList) error {
 	a.Name = strings.TrimSpace(a.Name)
 	if a.Name == "" {
@@ -69,7 +74,11 @@ func (a *AccessList) Validate(prev *AccessList) error {
 			a.Rules[i].CIDR = cidr
 		}
 		if r.Country != "" {
-			a.Rules[i].Country = strings.ToUpper(strings.TrimSpace(r.Country))
+			c := strings.ToUpper(strings.TrimSpace(r.Country))
+			if !isCountryCode(c) {
+				return fmt.Errorf("rule %d: country must be a 2-letter ISO code (e.g. NL), got %q", i+1, r.Country)
+			}
+			a.Rules[i].Country = c
 		}
 		if r.Host != "" {
 			a.Rules[i].Host = strings.ToLower(strings.TrimSpace(r.Host))

@@ -99,6 +99,8 @@ textarea { resize: vertical; }
 .hdr-rule { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
 .hdr-rule select { flex: 0 0 100px; }
 .hdr-rule input { flex: 1; min-width: 120px; font-family: var(--font-mono); font-size: var(--fs-sm); }
+.r-value-slot { display: contents; }
+.hdr-rule .r-value { flex: 1; min-width: 120px; }
 /* clickable HTTP-verb chips for method-scoped access rules */
 .r-methods { display: inline-flex; gap: 3px; flex-wrap: wrap; }
 .mchip {

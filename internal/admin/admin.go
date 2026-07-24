@@ -133,6 +133,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/custom-certs/from-file", s.auth(s.handleCertFromFile))
 	mux.HandleFunc("GET /api/docker/status", s.auth(s.handleDockerStatus))
 	mux.HandleFunc("POST /api/docker/adopt", s.auth(s.handleDockerAdopt))
+	mux.HandleFunc("GET /api/geoip/status", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.engine.GeoIPStatus())
+	}))
+	mux.HandleFunc("POST /api/geoip/reload", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.engine.GeoIPReload())
+	}))
+	mux.HandleFunc("GET /api/geoip/lookup", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		c, err := s.engine.GeoLookup(r.URL.Query().Get("ip"))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"country": c})
+	}))
 	mux.HandleFunc("GET /metrics", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		w.Write([]byte(s.engine.MetricsText()))
