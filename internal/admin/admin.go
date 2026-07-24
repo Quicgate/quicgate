@@ -189,6 +189,9 @@ var settingsKeys = map[string]bool{
 	// Docker label provider (default-domain is live; endpoints apply on restart)
 	"docker_default_domain": true, // base domain for containers without quicgate.host
 	"docker_endpoints":      true, // JSON list of Docker hosts to watch (restart to apply)
+	// Real client IP when behind a trusted proxy (Cloudflare / another LB)
+	"trusted_proxies": true, // CIDRs allowed to set the real-IP header
+	"real_ip_header":  true, // header carrying the real client IP (e.g. X-Forwarded-For)
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {

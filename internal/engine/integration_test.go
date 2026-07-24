@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -342,5 +343,76 @@ func TestDockerHostRoutesAndManualWinsConflict(t *testing.T) {
 	}
 	if rr := req(e, "GET", "manual.test", "/", "127.0.0.1", nil); rr.Body.String() != "M" {
 		t.Fatalf("manual.test should remain after clearing docker routes, body %q", rr.Body.String())
+	}
+}
+
+// --- Traefik-inspired features (v1.5.0) ---
+
+func TestMaintenanceMode(t *testing.T) {
+	e, st := newTestEngine(t)
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("live")) })
+	h := &store.Host{Type: "proxy", Domains: []string{"m.test"}, Upstream: up}
+	h.Options.Maintenance = true
+	mustCreateHost(t, st, h)
+	reload(t, e)
+
+	rr := req(e, "GET", "m.test", "/", "127.0.0.1", nil)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("maintenance status = %d, want 503", rr.Code)
+	}
+	if rr.Header().Get("Retry-After") == "" {
+		t.Fatal("expected a Retry-After header")
+	}
+	if rr.Body.String() == "live" {
+		t.Fatal("maintenance host must not reach the backend")
+	}
+}
+
+func TestResponseCache(t *testing.T) {
+	e, st := newTestEngine(t)
+	var hits int32
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hits, 1)
+		_, _ = w.Write([]byte(fmt.Sprintf("resp-%d", n)))
+	})
+	h := &store.Host{Type: "proxy", Domains: []string{"c.test"}, Upstream: up}
+	h.Options.CacheSec = 60
+	mustCreateHost(t, st, h)
+	reload(t, e)
+
+	r1 := req(e, "GET", "c.test", "/x", "127.0.0.1", nil)
+	r2 := req(e, "GET", "c.test", "/x", "127.0.0.1", nil)
+	if r1.Body.String() != "resp-1" || r2.Body.String() != "resp-1" {
+		t.Fatalf("cache bodies: r1=%q r2=%q, want both resp-1", r1.Body.String(), r2.Body.String())
+	}
+	if r1.Header().Get("X-Cache") != "MISS" || r2.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("X-Cache: r1=%q r2=%q, want MISS then HIT", r1.Header().Get("X-Cache"), r2.Header().Get("X-Cache"))
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("backend hit %d times, want 1 (second served from cache)", got)
+	}
+}
+
+func TestStickySessions(t *testing.T) {
+	e, st := newTestEngine(t)
+	a := backend(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("A")) })
+	b := backend(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("B")) })
+	h := &store.Host{Type: "proxy", Domains: []string{"s.test"}, Upstream: a, Upstreams: []store.Upstream{b}}
+	h.Options.StickySessions = true
+	mustCreateHost(t, st, h)
+	reload(t, e)
+
+	r1 := req(e, "GET", "s.test", "/", "127.0.0.1", nil)
+	cookies := r1.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("first request should set an affinity cookie")
+	}
+	first := r1.Body.String()
+	ck := cookies[0].Name + "=" + cookies[0].Value
+	for i := 0; i < 8; i++ {
+		rr := req(e, "GET", "s.test", "/", "127.0.0.1", map[string]string{"Cookie": ck})
+		if rr.Body.String() != first {
+			t.Fatalf("sticky request %d hit %q, want %q", i, rr.Body.String(), first)
+		}
 	}
 }

@@ -115,6 +115,7 @@ type Engine struct {
 	reloadMu      sync.Mutex                     // serializes concurrent Reload callers
 	dockerHosts   atomic.Pointer[[]store.Host]   // in-memory hosts from the Docker label provider
 	dockerStreams atomic.Pointer[[]store.Stream] // in-memory L4 streams from the Docker label provider
+	realIP        atomic.Pointer[realIPConfig]   // compiled trusted-proxy / real-client-IP config
 }
 
 // SetDockerRoutes replaces the hosts and streams derived from Docker labels and
@@ -230,6 +231,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	e.reloadMu.Lock()
 	defer e.reloadMu.Unlock()
 	e.applyACMESettings()
+	e.buildRealIP()
 	hosts, err := e.store.ListHosts()
 	if err != nil {
 		return err
@@ -448,6 +450,12 @@ func (e *Engine) loadStreamCert(id int64) (tls.Certificate, bool) {
 func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 	o := h.Options
 
+	// Maintenance mode short-circuits every request to a 503 page, whatever the
+	// host type. Access lists and rate limits still apply (via wrapCommon).
+	if o.Maintenance {
+		return &route{host: h, proxy: wrapCommon(maintenanceHandler(o.MaintenanceHTML), o, acl)}
+	}
+
 	// Non-proxy hosts skip the proxy machinery entirely, but still get the
 	// access-list, rate-limit and exploit-filter wrappers.
 	switch h.Type {
@@ -471,6 +479,7 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 		hp := fmt.Sprintf("%s:%d", u.Host, u.Port)
 		bal.targets = append(bal.targets, balTarget{
 			key: u.Scheme + "://" + hp, url: u.Scheme + "://" + hp, hostport: hp,
+			id: targetID(u.Scheme + "://" + hp),
 		})
 	}
 	target := &url.URL{Scheme: h.Upstream.Scheme, Host: fmt.Sprintf("%s:%d", h.Upstream.Host, h.Upstream.Port)}
@@ -517,7 +526,17 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 			// Pick a (healthy) backend per request for load balancing.
 			pick := target
 			if len(bal.targets) > 1 {
-				if u, err := url.Parse(bal.pick()); err == nil {
+				if o.StickySessions {
+					cookieVal := ""
+					if ck, err := pr.In.Cookie(stickyCookieName); err == nil {
+						cookieVal = ck.Value
+					}
+					u, id := bal.stickyPick(cookieVal)
+					if pu, err := url.Parse(u); err == nil {
+						pick = pu
+					}
+					pr.Out = pr.Out.WithContext(context.WithValue(pr.Out.Context(), stickyKey, stickyInfo{id: id, had: cookieVal == id}))
+				} else if u, err := url.Parse(bal.pick()); err == nil {
 					pick = u
 				}
 			}
@@ -537,6 +556,12 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 			applyHeaderRules(pr.Out.Header, o.RequestHeaders, pr.In)
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			if o.StickySessions && len(bal.targets) > 1 {
+				if info, ok := resp.Request.Context().Value(stickyKey).(stickyInfo); ok && info.id != "" && !info.had {
+					ck := &http.Cookie{Name: stickyCookieName, Value: info.id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode}
+					resp.Header.Add("Set-Cookie", ck.String())
+				}
+			}
 			if o.BlockIndexing {
 				resp.Header.Set("X-Robots-Tag", "noindex, nofollow, nosnippet, noarchive")
 			}
@@ -551,6 +576,12 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 	// Custom locations: route matching path prefixes to their own upstreams.
 	if len(h.Locations) > 0 {
 		handler = e.locationDispatcher(h, handler, transport)
+	}
+
+	// Response cache sits inside gzip so it stores uncompressed bodies and each
+	// client still gets a per-request encoding.
+	if o.CacheSec > 0 {
+		handler = newRespCache(time.Duration(o.CacheSec)*time.Second, 0).wrap(handler)
 	}
 
 	if o.Compression {
@@ -581,6 +612,32 @@ func setRealIP(pr *httputil.ProxyRequest) {
 	if ip != "" {
 		pr.Out.Header.Set("X-Real-IP", ip)
 	}
+}
+
+// stickyKey carries the chosen backend id from Rewrite to ModifyResponse so the
+// affinity cookie is set only when the backend changed.
+type stickyCtxKey int
+
+const stickyKey stickyCtxKey = 0
+const stickyCookieName = "qg_affinity"
+
+type stickyInfo struct {
+	id  string
+	had bool
+}
+
+// maintenanceHandler serves a 503 "under maintenance" page instead of proxying.
+func maintenanceHandler(customHTML string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if customHTML != "" {
+			fmt.Fprint(w, customHTML)
+			return
+		}
+		fmt.Fprintf(w, errorPage, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "Under maintenance")
+	})
 }
 
 // wrapCommon applies the middleware shared by every host type, outermost
@@ -855,7 +912,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 	}()
 
-	httpHandler := e.acme.HTTPChallengeHandler(e.ban.wrap(e.accessLog.wrap(e.serveHTTP)))
+	httpHandler := e.acme.HTTPChallengeHandler(e.wrapRealIP(e.ban.wrap(e.accessLog.wrap(e.serveHTTP))))
 	httpSrv := &http.Server{Addr: e.cfg.HTTPAddr, Handler: httpHandler, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 3)
 	go func() { errCh <- fmt.Errorf("http listener: %w", httpSrv.ListenAndServe()) }()
@@ -864,7 +921,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	var httpsSrv *http.Server
 	if !e.cfg.DisableTLS {
 		tlsCfg := e.tlsConfig()
-		httpsHandler := e.ban.wrap(e.accessLog.wrap(e.serveHTTPS))
+		httpsHandler := e.wrapRealIP(e.ban.wrap(e.accessLog.wrap(e.serveHTTPS)))
 		httpsSrv = &http.Server{
 			Addr:              e.cfg.HTTPSAddr,
 			Handler:           httpsHandler,
