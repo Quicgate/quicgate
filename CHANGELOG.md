@@ -13,6 +13,23 @@ All notable changes to quicgate are documented here. The format follows
   hosts by type), feature flags (HTTP/3, UPnP, auto-ban, GeoIP, forward-auth,
   OIDC, LDAP, Docker), and providers. One `GET /api/overview` call; vanilla
   inline-SVG donuts, no chart library.
+- **Real client IP behind a trusted proxy** (Traefik #3097): when quicgate sits
+  behind Cloudflare or another load balancer, set trusted-proxy CIDRs and a
+  header (Settings) so access lists, GeoIP, rate limits and logs use the real
+  client IP. A rightmost-untrusted `X-Forwarded-For` walk defeats client
+  spoofing of the header.
+- **Sticky sessions** (Traefik #1207/#1035): a per-host cookie affinity across a
+  load-balanced upstream pool, so a client keeps hitting the same backend
+  (the cookie carries an opaque id, never the upstream address).
+- **Maintenance mode** (Traefik #3520): a per-host toggle that serves a 503
+  "under maintenance" page (with `Retry-After` and an optional custom body)
+  instead of proxying.
+- **Response caching** (Traefik #878): a per-host TTL that caches cacheable
+  GET/HEAD responses in memory (honouring `Cache-Control`, skipping `Set-Cookie`
+  and authenticated requests), with an `X-Cache: HIT/MISS` header.
+
+These four came from mining Traefik's most-reacted enhancement requests for
+proxy-layer features that fit a homelab.
 
 [1.5.0]: https://github.com/maferick/quicgate/releases/tag/v1.5.0
 

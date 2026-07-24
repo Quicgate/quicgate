@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"sync"
@@ -132,6 +134,36 @@ type balTarget struct {
 	key      string // scheme://host:port
 	url      string
 	hostport string
+	id       string // opaque affinity id (short hash of key) for sticky sessions
+}
+
+// targetID is the opaque cookie value identifying a backend for sticky
+// sessions, a short hash so the upstream address is never exposed.
+func targetID(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:6])
+}
+
+// stickyPick honors the affinity cookie when it maps to a healthy backend,
+// otherwise round-robins to a healthy one. Returns the chosen url and its id.
+func (b *balancer) stickyPick(cookieVal string) (string, string) {
+	if cookieVal != "" {
+		for _, t := range b.targets {
+			if t.id == cookieVal && b.health.up(t.key) {
+				return t.url, t.id
+			}
+		}
+	}
+	n := len(b.targets)
+	start := b.next.Add(1)
+	for i := 0; i < n; i++ {
+		t := b.targets[(int(start)+i)%n]
+		if b.health.up(t.key) {
+			return t.url, t.id
+		}
+	}
+	t := b.targets[int(start)%n]
+	return t.url, t.id
 }
 
 func (b *balancer) pick() string {

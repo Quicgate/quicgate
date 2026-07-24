@@ -473,6 +473,7 @@ function syncCertMode() {
 }
 $('f-certmode').addEventListener('change', syncCertMode);
 $('f-mtls-mode').addEventListener('change', () => { $('f-mtls-ca-field').hidden = !$('f-mtls-mode').value; });
+$('f-maintenance').addEventListener('change', () => { $('f-maintenance-html-field').hidden = !$('f-maintenance').checked; });
 
 function openModal(h) {
   editingId = h ? h.id : null;
@@ -530,6 +531,11 @@ function openModal(h) {
   $('f-noindex').checked = !!o.blockIndexing;
   $('f-exploits').checked = !!o.blockExploits;
   $('f-compress').checked = !!o.compression;
+  $('f-sticky').checked = !!o.stickySessions;
+  $('f-cachesec').value = o.cacheSec || '';
+  $('f-maintenance').checked = !!o.maintenance;
+  $('f-maintenance-html').value = o.maintenanceHtml || '';
+  $('f-maintenance-html-field').hidden = !o.maintenance;
   $('f-ratelimit').checked = !!o.rateLimit;
   $('f-rate-rps').value = o.rateLimit ? o.rateLimit.rps : '';
   $('f-rate-burst').value = o.rateLimit ? o.rateLimit.burst : '';
@@ -609,6 +615,10 @@ $('host-form').addEventListener('submit', async (e) => {
       blockExploits: $('f-exploits').checked,
       blockBadBots: $('f-badbots').checked,
       compression: $('f-compress').checked,
+      stickySessions: $('f-sticky').checked,
+      cacheSec: parseInt($('f-cachesec').value, 10) || 0,
+      maintenance: $('f-maintenance').checked,
+      maintenanceHtml: $('f-maintenance-html').value,
       badGatewayHtml: $('f-badgateway').value,
       pathRewrite: ($('f-rw-strip').value.trim() || $('f-rw-add').value.trim() || $('f-rw-regex').value.trim())
         ? {
@@ -1449,6 +1459,8 @@ async function loadSettings() {
   $('set-ldap-enabled').checked = s.ldap_enabled === '1';
   $('set-ldap-url').value = s.ldap_url || '';
   $('set-ldap-dn').value = s.ldap_bind_dn_template || '';
+  $('set-trustedproxies').value = s.trusted_proxies || '';
+  $('set-realip-header').value = s.real_ip_header || '';
   syncDnsField();
   syncDefaultSiteField();
 }
@@ -1474,6 +1486,15 @@ $('ldap-form').addEventListener('submit', async (e) => {
       ldap_enabled: $('set-ldap-enabled').checked ? '1' : '0',
       ldap_url: $('set-ldap-url').value.trim(),
       ldap_bind_dn_template: $('set-ldap-dn').value.trim(),
+    });
+  } catch (err) { alert(err.message); }
+});
+
+$('set-trustedproxies-save').addEventListener('click', async () => {
+  try {
+    await api('PUT', '/api/settings', {
+      trusted_proxies: $('set-trustedproxies').value.trim(),
+      real_ip_header: $('set-realip-header').value.trim(),
     });
   } catch (err) { alert(err.message); }
 });

@@ -112,6 +112,12 @@ type Options struct {
 	// Response group
 	Compression bool `json:"compression"` // gzip responses when the client accepts it
 
+	// Behaviour group
+	Maintenance     bool   `json:"maintenance"`               // serve a 503 maintenance page instead of proxying
+	MaintenanceHTML string `json:"maintenanceHtml,omitempty"` // custom maintenance page body
+	StickySessions  bool   `json:"stickySessions"`            // cookie session affinity across the upstream pool
+	CacheSec        int    `json:"cacheSec,omitempty"`        // >0 = cache cacheable GET/HEAD responses this many seconds
+
 	// TLS group
 	HSTS          HSTS   `json:"hsts"`
 	MinTLSVersion string `json:"minTlsVersion,omitempty"` // "" (default 1.2) | "1.2" | "1.3"
@@ -371,7 +377,7 @@ func (o *Options) validate() error {
 	}
 	for name, v := range map[string]int{
 		"dialTimeoutSec": o.DialTimeoutSec, "responseHeaderTimeoutSec": o.ResponseHeaderTimeoutSec,
-		"idleTimeoutSec": o.IdleTimeoutSec, "maxBodyMb": o.MaxBodyMB,
+		"idleTimeoutSec": o.IdleTimeoutSec, "maxBodyMb": o.MaxBodyMB, "cacheSec": o.CacheSec,
 	} {
 		if v < 0 {
 			return fmt.Errorf("%s cannot be negative", name)
