@@ -90,6 +90,7 @@ type Options struct {
 	DialTimeoutSec           int    `json:"dialTimeoutSec,omitempty"`
 	ResponseHeaderTimeoutSec int    `json:"responseHeaderTimeoutSec,omitempty"`
 	IdleTimeoutSec           int    `json:"idleTimeoutSec,omitempty"`
+	MaxIdleConnsPerHost      int    `json:"maxIdleConnsPerHost,omitempty"`
 	MaxBodyMB                int    `json:"maxBodyMb,omitempty"` // 0 = unlimited
 	Buffering                *bool  `json:"buffering,omitempty"` // nil/true = buffered; false = flush immediately (SSE)
 
@@ -377,7 +378,8 @@ func (o *Options) validate() error {
 	}
 	for name, v := range map[string]int{
 		"dialTimeoutSec": o.DialTimeoutSec, "responseHeaderTimeoutSec": o.ResponseHeaderTimeoutSec,
-		"idleTimeoutSec": o.IdleTimeoutSec, "maxBodyMb": o.MaxBodyMB, "cacheSec": o.CacheSec,
+		"idleTimeoutSec": o.IdleTimeoutSec, "maxIdleConnsPerHost": o.MaxIdleConnsPerHost,
+		"maxBodyMb": o.MaxBodyMB, "cacheSec": o.CacheSec,
 	} {
 		if v < 0 {
 			return fmt.Errorf("%s cannot be negative", name)

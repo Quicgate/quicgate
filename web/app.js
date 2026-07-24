@@ -555,6 +555,7 @@ function openModal(h) {
   $('f-dialto').value = o.dialTimeoutSec || '';
   $('f-respto').value = o.responseHeaderTimeoutSec || '';
   $('f-idleto').value = o.idleTimeoutSec || '';
+  $('f-maxidle').value = o.maxIdleConnsPerHost || '';
   $('f-maxbody').value = o.maxBodyMb || '';
   $('f-buffering').checked = o.buffering !== false;
   $('req-headers').innerHTML = '';
@@ -609,6 +610,7 @@ $('host-form').addEventListener('submit', async (e) => {
       dialTimeoutSec: parseInt($('f-dialto').value, 10) || 0,
       responseHeaderTimeoutSec: parseInt($('f-respto').value, 10) || 0,
       idleTimeoutSec: parseInt($('f-idleto').value, 10) || 0,
+      maxIdleConnsPerHost: parseInt($('f-maxidle').value, 10) || 0,
       maxBodyMb: parseInt($('f-maxbody').value, 10) || 0,
       buffering: $('f-buffering').checked ? undefined : false,
       blockIndexing: $('f-noindex').checked,
