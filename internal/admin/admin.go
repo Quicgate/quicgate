@@ -171,10 +171,9 @@ var settingsKeys = map[string]bool{
 	"ldap_enabled":          true,
 	"ldap_url":              true,
 	"ldap_bind_dn_template": true,
-	// Docker label provider (live tunables; enabling/socket are boot settings)
-	"docker_connect_mode":   true, // auto | network | published
-	"docker_host_address":   true, // where published/host-net ports are reachable
+	// Docker label provider (default-domain is live; endpoints apply on restart)
 	"docker_default_domain": true, // base domain for containers without quicgate.host
+	"docker_endpoints":      true, // JSON list of Docker hosts to watch (restart to apply)
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -244,13 +243,14 @@ func (s *Server) handleDockerAdopt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name string `json:"name"`
+		Endpoint string `json:"endpoint"`
+		Name     string `json:"name"`
 	}
 	if err := decodeStrict(r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	host, streams, ok := s.docker.Adopt(body.Name)
+	host, streams, ok := s.docker.Adopt(body.Endpoint, body.Name)
 	if !ok {
 		writeErr(w, http.StatusNotFound, "no routable container named "+body.Name)
 		return

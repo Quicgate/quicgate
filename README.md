@@ -74,7 +74,7 @@ Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (a passwo
 | Access lists (IP/CIDR) | yes + **GeoIP country + dynamic-DNS rules** | yes | yes |
 | Auto-ban / abuse | built-in fail2ban-style + JSON logs for CrowdSec | no | CrowdSec integration |
 | Router integration | **UPnP port-forward management** | no | no |
-| Config from container labels | **yes — flat labels + streams** | no | via Traefik labels |
+| Config from container labels | **yes — flat labels + streams, multi-host** | no | via Traefik labels |
 | Admin 2FA | yes (TOTP) | no | yes |
 | API | full REST + OpenAPI/Swagger + tokens | REST (undocumented) | REST |
 | Metrics | Prometheus, per-host | no | via Traefik |
@@ -107,12 +107,12 @@ The TLS listener serves h1/h2 on TCP 443 and h3 on UDP 443 from the same certifi
 | `QG_H3` | | `off` = disable the HTTP/3 listener globally |
 | `QG_UPNP` | | `1` = manage router port forwards via UPnP IGD |
 | `QG_DOCKER` | | `1` = derive hosts/streams from container labels |
-| `QG_DOCKER_SOCKET` | `/var/run/docker.sock` | Docker daemon socket (mount read-only) |
-| `QG_DOCKER_CONNECT` | `auto` | `auto` / `network` / `published` upstream resolution |
-| `QG_DOCKER_HOST_ADDR` | `127.0.0.1` | host address for published / host-net containers |
+| `QG_DOCKER_SOCKET` | `/var/run/docker.sock` | local Docker daemon socket (mount read-only) |
+| `QG_DOCKER_HOST_ADDR` | `127.0.0.1` | address where the local host's published ports are reachable |
+| `QG_DOCKER_ENDPOINTS` | | JSON list of Docker hosts to watch (overrides the single local socket) |
 | `QG_DOCKER_DOMAIN` | | default base domain for containers without `quicgate.host` |
 
-Most settings (ACME email/staging/CA, DNS provider, alert webhook, default site, auto-ban, OIDC/LDAP, and the Docker connect-mode/host-address/default-domain) are editable live in the Settings page and stored in the database. Drop a `GeoLite2-Country.mmdb` into `QG_DATA` to enable GeoIP country rules in access lists.
+Most settings (ACME email/staging/CA, DNS provider, alert webhook, default site, auto-ban, OIDC/LDAP, and the Docker default-domain) are editable live in the Settings page and stored in the database. Drop a `GeoLite2-Country.mmdb` into `QG_DATA` to enable GeoIP country rules in access lists.
 
 ## Docker labels (config from containers)
 
@@ -158,13 +158,22 @@ services:
 
 Manual hosts always win a naming conflict — a label can never silently override a host you configured by hand. Anything beyond these labels (custom locations, header rules, mTLS, rate limits) lives in the UI: use **Convert to host** on the Docker page to turn a derived container into editable configuration with no downtime.
 
-### Connect mode (how quicgate reaches containers)
+### How quicgate reaches containers
 
-`docker.connect-mode` (Docker page, or `QG_DOCKER_CONNECT`) decides how the upstream address is resolved. `quicgate.port` always names the app's port *inside* the container; quicgate maps it to the reachable address for you:
+One rule: quicgate connects to the **Docker host's address** on the container's **published port**. `quicgate.port` names the app's port *inside* the container; quicgate uses that port's published host mapping (a `network_mode: host` container is reached at that port directly). So a container must publish the port you want routed. The local host's address defaults to `127.0.0.1` (`QG_DOCKER_HOST_ADDR`).
 
-- **auto** (default): if quicgate shares a Docker network with the container it uses the container IP directly; if the container is host-networked, or only reachable via a published port, it uses the host address (`QG_DOCKER_HOST_ADDR`, default `127.0.0.1`). This is what a `network_mode: host` quicgate needs.
-- **network**: always use the container IP on the shared network (requires quicgate to be on that network).
-- **published**: always use the host address plus the container's published host port.
+### Multiple Docker hosts
+
+quicgate can watch several daemons at once. Give it a JSON list of endpoints (in `QG_DOCKER_ENDPOINTS`, or the **Docker hosts** box on the Docker page), each with a name, a connection, and the address where *its* published ports are reachable from quicgate:
+
+```json
+[
+  {"name": "local",    "connect": "/var/run/docker.sock",    "address": "127.0.0.1"},
+  {"name": "docker92", "connect": "tcp://192.168.1.92:2375", "address": "192.168.1.92"}
+]
+```
+
+A container on `docker92` is then reached at `192.168.1.92:<published port>`. Reach a remote daemon through a **read-only socket proxy** (below) exposing `tcp://` on the LAN. Endpoint-list changes apply on restart; the Docker page shows each host's connection state.
 
 ### Socket security
 

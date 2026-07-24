@@ -16,24 +16,23 @@ type derived struct {
 	enabled   bool           // the container opted in with quicgate.enable
 	host      *store.Host    // the HTTP proxy host, or nil when none/blocked
 	streams   []store.Stream // raw L4 forwards from quicgate.streams
-	mode      string         // how the upstream is reached: network | published | hostnet
 	warnings  []string       // human-readable reasons a container is not fully routed
 }
 
-// reachPlan describes how quicgate reaches a container's ports, resolved from
-// the connect-mode and the container's own networking.
+// reachPlan describes how quicgate reaches a container's ports. The rule is
+// uniform: connect to the Docker host's address on the port's published
+// mapping. A host-networked container binds host ports directly, so its port is
+// reachable at the address as-is.
 type reachPlan struct {
-	mode       string            // network | published | hostnet
-	host       string            // upstream host: a container IP or the host address
-	candidates []int             // container ports usable in this mode (before exclude-ports)
-	portFor    func(int) (int, bool) // maps a chosen container port to its reachable port
+	host       string                // the Docker host's address
+	candidates []int                 // container ports usable here (before exclude-ports)
+	portFor    func(int) (int, bool) // maps a container port to its reachable host port
 }
 
-// derive interprets one container into a proxy host and/or a set of L4 streams,
-// plus any warnings. A container may be HTTP-only (quicgate.host + a web port),
-// streams-only (quicgate.streams, no hostname), or both (a web port for the
-// hostname and raw ports exposed as streams).
-func (p *Provider) derive(in containerInspect) derived {
+// derive interprets one container into a proxy host and/or a set of L4 streams.
+// address is where this Docker host's published ports are reachable from
+// quicgate (127.0.0.1 for the local daemon, the host IP for a remote one).
+func (p *Provider) derive(in containerInspect, address string) derived {
 	pfx := p.labelPrefix() + "."
 	lbl := func(k string) string { return strings.TrimSpace(in.Config.Labels[pfx+k]) }
 	d := derived{container: in.name(), id: in.ID}
@@ -47,16 +46,9 @@ func (p *Provider) derive(in containerInspect) derived {
 		return d
 	}
 
-	// How we reach the container is shared by the HTTP host and the streams.
-	plan, warn := p.resolvePlan(in)
-	if warn != "" {
-		d.warnings = append(d.warnings, warn)
-		return d
-	}
-	d.mode = plan.mode
+	plan := resolvePlan(in, address)
 
-	// Optional access list, reused by both the host and the streams (only the
-	// list's IP rules apply at L4).
+	// Optional access list, reused by both the host and the streams.
 	var aclID *int64
 	if al := lbl("access-list"); al != "" {
 		if id, ok := p.resolveACL(al); ok {
@@ -68,7 +60,7 @@ func (p *Provider) derive(in containerInspect) derived {
 
 	// Raw L4 streams (quicgate.streams). These claim container ports so the
 	// HTTP port auto-detection below never picks one of them.
-	streams, streamWarns, streamPorts := p.deriveStreams(lbl("streams"), plan, aclID)
+	streams, streamWarns, streamPorts := deriveStreams(lbl("streams"), plan, aclID)
 	d.streams = streams
 	d.warnings = append(d.warnings, streamWarns...)
 
@@ -92,7 +84,7 @@ func (p *Provider) derive(in containerInspect) derived {
 	case portWarn == "" && len(domains) > 0:
 		rport, ok := plan.portFor(cport)
 		if !ok {
-			d.warnings = append(d.warnings, fmt.Sprintf("port %d is not reachable (connect-mode %s); publish it or use network mode", cport, plan.mode))
+			d.warnings = append(d.warnings, fmt.Sprintf("port %d is not published on %s (publish it to route)", cport, address))
 			break
 		}
 		h := p.buildHost(lbl, domains, plan.host, rport, aclID)
@@ -114,6 +106,27 @@ func (p *Provider) derive(in containerInspect) derived {
 		d.warnings = append(d.warnings, "quicgate.enable is set but nothing to route (add quicgate.host/quicgate.port or quicgate.streams)")
 	}
 	return d
+}
+
+// resolvePlan resolves how quicgate reaches a container: always the Docker
+// host's address on the container port's published host port. A host-networked
+// container binds host ports directly, so its container port is reachable as-is.
+func resolvePlan(in containerInspect, address string) reachPlan {
+	published := parsePublished(in.NetworkSettings.Ports)
+	if in.HostConfig.NetworkMode == "host" {
+		cands := parseExposed(in.Config.ExposedPorts)
+		if len(cands) == 0 {
+			for cp := range published {
+				cands = append(cands, cp)
+			}
+		}
+		return reachPlan{host: address, candidates: cands, portFor: func(cp int) (int, bool) { return cp, true }}
+	}
+	var cands []int
+	for cp := range published {
+		cands = append(cands, cp)
+	}
+	return reachPlan{host: address, candidates: cands, portFor: func(cp int) (int, bool) { hp, ok := published[cp]; return hp, ok }}
 }
 
 // buildHost assembles the proxy host from the resolved upstream and labels.
@@ -147,7 +160,7 @@ func (p *Provider) buildHost(lbl func(string) string, domains []string, host str
 // port is what quicgate binds publicly; the forward target is the container's
 // reachable address for its container port. Returns the streams, any warnings,
 // and the set of container ports claimed (so HTTP auto-detect skips them).
-func (p *Provider) deriveStreams(spec string, plan reachPlan, aclID *int64) ([]store.Stream, []string, map[int]bool) {
+func deriveStreams(spec string, plan reachPlan, aclID *int64) ([]store.Stream, []string, map[int]bool) {
 	claimed := map[int]bool{}
 	listenSeen := map[int]bool{}
 	var streams []store.Stream
@@ -164,7 +177,7 @@ func (p *Provider) deriveStreams(spec string, plan reachPlan, aclID *int64) ([]s
 		}
 		rport, ok := plan.portFor(container)
 		if !ok {
-			warns = append(warns, fmt.Sprintf("stream %q: container port %d is not reachable (connect-mode %s)", part, container, plan.mode))
+			warns = append(warns, fmt.Sprintf("stream %q: container port %d is not published on %s", part, container, plan.host))
 			continue
 		}
 		if listenSeen[listen] {
@@ -217,63 +230,6 @@ func parseStreamEntry(s string) (listen, container int, proto string, err error)
 	return container, container, proto, nil
 }
 
-// splitCSV splits a comma-separated label value, trimming and dropping blanks.
-func splitCSV(s string) []string {
-	var out []string
-	for _, part := range strings.Split(s, ",") {
-		if v := strings.TrimSpace(part); v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
-// resolvePlan decides, from the connect-mode and the container's networking,
-// how quicgate reaches it. On a host-networked quicgate the network path is
-// unavailable (it shares no bridge), so auto resolves to published/hostnet.
-func (p *Provider) resolvePlan(in containerInspect) (reachPlan, string) {
-	mode := p.connectMode()
-	exposed := parseExposed(in.Config.ExposedPorts)
-	published := parsePublished(in.NetworkSettings.Ports)
-
-	// A shared network with quicgate lets us reach the container IP directly.
-	sharedIP := ""
-	for netName, n := range in.NetworkSettings.Networks {
-		if p.selfNets[netName] && n.IPAddress != "" {
-			sharedIP = n.IPAddress
-			break
-		}
-	}
-
-	identity := func(cp int) (int, bool) { return cp, true }
-	publishedPortFor := func(cp int) (int, bool) { hp, ok := published[cp]; return hp, ok }
-	publishedCandidates := func() []int {
-		var out []int
-		for cp := range published {
-			out = append(out, cp)
-		}
-		return out
-	}
-
-	switch {
-	case in.HostConfig.NetworkMode == "host":
-		// The container binds host ports directly: container port == host port,
-		// reachable at the host address.
-		cands := exposed
-		if len(cands) == 0 {
-			cands = publishedCandidates()
-		}
-		return reachPlan{mode: "hostnet", host: p.hostAddr(), candidates: cands, portFor: identity}, ""
-	case (mode == "network" || mode == "auto") && sharedIP != "":
-		return reachPlan{mode: "network", host: sharedIP, candidates: exposed, portFor: identity}, ""
-	case mode == "network":
-		return reachPlan{}, "connect-mode network but quicgate shares no network with this container"
-	default:
-		// published, or auto with no shared network (the host-net quicgate case).
-		return reachPlan{mode: "published", host: p.hostAddr(), candidates: publishedCandidates(), portFor: publishedPortFor}, ""
-	}
-}
-
 // choosePort resolves which container port to route to: an explicit
 // quicgate.port wins; otherwise auto-detect requires exactly one candidate
 // after removing excluded ports.
@@ -294,7 +250,7 @@ func choosePort(candidates []int, exclude map[int]bool, explicit string) (int, s
 	sort.Ints(filtered)
 	switch len(filtered) {
 	case 0:
-		return 0, "no reachable port to route to (set quicgate.port, or publish the port)"
+		return 0, "no published port to route to (set quicgate.port, or publish the port)"
 	case 1:
 		return filtered[0], ""
 	default:
@@ -302,11 +258,21 @@ func choosePort(candidates []int, exclude map[int]bool, explicit string) (int, s
 	}
 }
 
-// The connect-mode, host address and default domain are read live from the
-// store on every reconcile (with the env-provided value as the default), so
-// changing them in the UI takes effect on the next reconcile without a restart.
-// The label prefix is frozen at startup because it fixes the event-stream
-// filter.
+// splitCSV splits a comma-separated label value, trimming and dropping blanks.
+func splitCSV(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// The default domain is read live from the store (with the env value as the
+// default) so changing it in the UI takes effect on the next reconcile without
+// a restart. The label prefix is frozen at startup because it fixes the
+// event-stream filter.
 
 func (p *Provider) get(key, def string) string {
 	if p.setting == nil {
@@ -315,28 +281,8 @@ func (p *Provider) get(key, def string) string {
 	return p.setting(key, def)
 }
 
-func (p *Provider) connectMode() string {
-	def := p.opts.ConnectMode
-	if def == "" {
-		def = "auto"
-	}
-	m := p.get("docker_connect_mode", def)
-	if m == "" {
-		return "auto"
-	}
-	return m
-}
-
 func (p *Provider) defaultDomain() string {
 	return strings.TrimSpace(p.get("docker_default_domain", p.opts.DefaultDomain))
-}
-
-func (p *Provider) hostAddr() string {
-	a := strings.TrimSpace(p.get("docker_host_address", p.opts.HostAddress))
-	if a == "" {
-		return "127.0.0.1"
-	}
-	return a
 }
 
 func (p *Provider) labelPrefix() string {

@@ -6,6 +6,8 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -19,6 +21,39 @@ import (
 	"quicgate/internal/engine"
 	"quicgate/internal/store"
 )
+
+// dockerEndpoints resolves the Docker hosts to watch. A JSON list in
+// QG_DOCKER_ENDPOINTS or the docker_endpoints setting is authoritative when
+// present; otherwise a single local endpoint is derived from the socket env.
+func dockerEndpoints(st *store.Store) []docker.Endpoint {
+	raw := os.Getenv("QG_DOCKER_ENDPOINTS")
+	if strings.TrimSpace(raw) == "" {
+		raw = st.GetSetting("docker_endpoints", "")
+	}
+	if strings.TrimSpace(raw) != "" {
+		var eps []docker.Endpoint
+		if err := json.Unmarshal([]byte(raw), &eps); err == nil && len(eps) > 0 {
+			for i := range eps {
+				if eps[i].Connect == "" {
+					eps[i].Connect = "/var/run/docker.sock"
+				}
+				if eps[i].Address == "" {
+					eps[i].Address = "127.0.0.1"
+				}
+				if eps[i].Name == "" {
+					eps[i].Name = fmt.Sprintf("endpoint%d", i+1)
+				}
+			}
+			return eps
+		}
+		log.Printf("docker: ignoring invalid docker_endpoints JSON, falling back to the local socket")
+	}
+	return []docker.Endpoint{{
+		Name:    "local",
+		Connect: env("QG_DOCKER_SOCKET", "/var/run/docker.sock"),
+		Address: env("QG_DOCKER_HOST_ADDR", "127.0.0.1"),
+	}}
+}
 
 //go:embed web
 var webEmbed embed.FS
@@ -75,12 +110,9 @@ func main() {
 	var dockerProvider *docker.Provider
 	if os.Getenv("QG_DOCKER") == "1" || st.GetSetting("docker_enabled", "") == "1" {
 		dockerProvider = docker.NewProvider(docker.Options{
-			Socket:        env("QG_DOCKER_SOCKET", "/var/run/docker.sock"),
-			ConnectMode:   env("QG_DOCKER_CONNECT", "auto"),
-			HostAddress:   os.Getenv("QG_DOCKER_HOST_ADDR"),
+			Endpoints:     dockerEndpoints(st),
 			DefaultDomain: os.Getenv("QG_DOCKER_DOMAIN"),
 			LabelPrefix:   env("QG_DOCKER_LABEL_PREFIX", "quicgate"),
-			SelfContainer: os.Getenv("QG_DOCKER_SELF"),
 		}, docker.Hooks{
 			Apply: eng.SetDockerRoutes,
 			ResolveACL: func(name string) (int64, bool) {

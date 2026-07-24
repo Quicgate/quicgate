@@ -4,6 +4,28 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-07-24
+
+### Added
+- **Multiple Docker hosts**: the label provider can watch several daemons at
+  once. Configure a JSON list of endpoints (`QG_DOCKER_ENDPOINTS`, or the
+  **Docker hosts** box on the Docker page), each with a name, a connection (a
+  local socket path or `tcp://host:port`, e.g. a read-only socket proxy), and
+  the address where that host's published ports are reachable. The Docker page
+  shows each host's connection state and labels every container with its host.
+- The Docker client now speaks `tcp://` endpoints in addition to unix sockets.
+
+### Changed
+- **Simpler connect model**: quicgate now always reaches a container at the
+  Docker host's address on its published port (a `network_mode: host` container
+  at that port directly). The `auto` / `network` / `published` connect-mode and
+  the shared-network container-IP path are gone; `quicgate.port` still names the
+  container's internal port, so publish the port you want routed. Removes the
+  `docker_connect_mode` and `docker_host_address` settings (endpoints carry the
+  address now).
+
+[1.3.0]: https://github.com/maferick/quicgate/releases/tag/v1.3.0
+
 ## [1.2.0] - 2026-07-24
 
 ### Added
