@@ -4,6 +4,16 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.1] - 2026-07-24
+
+### Changed
+- Project moved to its own GitHub organization: **`Quicgate/quicgate`**. The
+  container image is now **`ghcr.io/quicgate/quicgate`** (the old
+  `ghcr.io/maferick/quicgate` path stops receiving updates; repoint your
+  `image:` to the new one). No functional changes.
+
+[1.5.1]: https://github.com/Quicgate/quicgate/releases/tag/v1.5.1
+
 ## [1.5.0] - 2026-07-24
 
 ### Added
@@ -31,7 +41,7 @@ All notable changes to quicgate are documented here. The format follows
 These four came from mining Traefik's most-reacted enhancement requests for
 proxy-layer features that fit a homelab.
 
-[1.5.0]: https://github.com/maferick/quicgate/releases/tag/v1.5.0
+[1.5.0]: https://github.com/Quicgate/quicgate/releases/tag/v1.5.0
 
 ## [1.4.0] - 2026-07-24
 
@@ -49,7 +59,7 @@ proxy-layer features that fit a homelab.
 ### API
 - `GET /api/geoip/status`, `POST /api/geoip/reload`, `GET /api/geoip/lookup?ip=`.
 
-[1.4.0]: https://github.com/maferick/quicgate/releases/tag/v1.4.0
+[1.4.0]: https://github.com/Quicgate/quicgate/releases/tag/v1.4.0
 
 ## [1.3.0] - 2026-07-24
 
@@ -71,7 +81,7 @@ proxy-layer features that fit a homelab.
   `docker_connect_mode` and `docker_host_address` settings (endpoints carry the
   address now).
 
-[1.3.0]: https://github.com/maferick/quicgate/releases/tag/v1.3.0
+[1.3.0]: https://github.com/Quicgate/quicgate/releases/tag/v1.3.0
 
 ## [1.2.0] - 2026-07-24
 
@@ -97,7 +107,7 @@ proxy-layer features that fit a homelab.
   - Read-only Docker client over the socket (list / inspect / events), no
     third-party SDK, zero new dependencies.
 
-[1.2.0]: https://github.com/maferick/quicgate/releases/tag/v1.2.0
+[1.2.0]: https://github.com/Quicgate/quicgate/releases/tag/v1.2.0
 
 ## [1.1.1] - 2026-07-23
 
@@ -106,7 +116,7 @@ proxy-layer features that fit a homelab.
   concepts (access-list evaluation, the GET-from-everywhere pattern, hosts vs
   streams, certs/HTTP-3, admin-port safety, API tokens). Embedded, works offline.
 
-[1.1.1]: https://github.com/maferick/quicgate/releases/tag/v1.1.1
+[1.1.1]: https://github.com/Quicgate/quicgate/releases/tag/v1.1.1
 
 ## [1.1.0] - 2026-07-23
 
@@ -119,7 +129,7 @@ proxy-layer features that fit a homelab.
 - Method-scoped access rules now use clickable **HTTP-verb chips** in the UI
   instead of a free-text box (keyboard-accessible; none selected = all verbs).
 
-[1.1.0]: https://github.com/maferick/quicgate/releases/tag/v1.1.0
+[1.1.0]: https://github.com/Quicgate/quicgate/releases/tag/v1.1.0
 
 ## [1.0.0] - 2026-07-23
 
@@ -160,4 +170,4 @@ homelab in production.
 - Runs fully offline: fonts and Swagger UI are vendored, no runtime CDN calls.
 - Version is stamped into the binary and shown in the UI (`/api/version`).
 
-[1.0.0]: https://github.com/maferick/quicgate/releases/tag/v1.0.0
+[1.0.0]: https://github.com/Quicgate/quicgate/releases/tag/v1.0.0
