@@ -3,7 +3,7 @@
 ## Supported versions
 
 quicgate is a rolling release. Security fixes land on `master` and are published
-as a fresh `ghcr.io/maferick/quicgate:latest` image. Always run the latest image;
+as a fresh `ghcr.io/quicgate/quicgate:latest` image. Always run the latest image;
 older image digests do not receive backported fixes.
 
 ## Reporting a vulnerability
@@ -12,7 +12,7 @@ older image digests do not receive backported fixes.
 
 Report privately through GitHub's built-in flow:
 
-1. Go to the [**Security** tab](https://github.com/maferick/quicgate/security) of this repository.
+1. Go to the [**Security** tab](https://github.com/Quicgate/quicgate/security) of this repository.
 2. Click **Report a vulnerability**.
 3. Describe the issue, the impact, and steps to reproduce.
 

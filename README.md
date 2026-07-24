@@ -11,10 +11,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/maferick/quicgate/releases"><img src="https://img.shields.io/github/v/release/maferick/quicgate?color=a3e635&label=release" alt="latest release"></a>
+  <a href="https://github.com/Quicgate/quicgate/releases"><img src="https://img.shields.io/github/v/release/Quicgate/quicgate?color=a3e635&label=release" alt="latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-a3e635" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/go-1.26-00ADD8?logo=go" alt="Go 1.26">
-  <img src="https://img.shields.io/badge/container-ghcr.io%2Fmaferick%2Fquicgate-0b0e0f" alt="ghcr.io/maferick/quicgate">
+  <img src="https://img.shields.io/badge/container-ghcr.io%2Fquicgate%2Fquicgate-0b0e0f" alt="ghcr.io/quicgate/quicgate">
   <img src="https://img.shields.io/badge/image%20size-~25MB-a3e635" alt="image size">
 </p>
 
@@ -33,7 +33,7 @@
 # docker-compose.yml
 services:
   quicgate:
-    image: ghcr.io/maferick/quicgate:latest
+    image: ghcr.io/quicgate/quicgate:latest
     restart: unless-stopped
     network_mode: host      # engine owns 80/443 (tcp+udp), admin UI on 81
     environment:
@@ -127,7 +127,7 @@ Enable the provider by mounting the daemon socket (read-only is enough — quicg
 ```yaml
 services:
   quicgate:
-    image: ghcr.io/maferick/quicgate:1
+    image: ghcr.io/quicgate/quicgate:1
     network_mode: host
     environment:
       QG_DOCKER: "1"

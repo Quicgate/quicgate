@@ -25,7 +25,7 @@ You need Go 1.26+ (see `go.mod`). No build step for the UI — it is vanilla JS/
 embedded via `go:embed`.
 
 ```bash
-git clone https://github.com/maferick/quicgate
+git clone https://github.com/Quicgate/quicgate
 cd quicgate
 
 # run without TLS/QUIC on high ports, isolated data dir
@@ -70,7 +70,7 @@ validation), `engine/` (apply it), `web/` (expose it), and `web/openapi.yaml`.
 
 ## Bugs and ideas
 
-Open an [issue](https://github.com/maferick/quicgate/issues). For **security**
+Open an [issue](https://github.com/Quicgate/quicgate/issues). For **security**
 problems, do **not** use issues — follow [SECURITY.md](SECURITY.md) instead.
 
 Because this is a hobby project with one maintainer, responses may take a few

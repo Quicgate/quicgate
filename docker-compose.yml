@@ -1,6 +1,6 @@
 services:
   quicgate:
-    image: ghcr.io/maferick/quicgate:latest
+    image: ghcr.io/quicgate/quicgate:latest
     container_name: quicgate
     restart: unless-stopped
     # Host networking is recommended: stream forwards bind host ports
