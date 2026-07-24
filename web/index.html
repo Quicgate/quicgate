@@ -52,6 +52,7 @@
         <button class="pagelink is-active" data-page="hosts">Proxy Hosts</button>
         <button class="pagelink" data-page="access">Access Lists</button>
         <button class="pagelink" data-page="streams">Streams</button>
+        <button class="pagelink" data-page="docker">Docker</button>
         <button class="pagelink" data-page="certs">Certificates</button>
         <button class="pagelink" data-page="system">System</button>
         <button class="pagelink" data-page="settings">Settings</button>
@@ -102,6 +103,42 @@
           <tbody id="streams-body"></tbody>
         </table>
         <div id="streams-empty" class="empty" hidden>No streams. Add a TCP/UDP port forward.</div>
+      </div>
+    </div>
+
+    <div id="page-docker" hidden>
+      <div class="card">
+        <div class="card-head">
+          <h2>Docker integration <em class="hs-muted" style="font-size:var(--fs-xs)">(hosts &amp; streams from container labels)</em></h2>
+          <button id="btn-docker-refresh" class="btn btn--ghost btn--sm">Refresh</button>
+        </div>
+        <div id="docker-status" class="hs-muted">Loading...</div>
+      </div>
+
+      <div class="card" id="docker-settings-card" style="margin-top:var(--sp-6)" hidden>
+        <div class="card-head"><h2>Settings</h2></div>
+        <div class="field-row">
+          <label class="field field--sm"><span>Connect mode</span>
+            <select id="dk-connect">
+              <option value="auto">auto</option>
+              <option value="network">network</option>
+              <option value="published">published</option>
+            </select>
+          </label>
+          <label class="field field--sm"><span>Host address</span><input id="dk-host-addr" placeholder="127.0.0.1"></label>
+          <label class="field"><span>Default domain <em class="hs-muted">(optional)</em></span><input id="dk-domain" placeholder="apps.example.com"></label>
+          <button id="dk-save" class="btn btn--primary" style="align-self:flex-end">Save</button>
+        </div>
+        <p class="hs-muted" style="font-size:var(--fs-xs);margin-top:var(--sp-3)"><strong>auto</strong> reaches each container the best available way: when quicgate shares a Docker network it uses the container IP directly; otherwise it uses the container's published port on the host address. Changes take effect on the next reconcile.</p>
+      </div>
+
+      <div class="card" id="docker-containers-card" style="margin-top:var(--sp-6)" hidden>
+        <div class="card-head"><h2>Containers <em class="hs-muted" style="font-size:var(--fs-xs)">(labelled with quicgate.enable=true)</em></h2></div>
+        <table class="table" id="docker-table">
+          <thead><tr><th>Container</th><th>Routing</th><th>Detail</th><th>Notes</th><th></th></tr></thead>
+          <tbody id="docker-body"></tbody>
+        </table>
+        <div id="docker-empty" class="empty" hidden>No containers carry quicgate labels yet. Add <span class="mono">quicgate.enable=true</span> and <span class="mono">quicgate.host=...</span> to a container.</div>
       </div>
     </div>
 
@@ -301,6 +338,16 @@
           <p><b>Proxy host</b> = HTTP(S) reverse proxy (L7): TLS, HTTP/3, headers, paths, access lists. Use it for websites and APIs. <b>Stream</b> = raw TCP/UDP forward (L4): use it for non-HTTP services (game servers, databases, mail, SSH). Streams see the raw connection, not HTTP.</p></details>
         <details><summary>Reuse an allowlist on a stream?</summary>
           <p>On a stream, set <b>Source restriction</b> to an existing access list instead of retyping CIDRs — its allow CIDR/host rules become the source filter (only IP rules apply at L4; basic-auth/GeoIP/method rules are ignored there).</p></details>
+
+        <h3>Docker labels</h3>
+        <details><summary>How do I route a container by labels?</summary>
+          <p>Run quicgate with <code>QG_DOCKER=1</code> and the daemon socket mounted read-only (<code>/var/run/docker.sock:ro</code>), then label a container <code>quicgate.enable=true</code> and <code>quicgate.host=app.example.com</code>. It appears on the <b>Docker</b> page. The port is auto-detected when the container exposes exactly one; otherwise set <code>quicgate.port</code>. Set a default base domain (Docker page or <code>QG_DOCKER_DOMAIN</code>) and you can even drop <code>quicgate.host</code>.</p></details>
+        <details><summary>A container has a web port and some raw ports?</summary>
+          <p>Add <code>quicgate.streams</code> for the raw ones, e.g. <code>quicgate.streams=25565, 2222:22/tcp, 53/udp</code> (<code>[listen:]container[/proto]</code>, proto default tcp). Those become TCP/UDP streams and are excluded from the web-port auto-detection, so the web port still becomes the proxy host. A container can be HTTP-only, streams-only, or both.</p></details>
+        <details><summary>Why isn't my labelled container routing?</summary>
+          <p>The <b>Docker</b> page shows every opted-in container with the exact reason: ambiguous ports (set <code>quicgate.port</code>), a name already served by a manual host (manual config always wins), a port not reachable in the current connect-mode, or an unknown access list. Fix the label and it re-derives within a second.</p></details>
+        <details><summary>Connect mode / how does it reach the container?</summary>
+          <p><b>auto</b> uses the container IP when quicgate shares its Docker network, otherwise the host address plus the container's published port (what a host-networked quicgate needs). <code>quicgate.port</code> always names the app's port <i>inside</i> the container; quicgate resolves how to reach it. Use <b>Convert to host</b> to turn a derived container into a normal editable host.</p></details>
 
         <h3>Certificates &amp; HTTP/3</h3>
         <details><summary>How do certificates work?</summary>

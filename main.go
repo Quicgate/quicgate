@@ -11,9 +11,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"quicgate/internal/admin"
+	"quicgate/internal/docker"
 	"quicgate/internal/engine"
 	"quicgate/internal/store"
 )
@@ -66,8 +68,60 @@ func main() {
 		log.Fatalf("admin seed: %v", err)
 	}
 
+	// Docker label provider (opt-in): derives hosts and streams from container
+	// labels and merges them into the engine. Enabled with QG_DOCKER=1 or the
+	// docker_enabled setting; the daemon socket must be mounted into the
+	// container (read-only is sufficient, the provider only ever reads).
+	var dockerProvider *docker.Provider
+	if os.Getenv("QG_DOCKER") == "1" || st.GetSetting("docker_enabled", "") == "1" {
+		dockerProvider = docker.NewProvider(docker.Options{
+			Socket:        env("QG_DOCKER_SOCKET", "/var/run/docker.sock"),
+			ConnectMode:   env("QG_DOCKER_CONNECT", "auto"),
+			HostAddress:   os.Getenv("QG_DOCKER_HOST_ADDR"),
+			DefaultDomain: os.Getenv("QG_DOCKER_DOMAIN"),
+			LabelPrefix:   env("QG_DOCKER_LABEL_PREFIX", "quicgate"),
+			SelfContainer: os.Getenv("QG_DOCKER_SELF"),
+		}, docker.Hooks{
+			Apply: eng.SetDockerRoutes,
+			ResolveACL: func(name string) (int64, bool) {
+				lists, err := st.ListAccessLists()
+				if err != nil {
+					return 0, false
+				}
+				for _, l := range lists {
+					if strings.EqualFold(l.Name, name) {
+						return l.ID, true
+					}
+				}
+				return 0, false
+			},
+			ExistingDomains: func() map[string]bool {
+				hosts, err := st.ListHosts()
+				if err != nil {
+					return nil
+				}
+				m := map[string]bool{}
+				for _, h := range hosts {
+					if !h.Enabled {
+						continue
+					}
+					for _, d := range h.Domains {
+						m[strings.ToLower(d)] = true
+					}
+				}
+				return m
+			},
+			Setting: st.GetSetting,
+		})
+		adm.SetDocker(dockerProvider)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	if dockerProvider != nil {
+		go dockerProvider.Run(ctx)
+	}
 
 	adminAddr := env("QG_ADMIN", ":81")
 	adminSrv := &http.Server{Addr: adminAddr, Handler: adm.Handler(), ReadHeaderTimeout: 10 * time.Second}

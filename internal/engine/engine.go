@@ -89,6 +89,26 @@ type Engine struct {
 	geo           *geoDB
 	ban           *banManager
 	caPoolCache   sync.Map
+	reloadMu      sync.Mutex                     // serializes concurrent Reload callers
+	dockerHosts   atomic.Pointer[[]store.Host]   // in-memory hosts from the Docker label provider
+	dockerStreams atomic.Pointer[[]store.Stream] // in-memory L4 streams from the Docker label provider
+}
+
+// SetDockerRoutes replaces the hosts and streams derived from Docker labels and
+// rebuilds the routing table. Called by the Docker provider on every reconcile;
+// they are merged after the database config, so a manual host or stream always
+// wins a conflict. Nothing here is persisted: the set re-derives from live
+// containers on the next reconcile and at startup.
+func (e *Engine) SetDockerRoutes(hosts []store.Host, streams []store.Stream) {
+	hc := make([]store.Host, len(hosts))
+	copy(hc, hosts)
+	e.dockerHosts.Store(&hc)
+	sc := make([]store.Stream, len(streams))
+	copy(sc, streams)
+	e.dockerStreams.Store(&sc)
+	if err := e.Reload(context.Background()); err != nil {
+		log.Printf("engine: reload after docker change: %v", err)
+	}
 }
 
 func New(cfg Config, st *store.Store) *Engine {
@@ -184,6 +204,8 @@ func (e *Engine) applyACMESettings() {
 // Reload rebuilds the routing table from the store and swaps it in atomically,
 // then kicks off cert management for any new domains. No listener restarts.
 func (e *Engine) Reload(ctx context.Context) error {
+	e.reloadMu.Lock()
+	defer e.reloadMu.Unlock()
 	e.applyACMESettings()
 	hosts, err := e.store.ListHosts()
 	if err != nil {
@@ -205,13 +227,46 @@ func (e *Engine) Reload(ctx context.Context) error {
 	t := &routingTable{exact: map[string]*route{}, wildcard: map[string]*route{}}
 	healthTargets := map[string]struct{ scheme, hostport string }{}
 	var managed []string
-	for _, h := range hosts {
+
+	// place installs one host's routes. Database hosts are placed first; hosts
+	// from the Docker label provider are placed with fromDocker=true, so a
+	// manual host always wins a name conflict (the docker route for that domain
+	// is dropped rather than overriding explicit config).
+	place := func(h store.Host, fromDocker bool) {
 		if !h.Enabled {
-			continue
+			return
 		}
 		var acl *compiledAccess
 		if h.AccessListID != nil {
 			acl = access[*h.AccessListID]
+		}
+		r := e.buildRoute(h, acl)
+		placed := false
+		for _, d := range h.Domains {
+			if strings.HasPrefix(d, "*.") {
+				key := d[2:]
+				if fromDocker {
+					if _, taken := t.wildcard[key]; taken {
+						continue
+					}
+				}
+				t.wildcard[key] = r
+			} else {
+				if fromDocker {
+					if _, taken := t.exact[d]; taken {
+						continue
+					}
+				}
+				t.exact[d] = r
+			}
+			placed = true
+			if h.CertMode == "auto" {
+				managed = append(managed, d)
+			}
+		}
+		// Only probe/health-check upstreams we actually routed to.
+		if !placed {
+			return
 		}
 		for _, u := range append([]store.Upstream{h.Upstream}, h.Upstreams...) {
 			if u.Host != "" {
@@ -219,20 +274,49 @@ func (e *Engine) Reload(ctx context.Context) error {
 				healthTargets[u.Scheme+"://"+hp] = struct{ scheme, hostport string }{u.Scheme, hp}
 			}
 		}
-		r := e.buildRoute(h, acl)
-		for _, d := range h.Domains {
-			if strings.HasPrefix(d, "*.") {
-				t.wildcard[d[2:]] = r
-			} else {
-				t.exact[d] = r
-			}
-			if h.CertMode == "auto" {
-				managed = append(managed, d)
-			}
+	}
+
+	for _, h := range hosts {
+		place(h, false)
+	}
+	if dh := e.dockerHosts.Load(); dh != nil {
+		for _, h := range *dh {
+			place(h, true)
 		}
 	}
 	e.table.Store(t)
 	e.health.setTargets(healthTargets)
+
+	// Merge Docker-provider streams after the database streams, dropping any
+	// whose listen port collides with a database stream, another docker stream,
+	// or a port the engine itself occupies. Manual config and the proxy win.
+	if ds := e.dockerStreams.Load(); ds != nil && len(*ds) > 0 {
+		used := map[int]bool{}
+		mark := func(s store.Stream) {
+			last := s.ListenPort
+			if s.ListenPortEnd > s.ListenPort {
+				last = s.ListenPortEnd
+			}
+			for p := s.ListenPort; p <= last; p++ {
+				used[p] = true
+			}
+		}
+		for _, p := range e.ReservedPorts() {
+			used[p] = true
+		}
+		for _, s := range streams {
+			mark(s)
+		}
+		for _, s := range *ds {
+			if used[s.ListenPort] {
+				log.Printf("engine: docker stream on port %d skipped (port already in use)", s.ListenPort)
+				continue
+			}
+			streams = append(streams, s)
+			mark(s)
+		}
+	}
+
 	e.streams.Sync(streams, e.loadStreamCert, func(id int64) []*net.IPNet {
 		a := access[id]
 		if a == nil {

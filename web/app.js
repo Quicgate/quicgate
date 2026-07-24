@@ -1,6 +1,7 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const views = ['view-login', 'view-password', 'view-app'];
 let hosts = [];
 let accessLists = [];
@@ -21,7 +22,7 @@ $('btn-theme').addEventListener('click', () => {
 });
 
 /* ---- page nav ---- */
-const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', certs: 'btn-add-cert', system: null, settings: null, profile: null, help: null };
+const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', docker: null, certs: 'btn-add-cert', system: null, settings: null, profile: null, help: null };
 function switchPage(name) {
   for (const b of $('pagenav').children) b.classList.toggle('is-active', b.dataset.page === name);
   for (const p of Object.keys(pages)) {
@@ -31,6 +32,7 @@ function switchPage(name) {
   if (name === 'hosts') refresh();
   if (name === 'access') refreshAcls();
   if (name === 'streams') refreshStreams();
+  if (name === 'docker') refreshDocker();
   if (name === 'certs') { refreshCerts(); refreshCustomCerts(); }
   if (name === 'system') loadSystem();
   if (name === 'settings') loadSettings();
@@ -1155,6 +1157,106 @@ function syncDefaultSiteField() {
   $('default-site-value-label').textContent = v === 'redirect' ? 'Redirect URL' : 'HTML';
 }
 $('set-default-site').addEventListener('change', syncDefaultSiteField);
+
+/* ---- docker ---- */
+async function refreshDocker() {
+  let st;
+  try {
+    st = await api('GET', '/api/docker/status');
+  } catch (err) {
+    $('docker-status').textContent = err.message;
+    return;
+  }
+  const settingsCard = $('docker-settings-card');
+  const contCard = $('docker-containers-card');
+  if (st.enabled === false) {
+    $('docker-status').innerHTML = 'Docker integration is <strong>disabled</strong>. Start quicgate with <span class="mono">QG_DOCKER=1</span> and the Docker socket mounted (<span class="mono">/var/run/docker.sock:ro</span>) to enable it.';
+    settingsCard.hidden = true;
+    contCard.hidden = true;
+    return;
+  }
+  settingsCard.hidden = false;
+  contCard.hidden = false;
+
+  const dot = st.connected
+    ? '<span class="badge badge--success">connected</span>'
+    : '<span class="badge badge--danger">disconnected</span>';
+  let line = `${dot} &nbsp;socket <span class="mono">${esc(st.socket)}</span> &middot; mode <span class="mono">${esc(st.connectMode)}</span>`;
+  if (st.error) line += `<br><span class="form-error" style="display:inline">${esc(st.error)}</span>`;
+  $('docker-status').innerHTML = line;
+
+  // Live-tunable settings.
+  const s = await api('GET', '/api/settings');
+  $('dk-connect').value = s.docker_connect_mode || st.connectMode || 'auto';
+  $('dk-host-addr').value = s.docker_host_address || '';
+  $('dk-domain').value = s.docker_default_domain || '';
+
+  const body = $('docker-body');
+  body.innerHTML = '';
+  const cs = st.containers || [];
+  $('docker-empty').hidden = cs.length > 0;
+  for (const c of cs) {
+    const tr = document.createElement('tr');
+
+    const tdName = document.createElement('td');
+    tdName.className = 'domain';
+    tdName.textContent = c.name;
+
+    const tdRoute = document.createElement('td');
+    tdRoute.innerHTML = c.routed
+      ? '<span class="badge badge--success">routed</span>'
+      : '<span class="badge badge--danger">not routed</span>';
+    if (c.mode) tdRoute.innerHTML += ` <span class="badge">${esc(c.mode)}</span>`;
+
+    const tdDetail = document.createElement('td');
+    const parts = [];
+    if (c.domains && c.domains.length) {
+      parts.push(c.domains.map(esc).join(', ') + (c.upstream ? ` <span class="hs-muted">&rarr; ${esc(c.upstream)}</span>` : ''));
+    }
+    for (const line of c.streams || []) parts.push(`<span class="mono">${esc(line)}</span>`);
+    tdDetail.innerHTML = parts.join('<br>') || '<span class="hs-muted">&mdash;</span>';
+
+    const tdWarn = document.createElement('td');
+    tdWarn.innerHTML = (c.warnings && c.warnings.length)
+      ? c.warnings.map((w) => `<span class="badge badge--danger">!</span> ${esc(w)}`).join('<br>')
+      : '<span class="hs-muted">&mdash;</span>';
+
+    const tdAct = document.createElement('td');
+    tdAct.style.textAlign = 'right';
+    if (c.routed) {
+      const b = document.createElement('button');
+      b.className = 'btn btn--secondary btn--sm';
+      b.textContent = 'Convert to host';
+      b.title = 'Persist this container’s routes as editable configuration';
+      b.addEventListener('click', async () => {
+        if (!confirm(`Convert ${c.name}'s routes into managed (editable) configuration? The container labels stay in place but the manual config takes over.`)) return;
+        try {
+          await api('POST', '/api/docker/adopt', { name: c.name });
+          refreshDocker();
+        } catch (err) {
+          alert(err.message);
+        }
+      });
+      tdAct.appendChild(b);
+    }
+
+    tr.append(tdName, tdRoute, tdDetail, tdWarn, tdAct);
+    body.appendChild(tr);
+  }
+}
+$('btn-docker-refresh').addEventListener('click', refreshDocker);
+$('dk-save').addEventListener('click', async () => {
+  try {
+    await api('PUT', '/api/settings', {
+      docker_connect_mode: $('dk-connect').value,
+      docker_host_address: $('dk-host-addr').value.trim(),
+      docker_default_domain: $('dk-domain').value.trim(),
+    });
+    refreshDocker();
+  } catch (err) {
+    alert(err.message);
+  }
+});
 
 async function loadSettings() {
   const s = await api('GET', '/api/settings');
