@@ -41,6 +41,29 @@ type Config struct {
 // Version returns the running build version.
 func (e *Engine) Version() string { return e.cfg.Version }
 
+// Info reports process-level listener/feature configuration for the overview
+// dashboard (the parts of Config the admin package cannot read directly).
+type Info struct {
+	Version   string `json:"version"`
+	HTTPAddr  string `json:"httpAddr"`
+	HTTPSAddr string `json:"httpsAddr"`
+	TLS       bool   `json:"tls"`
+	HTTP3     bool   `json:"http3"`
+	UPnP      bool   `json:"upnp"`
+}
+
+// Info returns the engine's listener/feature summary.
+func (e *Engine) Info() Info {
+	return Info{
+		Version:   e.cfg.Version,
+		HTTPAddr:  e.cfg.HTTPAddr,
+		HTTPSAddr: e.cfg.HTTPSAddr,
+		TLS:       !e.cfg.DisableTLS,
+		HTTP3:     !e.cfg.DisableTLS && !e.cfg.DisableH3,
+		UPnP:      e.cfg.UPnP,
+	}
+}
+
 type route struct {
 	host  store.Host
 	proxy http.Handler

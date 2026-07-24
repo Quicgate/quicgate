@@ -4,6 +4,18 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-07-24
+
+### Added
+- **Overview dashboard**: a new landing page with an at-a-glance summary —
+  listeners, config counts (hosts by type, certificates, streams, access
+  lists), health donuts (upstreams up/down, certificates issued/pending/failed,
+  hosts by type), feature flags (HTTP/3, UPnP, auto-ban, GeoIP, forward-auth,
+  OIDC, LDAP, Docker), and providers. One `GET /api/overview` call; vanilla
+  inline-SVG donuts, no chart library.
+
+[1.5.0]: https://github.com/maferick/quicgate/releases/tag/v1.5.0
+
 ## [1.4.0] - 2026-07-24
 
 ### Added

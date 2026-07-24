@@ -128,6 +128,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/2fa/disable", s.auth(s.handle2FADisable))
 	mux.HandleFunc("GET /api/logs", s.auth(s.handleLogs))
 	mux.HandleFunc("GET /api/config", s.auth(s.handleEffectiveConfig))
+	mux.HandleFunc("GET /api/overview", s.auth(s.handleOverview))
 	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
 	mux.HandleFunc("POST /api/custom-certs/self-signed", s.auth(s.handleSelfSignedCert))
 	mux.HandleFunc("POST /api/custom-certs/from-file", s.auth(s.handleCertFromFile))
@@ -236,6 +237,92 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.handleGetSettings(w, r)
+}
+
+// handleOverview aggregates a lightweight at-a-glance snapshot for the
+// dashboard: listeners, config counts, upstream/cert health, feature flags, and
+// providers. One call so the dashboard is a single fetch.
+func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
+	hosts, _ := s.store.ListHosts()
+	byType := map[string]int{}
+	enabled, fwdAuth, withACL := 0, 0, 0
+	for _, h := range hosts {
+		byType[h.Type]++
+		if h.Enabled {
+			enabled++
+		}
+		if h.Options.ForwardAuth != nil && h.Options.ForwardAuth.URL != "" {
+			fwdAuth++
+		}
+		if h.AccessListID != nil {
+			withACL++
+		}
+	}
+	certs := map[string]int{"issued": 0, "pending": 0, "failed": 0}
+	for _, c := range s.engine.CertStatuses(r.Context()) {
+		certs[c.Status]++
+	}
+	streams, _ := s.store.ListStreams()
+	streamsOn := 0
+	for _, st := range streams {
+		if st.Enabled {
+			streamsOn++
+		}
+	}
+	lists, _ := s.store.ListAccessLists()
+	up, down := 0, 0
+	for _, t := range s.engine.HealthStatuses() {
+		if t.Up {
+			up++
+		} else {
+			down++
+		}
+	}
+	info := s.engine.Info()
+
+	out := map[string]any{
+		"version": info.Version,
+		"listeners": map[string]any{
+			"http": info.HTTPAddr, "https": info.HTTPSAddr, "tls": info.TLS, "http3": info.HTTP3,
+		},
+		"hosts": map[string]any{
+			"total": len(hosts), "enabled": enabled, "byType": byType,
+			"withAccessList": withACL, "forwardAuth": fwdAuth,
+		},
+		"certs":       certs,
+		"streams":     map[string]int{"total": len(streams), "enabled": streamsOn},
+		"accessLists": len(lists),
+		"upstreams":   map[string]int{"up": up, "down": down},
+		"features": map[string]bool{
+			"http3":       info.HTTP3,
+			"upnp":        info.UPnP,
+			"autoban":     s.store.GetSetting("ban_enabled", "") == "1",
+			"geoip":       s.engine.GeoIPStatus().Loaded,
+			"oidc":        s.store.GetSetting("oidc_enabled", "") == "1",
+			"ldap":        s.ldapConfigured(),
+			"forwardAuth": fwdAuth > 0,
+			"docker":      s.docker != nil,
+		},
+	}
+	if s.docker != nil {
+		st := s.docker.Status()
+		epUp, routed := 0, 0
+		for _, e := range st.Endpoints {
+			if e.Connected {
+				epUp++
+			}
+		}
+		for _, c := range st.Containers {
+			if c.Routed {
+				routed++
+			}
+		}
+		out["docker"] = map[string]any{
+			"endpoints": len(st.Endpoints), "connected": epUp,
+			"containers": len(st.Containers), "routed": routed,
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleDockerStatus reports the Docker label provider's live state, or that it

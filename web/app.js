@@ -22,13 +22,14 @@ $('btn-theme').addEventListener('click', () => {
 });
 
 /* ---- page nav ---- */
-const pages = { hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', docker: null, certs: 'btn-add-cert', system: null, settings: null, profile: null, help: null };
+const pages = { overview: null, hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', docker: null, certs: 'btn-add-cert', system: null, settings: null, profile: null, help: null };
 function switchPage(name) {
   for (const b of $('pagenav').children) b.classList.toggle('is-active', b.dataset.page === name);
   for (const p of Object.keys(pages)) {
     $(`page-${p}`).hidden = p !== name;
     if (pages[p]) $(pages[p]).hidden = p !== name;
   }
+  if (name === 'overview') refreshOverview();
   if (name === 'hosts') refresh();
   if (name === 'access') refreshAcls();
   if (name === 'streams') refreshStreams();
@@ -95,8 +96,81 @@ function afterLogin(me) {
     show('view-password');
   } else {
     show('view-app');
-    refresh();
+    switchPage('overview');
   }
+}
+
+/* ---- overview dashboard ---- */
+function ovCard(label, big, sub) {
+  return `<div class="card"><div class="ov-label">${esc(label)}</div><div class="ov-big">${esc(big)}</div>${sub ? `<div class="ov-sub">${sub}</div>` : ''}</div>`;
+}
+function donutSVG(segments) {
+  const total = segments.reduce((s, x) => s + x.value, 0);
+  const r = 42, C = 2 * Math.PI * r;
+  if (total === 0) {
+    return `<svg viewBox="0 0 120 120" class="ov-donut"><circle cx="60" cy="60" r="${r}" fill="none" stroke="rgba(127,127,127,.18)" stroke-width="16"/><text x="60" y="66" text-anchor="middle" class="ov-donut-total">0</text></svg>`;
+  }
+  let off = 0;
+  const arcs = segments.filter((s) => s.value > 0).map((s) => {
+    const len = (s.value / total) * C;
+    const el = `<circle cx="60" cy="60" r="${r}" fill="none" stroke="${s.color}" stroke-width="16" stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-off}" transform="rotate(-90 60 60)"/>`;
+    off += len;
+    return el;
+  }).join('');
+  return `<svg viewBox="0 0 120 120" class="ov-donut"><circle cx="60" cy="60" r="${r}" fill="none" stroke="rgba(127,127,127,.15)" stroke-width="16"/>${arcs}<text x="60" y="66" text-anchor="middle" class="ov-donut-total">${total}</text></svg>`;
+}
+function donutCard(title, segments) {
+  const legend = segments.map((s) => `<div class="ov-leg"><span class="ov-dot" style="background:${s.color}"></span>${esc(s.label)} <b>${s.value}</b></div>`).join('');
+  return `<div class="card"><div class="ov-label">${esc(title)}</div><div class="ov-donutrow">${donutSVG(segments)}<div class="ov-legend">${legend}</div></div></div>`;
+}
+async function refreshOverview() {
+  let o;
+  try { o = await api('GET', '/api/overview'); }
+  catch (err) { $('ov-stats').innerHTML = `<div class="hs-muted">${esc(err.message)}</div>`; return; }
+  const green = '#22c55e', amber = '#f59e0b', red = '#ef4444';
+
+  // Listeners
+  const L = o.listeners || {};
+  const lc = [`<div class="card"><div class="ov-label">HTTP</div><div class="ov-big">${esc(L.http || '')}</div><div class="ov-sub">redirect / ACME</div></div>`];
+  if (L.tls) lc.push(`<div class="card"><div class="ov-label">HTTPS</div><div class="ov-big">${esc(L.https || '')}</div><div class="ov-sub">${L.http3 ? 'h1 &middot; h2 &middot; <b>h3</b>' : 'h1 &middot; h2'}</div></div>`);
+  else lc.push('<div class="card"><div class="ov-label">TLS</div><div class="ov-big">off</div><div class="ov-sub">dev mode</div></div>');
+  $('ov-listeners').innerHTML = lc.join('');
+
+  // At a glance
+  const H = o.hosts || {}, S = o.streams || {}, certs = o.certs || {};
+  const stats = [
+    ovCard('Proxy hosts', `${H.enabled || 0}/${H.total || 0}`, 'enabled'),
+    ovCard('Certificates', String(certs.issued || 0), 'issued'),
+    ovCard('Streams', `${S.enabled || 0}/${S.total || 0}`, 'enabled'),
+    ovCard('Access lists', String(o.accessLists || 0), ''),
+  ];
+  if (o.docker) stats.push(ovCard('Docker', `${o.docker.routed}/${o.docker.containers}`, 'routed'));
+  $('ov-stats').innerHTML = stats.join('');
+
+  // Health donuts
+  const up = o.upstreams || { up: 0, down: 0 };
+  const bt = H.byType || {};
+  $('ov-donuts').innerHTML = [
+    donutCard('Upstreams', [{ label: 'Up', value: up.up || 0, color: green }, { label: 'Down', value: up.down || 0, color: red }]),
+    donutCard('Certificates', [{ label: 'Issued', value: certs.issued || 0, color: green }, { label: 'Pending', value: certs.pending || 0, color: amber }, { label: 'Failed', value: certs.failed || 0, color: red }]),
+    donutCard('Hosts by type', [
+      { label: 'Proxy', value: bt.proxy || 0, color: '#3b82f6' },
+      { label: 'Redirect', value: bt.redirect || 0, color: '#8b5cf6' },
+      { label: 'Static', value: bt.static || 0, color: '#14b8a6' },
+      { label: '404 / dead', value: bt.dead || 0, color: '#6b7280' },
+    ]),
+  ].join('');
+
+  // Features
+  const F = o.features || {};
+  const feats = [['HTTP/3', 'http3'], ['UPnP', 'upnp'], ['Auto-ban', 'autoban'], ['GeoIP', 'geoip'], ['Forward-auth', 'forwardAuth'], ['OIDC', 'oidc'], ['LDAP', 'ldap'], ['Docker', 'docker']];
+  $('ov-features').innerHTML = feats.map(([lab, key]) =>
+    `<div class="card ov-feat"><div class="ov-label">${esc(lab)}</div>${F[key] ? '<span class="badge badge--success">ON</span>' : '<span class="badge">OFF</span>'}</div>`).join('');
+
+  // Providers
+  const provs = ['<div class="card"><div class="ov-label">Database</div><div class="ov-big">SQLite</div><div class="ov-sub">source of truth</div></div>'];
+  if (o.docker) provs.push(`<div class="card"><div class="ov-label">Docker</div><div class="ov-big">${o.docker.connected}/${o.docker.endpoints}</div><div class="ov-sub">hosts connected</div></div>`);
+  $('ov-providers').innerHTML = provs.join('');
 }
 
 /* ---- auth ---- */
