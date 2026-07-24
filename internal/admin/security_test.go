@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"quicgate/internal/engine"
 	"quicgate/internal/store"
 )
 
@@ -19,7 +20,8 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return New(st, nil, nil, t.TempDir())
+	eng := engine.New(engine.Config{DisableTLS: true, DataDir: t.TempDir()}, st)
+	return New(st, eng, nil, t.TempDir())
 }
 
 func TestMetricsRequiresAuth(t *testing.T) {
