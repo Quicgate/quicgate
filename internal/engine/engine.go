@@ -446,6 +446,61 @@ func (e *Engine) loadStreamCert(id int64) (tls.Certificate, bool) {
 	return cert, true
 }
 
+// defaultMaxIdleConnsPerHost sizes the keep-alive pool the proxy holds open to
+// each backend. Go's http.Transport default is 2, far too low for a reverse
+// proxy: under concurrent load to one upstream it opens and closes connections
+// faster than it pools them, paying a fresh dial + TLS handshake per burst and,
+// on Windows, exhausting ephemeral ports (which surfaces as 502s). A large pool
+// lets a hot host reuse connections instead of churning them. Override per host
+// via Options.MaxIdleConnsPerHost.
+const defaultMaxIdleConnsPerHost = 256
+
+// newUpstreamTransport builds the reverse-proxy transport for one host from its
+// typed options. The same transport backs the host's default proxy and every
+// location proxy, so its idle-connection budget is sized for the whole backend
+// set (primary + pool + locations), not a single target.
+func newUpstreamTransport(h store.Host) *http.Transport {
+	o := h.Options
+	dialTimeout := 10 * time.Second
+	if o.DialTimeoutSec > 0 {
+		dialTimeout = time.Duration(o.DialTimeoutSec) * time.Second
+	}
+	idleTimeout := 90 * time.Second
+	if o.IdleTimeoutSec > 0 {
+		idleTimeout = time.Duration(o.IdleTimeoutSec) * time.Second
+	}
+	maxIdlePerHost := defaultMaxIdleConnsPerHost
+	if o.MaxIdleConnsPerHost > 0 {
+		maxIdlePerHost = o.MaxIdleConnsPerHost
+	}
+	// MaxIdleConns caps idle conns across the whole transport, which is shared by
+	// the primary upstream, the load-balancing pool and any location proxies. A
+	// per-host pool can never exceed this total, so scale it by the number of
+	// distinct backends — otherwise Go's default of 100 would throttle a large
+	// MaxIdleConnsPerHost back down.
+	backends := 1 + len(h.Upstreams) + len(h.Locations)
+	transport := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: dialTimeout}).DialContext,
+		IdleConnTimeout:       idleTimeout,
+		MaxIdleConnsPerHost:   maxIdlePerHost,
+		MaxIdleConns:          maxIdlePerHost * backends,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
+	if o.ResponseHeaderTimeoutSec > 0 {
+		transport.ResponseHeaderTimeout = time.Duration(o.ResponseHeaderTimeoutSec) * time.Second
+	}
+	if h.Upstream.Scheme == "https" {
+		tc := &tls.Config{InsecureSkipVerify: o.SkipTLSVerify}
+		if o.UpstreamSNI != "" {
+			tc.ServerName = o.UpstreamSNI
+		}
+		transport.TLSClientConfig = tc
+	}
+	return transport
+}
+
 // buildRoute compiles one host's typed options into a ready http.Handler chain.
 func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 	o := h.Options
@@ -484,32 +539,7 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 	}
 	target := &url.URL{Scheme: h.Upstream.Scheme, Host: fmt.Sprintf("%s:%d", h.Upstream.Host, h.Upstream.Port)}
 
-	dialTimeout := 10 * time.Second
-	if o.DialTimeoutSec > 0 {
-		dialTimeout = time.Duration(o.DialTimeoutSec) * time.Second
-	}
-	idleTimeout := 90 * time.Second
-	if o.IdleTimeoutSec > 0 {
-		idleTimeout = time.Duration(o.IdleTimeoutSec) * time.Second
-	}
-	transport := &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: dialTimeout}).DialContext,
-		IdleConnTimeout:       idleTimeout,
-		MaxIdleConnsPerHost:   32,
-		ForceAttemptHTTP2:     true,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-	}
-	if o.ResponseHeaderTimeoutSec > 0 {
-		transport.ResponseHeaderTimeout = time.Duration(o.ResponseHeaderTimeoutSec) * time.Second
-	}
-	if h.Upstream.Scheme == "https" {
-		tc := &tls.Config{InsecureSkipVerify: o.SkipTLSVerify}
-		if o.UpstreamSNI != "" {
-			tc.ServerName = o.UpstreamSNI
-		}
-		transport.TLSClientConfig = tc
-	}
+	transport := newUpstreamTransport(h)
 
 	// Buffered by default; buffering=false flushes every write for SSE and
 	// long-poll upstreams. Websockets bypass this path entirely.
