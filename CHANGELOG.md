@@ -4,6 +4,24 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-07-24
+
+### Added
+- **GeoIP status on the Settings page**: shows whether the GeoLite2-Country
+  database is loaded (with its type and build date, or the exact expected path
+  and error when missing), a **Recheck** button that re-opens the file with no
+  restart, and a **test-an-IP** lookup so you can confirm country resolution
+  actually works.
+- Country access rules are now chosen from a **country picker** (the full list
+  of ISO 3166-1 countries by name) instead of a free-text code, and the
+  access-list editor warns when a country rule is used while GeoIP is not loaded.
+  Country codes are also validated server-side.
+
+### API
+- `GET /api/geoip/status`, `POST /api/geoip/reload`, `GET /api/geoip/lookup?ip=`.
+
+[1.4.0]: https://github.com/maferick/quicgate/releases/tag/v1.4.0
+
 ## [1.3.0] - 2026-07-24
 
 ### Added

@@ -623,6 +623,40 @@ async function refreshAcls() {
   }
 }
 
+// ISO 3166-1 alpha-2 codes; display names come from the browser's Intl API
+// (falling back to the raw code), so a country rule is picked, never typed.
+const COUNTRY_CODES = ['AD','AE','AF','AG','AI','AL','AM','AO','AQ','AR','AS','AT','AU','AW','AX','AZ','BA','BB','BD','BE','BF','BG','BH','BI','BJ','BL','BM','BN','BO','BQ','BR','BS','BT','BV','BW','BY','BZ','CA','CC','CD','CF','CG','CH','CI','CK','CL','CM','CN','CO','CR','CU','CV','CW','CX','CY','CZ','DE','DJ','DK','DM','DO','DZ','EC','EE','EG','EH','ER','ES','ET','FI','FJ','FK','FM','FO','FR','GA','GB','GD','GE','GF','GG','GH','GI','GL','GM','GN','GP','GQ','GR','GS','GT','GU','GW','GY','HK','HM','HN','HR','HT','HU','ID','IE','IL','IM','IN','IO','IQ','IR','IS','IT','JE','JM','JO','JP','KE','KG','KH','KI','KM','KN','KP','KR','KW','KY','KZ','LA','LB','LC','LI','LK','LR','LS','LT','LU','LV','LY','MA','MC','MD','ME','MF','MG','MH','MK','ML','MM','MN','MO','MP','MQ','MR','MS','MT','MU','MV','MW','MX','MY','MZ','NA','NC','NE','NF','NG','NI','NL','NO','NP','NR','NU','NZ','OM','PA','PE','PF','PG','PH','PK','PL','PM','PN','PR','PS','PT','PW','PY','QA','RE','RO','RS','RU','RW','SA','SB','SC','SD','SE','SG','SH','SI','SJ','SK','SL','SM','SN','SO','SR','SS','ST','SV','SX','SY','SZ','TC','TD','TF','TG','TH','TJ','TK','TL','TM','TN','TO','TR','TT','TV','TW','TZ','UA','UG','UM','US','UY','UZ','VA','VC','VE','VG','VI','VN','VU','WF','WS','YE','YT','ZA','ZM','ZW'];
+let _regionNames = null;
+function countryName(code) {
+  try {
+    if (!_regionNames) _regionNames = new Intl.DisplayNames([navigator.language || 'en'], { type: 'region' });
+    return _regionNames.of(code) || code;
+  } catch { return code; }
+}
+function makeCountrySelect(current) {
+  const sel = document.createElement('select');
+  sel.className = 'r-value';
+  const opts = COUNTRY_CODES.map((c) => ({ c, n: countryName(c) })).sort((a, b) => a.n.localeCompare(b.n));
+  sel.innerHTML = '<option value="">Select a country...</option>' +
+    opts.map((o) => `<option value="${o.c}">${esc(o.n)} (${o.c})</option>`).join('');
+  if (current) sel.value = current;
+  return sel;
+}
+function makeTextField(placeholder, current) {
+  const inp = document.createElement('input');
+  inp.className = 'r-value';
+  inp.placeholder = placeholder;
+  if (current) inp.value = current;
+  return inp;
+}
+// Warn in the modal when a country rule is present but GeoIP is not loaded.
+function updateGeoWarn() {
+  const warn = $('acl-geo-warn');
+  if (!warn) return;
+  const hasCountry = [...document.querySelectorAll('#acl-rules .r-kind')].some((k) => k.value === 'country');
+  warn.hidden = !(hasCountry && window.__geoLoaded === false);
+}
+
 function addAclRuleRow(rule) {
   const row = document.createElement('div');
   row.className = 'hdr-rule';
@@ -631,12 +665,19 @@ function addAclRuleRow(rule) {
   row.innerHTML =
     '<select class="r-action"><option value="allow">allow</option><option value="deny">deny</option></select>' +
     '<select class="r-kind"><option value="cidr">IP/CIDR</option><option value="host">Hostname (DDNS)</option><option value="country">Country</option></select>' +
-    '<input class="r-value" placeholder="192.168.1.0/24">' +
+    '<span class="r-value-slot"></span>' +
     '<span class="r-methods" title="Click the verbs this rule applies to. None selected = all methods.">' + chips + '</span>' +
     '<button type="button" class="btn btn--ghost btn--sm r-del">&times;</button>';
-  const [action, kind, value] = [row.querySelector('.r-action'), row.querySelector('.r-kind'), row.querySelector('.r-value')];
-  const hints = { cidr: '192.168.1.0/24 or single IP', host: 'home.duckdns.org', country: 'NL' };
-  kind.addEventListener('change', () => { value.placeholder = hints[kind.value]; });
+  const action = row.querySelector('.r-action');
+  const kind = row.querySelector('.r-kind');
+  const slot = row.querySelector('.r-value-slot');
+  const hints = { cidr: '192.168.1.0/24 or single IP', host: 'home.duckdns.org' };
+  const setField = (current) => {
+    slot.innerHTML = '';
+    slot.appendChild(kind.value === 'country' ? makeCountrySelect(current) : makeTextField(hints[kind.value], current));
+    updateGeoWarn();
+  };
+  kind.addEventListener('change', () => setField(''));
   const toggle = (ch) => ch.classList.toggle('on');
   row.querySelectorAll('.mchip').forEach((ch) => {
     ch.addEventListener('click', () => toggle(ch));
@@ -644,16 +685,18 @@ function addAclRuleRow(rule) {
   });
   if (rule) {
     action.value = rule.action;
-    if (rule.host) { kind.value = 'host'; value.value = rule.host; }
-    else if (rule.country) { kind.value = 'country'; value.value = rule.country; }
-    else { kind.value = 'cidr'; value.value = rule.cidr; }
-    value.placeholder = hints[kind.value];
+    if (rule.host) kind.value = 'host';
+    else if (rule.country) kind.value = 'country';
+    else kind.value = 'cidr';
+    setField(rule.host || rule.country || rule.cidr || '');
     for (const m of rule.methods || []) {
       const c = row.querySelector(`.mchip[data-m="${m}"]`);
       if (c) c.classList.add('on');
     }
+  } else {
+    setField('');
   }
-  row.querySelector('.r-del').addEventListener('click', () => row.remove());
+  row.querySelector('.r-del').addEventListener('click', () => { row.remove(); updateGeoWarn(); });
   $('acl-rules').appendChild(row);
 }
 
@@ -672,7 +715,7 @@ function addAclUserRow(user) {
   $('acl-users').appendChild(row);
 }
 
-function openAclModal(a) {
+async function openAclModal(a) {
   editingAclId = a ? a.id : null;
   $('acl-modal-title').textContent = a ? 'Edit access list' : 'Add access list';
   setError('acl-error', null);
@@ -681,8 +724,10 @@ function openAclModal(a) {
   $('a-passauth').checked = a ? a.passAuth : false;
   $('acl-rules').innerHTML = '';
   $('acl-users').innerHTML = '';
+  try { window.__geoLoaded = !!(await api('GET', '/api/geoip/status')).loaded; } catch { window.__geoLoaded = undefined; }
   for (const r of (a && a.rules) || []) addAclRuleRow(r);
   for (const u of (a && a.users) || []) addAclUserRow(u);
+  updateGeoWarn();
   $('acl-modal').hidden = false;
 }
 
@@ -1273,7 +1318,41 @@ $('dk-endpoints-save').addEventListener('click', async () => {
   }
 });
 
+/* ---- geoip ---- */
+async function refreshGeoIP() {
+  let g;
+  try { g = await api('GET', '/api/geoip/status'); }
+  catch (err) { $('geoip-status').textContent = err.message; return; }
+  window.__geoLoaded = !!g.loaded;
+  if (g.loaded) {
+    $('geoip-status').innerHTML = '<span class="badge badge--success">loaded</span> ' +
+      `<span class="mono">${esc(g.type || 'database')}</span>` +
+      (g.buildDate ? ` &middot; built ${esc(g.buildDate)}` : '') +
+      ` &middot; <span class="hs-muted mono">${esc(g.path)}</span>`;
+  } else {
+    $('geoip-status').innerHTML = '<span class="badge badge--danger">not loaded</span> country rules are inactive' +
+      (g.path ? ` &middot; expected at <span class="mono">${esc(g.path)}</span>` : '') +
+      (g.error ? `<br><span class="hs-muted">${esc(g.error)}</span>` : '');
+  }
+}
+$('geoip-reload').addEventListener('click', async () => {
+  try { await api('POST', '/api/geoip/reload'); refreshGeoIP(); }
+  catch (err) { alert(err.message); }
+});
+$('geoip-test-btn').addEventListener('click', async () => {
+  const ip = $('geoip-test-ip').value.trim();
+  const out = $('geoip-test-result');
+  if (!ip) { out.textContent = ''; return; }
+  try {
+    const r = await api('GET', '/api/geoip/lookup?ip=' + encodeURIComponent(ip));
+    out.innerHTML = r.country
+      ? `&rarr; <b>${esc(r.country)}</b> <span class="hs-muted">${esc(countryName(r.country))}</span>`
+      : '&rarr; <span class="hs-muted">no country for this IP</span>';
+  } catch (err) { out.innerHTML = `&rarr; <span class="form-error" style="display:inline">${esc(err.message)}</span>`; }
+});
+
 async function loadSettings() {
+  refreshGeoIP();
   const s = await api('GET', '/api/settings');
   $('set-acme-email').value = s.acme_email || '';
   $('set-acme-staging').checked = s.acme_staging === '1';

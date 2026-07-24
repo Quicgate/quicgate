@@ -303,6 +303,17 @@
         </form>
       </div>
 
+      <div class="card">
+        <div class="card-head"><h2>GeoIP database <em class="hs-muted" style="font-size:var(--fs-xs)">(for country access rules)</em></h2><button id="geoip-reload" class="btn btn--ghost btn--sm">Recheck</button></div>
+        <div id="geoip-status" class="hs-muted">Loading...</div>
+        <div class="field-row" style="margin-top:var(--sp-3);align-items:flex-end">
+          <label class="field field--sm"><span>Test an IP</span><input id="geoip-test-ip" class="mono" placeholder="8.8.8.8"></label>
+          <button type="button" id="geoip-test-btn" class="btn btn--secondary btn--sm">Look up country</button>
+          <span id="geoip-test-result" class="mono" style="padding-bottom:8px"></span>
+        </div>
+        <p class="hs-muted" style="font-size:var(--fs-xs);margin-top:var(--sp-3)">Country rules need a MaxMind <span class="mono">GeoLite2-Country.mmdb</span> in the data directory (<span class="mono">/data</span> in the container). Drop the file in, then <b>Recheck</b> &mdash; no restart needed.</p>
+      </div>
+
       <div class="card col-span-2">
         <div class="card-head"><h2>Backup &amp; import</h2></div>
         <p class="hs-muted">The backup contains all hosts, access lists, streams, settings, users (incl. the admin password) and issued certificates. Restoring replaces everything.</p>
@@ -329,7 +340,7 @@
         <details><summary>What do the method chips do?</summary>
           <p>They scope a rule to specific HTTP verbs. None selected = the rule applies to every method. Lit chips = only those verbs. Combine with <code>Satisfy: any</code> + a basic-auth user to get "reads public, writes require login": <code>allow 0.0.0.0/0</code> with <b>GET, HEAD</b> lit.</p></details>
         <details><summary>Country / dynamic-DNS rules?</summary>
-          <p>A rule's type can be <b>Country</b> (needs a <code>GeoLite2-Country.mmdb</code> in the data dir) or <b>Hostname</b> (a dynamic-DNS name, re-resolved periodically) instead of a CIDR.</p></details>
+          <p>A rule's type can be <b>Country</b> (pick from the list; needs a <code>GeoLite2-Country.mmdb</code> in the data dir, whose load status and an IP test live on Settings &rarr; GeoIP database) or <b>Hostname</b> (a dynamic-DNS name, re-resolved periodically) instead of a CIDR.</p></details>
 
         <h3>Proxy hosts vs streams</h3>
         <details><summary>When do I use a proxy host vs a stream?</summary>
@@ -407,6 +418,7 @@
       <fieldset class="group">
         <legend>IP rules (ordered, first match wins, no match denies) — the methods box scopes a rule to specific verbs (e.g. gate POST/PUT, leave GET public)</legend>
         <div id="acl-rules" class="hdr-rules"></div>
+        <div id="acl-geo-warn" class="form-error" hidden>Country rules need a GeoIP database, which is not currently loaded, so they will never match. See Settings &rarr; GeoIP database.</div>
         <button type="button" class="btn btn--ghost btn--sm" id="btn-add-aclrule">+ Add rule</button>
       </fieldset>
       <fieldset class="group">
