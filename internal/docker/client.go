@@ -23,31 +23,48 @@ import (
 	"time"
 )
 
-// Client is a read-only Docker Engine API client over a unix socket.
+// Client is a read-only Docker Engine API client. It speaks to either a local
+// unix socket or a remote TCP endpoint (typically a read-only socket proxy),
+// so quicgate can watch several Docker hosts.
 type Client struct {
-	http   *http.Client
-	socket string
+	http *http.Client
+	base string // request base URL; the transport handles the actual dialing
 }
 
-// NewClient returns a client dialing the Docker daemon at socketPath (typically
-// /var/run/docker.sock). No client-level timeout is set because the event
-// stream is long-lived; list and inspect apply their own per-call deadlines.
-func NewClient(socketPath string) *Client {
-	return &Client{
-		socket: socketPath,
-		http: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", socketPath)
-				},
+// NewClient returns a client for a connection string:
+//   - a bare path or unix:///path  -> local unix socket
+//   - tcp://host:port              -> remote TCP (e.g. a read-only socket proxy)
+//   - http://host:port             -> remote, explicit scheme
+//
+// No client-level timeout is set because the event stream is long-lived; list
+// and inspect apply their own per-call deadlines.
+func NewClient(connect string) *Client {
+	base, transport := transportFor(connect)
+	return &Client{base: base, http: &http.Client{Transport: transport}}
+}
+
+// transportFor turns a connection string into a request base URL and a matching
+// transport (a unix dialer for sockets, the default dialer for TCP/HTTP).
+func transportFor(connect string) (string, *http.Transport) {
+	switch {
+	case strings.HasPrefix(connect, "tcp://"):
+		return "http://" + strings.TrimPrefix(connect, "tcp://"), &http.Transport{}
+	case strings.HasPrefix(connect, "http://") || strings.HasPrefix(connect, "https://"):
+		return strings.TrimRight(connect, "/"), &http.Transport{}
+	default:
+		sock := strings.TrimPrefix(connect, "unix://")
+		return "http://docker", &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", sock)
 			},
-		},
+		}
 	}
 }
 
 func (c *Client) get(ctx context.Context, path, query string) (*http.Response, error) {
-	// The host in the URL is ignored: the transport always dials the socket.
-	u := "http://docker" + path
+	// For a unix socket the host in the URL is a placeholder the dialer ignores;
+	// for TCP it is the real endpoint.
+	u := c.base + path
 	if query != "" {
 		u += "?" + query
 	}

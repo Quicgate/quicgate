@@ -1178,18 +1178,23 @@ async function refreshDocker() {
   settingsCard.hidden = false;
   contCard.hidden = false;
 
-  const dot = st.connected
-    ? '<span class="badge badge--success">connected</span>'
-    : '<span class="badge badge--danger">disconnected</span>';
-  let line = `${dot} &nbsp;socket <span class="mono">${esc(st.socket)}</span> &middot; mode <span class="mono">${esc(st.connectMode)}</span>`;
-  if (st.error) line += `<br><span class="form-error" style="display:inline">${esc(st.error)}</span>`;
-  $('docker-status').innerHTML = line;
+  // Per-endpoint connection status.
+  const eps = st.endpoints || [];
+  $('docker-status').innerHTML = eps.length
+    ? eps.map((e) => {
+        const dot = e.connected
+          ? '<span class="badge badge--success">connected</span>'
+          : '<span class="badge badge--danger">disconnected</span>';
+        let s = `${dot} <b>${esc(e.name)}</b> <span class="mono hs-muted">${esc(e.connect)}</span> &rarr; <span class="mono">${esc(e.address)}</span>`;
+        if (e.error) s += `<br><span class="form-error" style="display:inline">${esc(e.error)}</span>`;
+        return s;
+      }).join('<div style="border-top:1px solid rgba(127,127,127,.25);margin:6px 0"></div>')
+    : '<span class="hs-muted">No Docker hosts configured.</span>';
 
-  // Live-tunable settings.
+  // Settings.
   const s = await api('GET', '/api/settings');
-  $('dk-connect').value = s.docker_connect_mode || st.connectMode || 'auto';
-  $('dk-host-addr').value = s.docker_host_address || '';
   $('dk-domain').value = s.docker_default_domain || '';
+  $('dk-endpoints').value = s.docker_endpoints || '';
 
   const body = $('docker-body');
   body.innerHTML = '';
@@ -1202,11 +1207,13 @@ async function refreshDocker() {
     tdName.className = 'domain';
     tdName.textContent = c.name;
 
+    const tdHost = document.createElement('td');
+    tdHost.innerHTML = `<span class="badge">${esc(c.endpoint)}</span>`;
+
     const tdRoute = document.createElement('td');
     tdRoute.innerHTML = c.routed
       ? '<span class="badge badge--success">routed</span>'
       : '<span class="badge badge--danger">not routed</span>';
-    if (c.mode) tdRoute.innerHTML += ` <span class="badge">${esc(c.mode)}</span>`;
 
     const tdDetail = document.createElement('td');
     const parts = [];
@@ -1231,7 +1238,7 @@ async function refreshDocker() {
       b.addEventListener('click', async () => {
         if (!confirm(`Convert ${c.name}'s routes into managed (editable) configuration? The container labels stay in place but the manual config takes over.`)) return;
         try {
-          await api('POST', '/api/docker/adopt', { name: c.name });
+          await api('POST', '/api/docker/adopt', { endpoint: c.endpoint, name: c.name });
           refreshDocker();
         } catch (err) {
           alert(err.message);
@@ -1240,19 +1247,27 @@ async function refreshDocker() {
       tdAct.appendChild(b);
     }
 
-    tr.append(tdName, tdRoute, tdDetail, tdWarn, tdAct);
+    tr.append(tdName, tdHost, tdRoute, tdDetail, tdWarn, tdAct);
     body.appendChild(tr);
   }
 }
 $('btn-docker-refresh').addEventListener('click', refreshDocker);
-$('dk-save').addEventListener('click', async () => {
+$('dk-domain-save').addEventListener('click', async () => {
   try {
-    await api('PUT', '/api/settings', {
-      docker_connect_mode: $('dk-connect').value,
-      docker_host_address: $('dk-host-addr').value.trim(),
-      docker_default_domain: $('dk-domain').value.trim(),
-    });
+    await api('PUT', '/api/settings', { docker_default_domain: $('dk-domain').value.trim() });
     refreshDocker();
+  } catch (err) {
+    alert(err.message);
+  }
+});
+$('dk-endpoints-save').addEventListener('click', async () => {
+  const v = $('dk-endpoints').value.trim();
+  if (v) {
+    try { JSON.parse(v); } catch { alert('Docker hosts must be valid JSON'); return; }
+  }
+  try {
+    await api('PUT', '/api/settings', { docker_endpoints: v });
+    alert('Saved. Restart quicgate to apply Docker host changes.');
   } catch (err) {
     alert(err.message);
   }
