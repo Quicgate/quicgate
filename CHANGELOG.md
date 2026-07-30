@@ -4,6 +4,15 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.2] - 2026-07-30
+
+### Changed
+- Dependency updates: `quic-go` 0.60.0 -> 0.61.0 (the HTTP/3 engine) and
+  `modernc.org/sqlite` 1.54.0 -> 1.55.0 (the config store). No functional
+  changes.
+
+[1.5.2]: https://github.com/Quicgate/quicgate/releases/tag/v1.5.2
+
 ## [1.5.1] - 2026-07-24
 
 ### Changed
