@@ -573,6 +573,7 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 			pr.SetURL(pick)
 			pr.SetXForwarded()
 			setRealIP(pr)
+			normalizeBodyless(pr)
 			if rewrite != nil {
 				pr.Out.URL.Path = rewrite.apply(pr.Out.URL.Path)
 			}
@@ -627,6 +628,30 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 	}
 	handler = wrapCommon(handler, o, acl)
 	return &route{host: h, proxy: handler}
+}
+
+// normalizeBodyless drops the phantom request body HTTP/3 leaves on GET/HEAD.
+//
+// quic-go reports ContentLength -1 ("unknown") whenever a request carries no
+// content-length header, which every browser GET omits. ReverseProxy then hands
+// http.Transport a non-nil body of unknown length, so it frames the upstream
+// request with Transfer-Encoding: chunked. Strict upstreams reject a chunked
+// GET outright: lighttpd (Asustor ADM) answers 400 Bad Request for every path,
+// before routing, so an h3 browser saw 400 everywhere while curl over HTTP/1.1
+// worked. Go's h1 and h2 servers set ContentLength 0 for bodyless requests, so
+// only h3 needs this.
+//
+// Limited to GET/HEAD: a body there is legal but meaningless, while POST/PUT
+// legitimately stream unknown-length bodies that must stay chunked.
+func normalizeBodyless(pr *httputil.ProxyRequest) {
+	if pr.Out.ContentLength != -1 {
+		return
+	}
+	switch pr.In.Method {
+	case http.MethodGet, http.MethodHead:
+		pr.Out.Body = http.NoBody
+		pr.Out.ContentLength = 0
+	}
 }
 
 // setRealIP adds the X-Real-IP header with the immediate client's address,
@@ -728,6 +753,7 @@ func (e *Engine) locationDispatcher(h store.Host, def http.Handler, transport *h
 				pr.SetURL(target)
 				pr.SetXForwarded()
 				setRealIP(pr)
+				normalizeBodyless(pr)
 				pr.Out.Host = pr.In.Host
 				if rw != nil {
 					pr.Out.URL.Path = rw.apply(pr.Out.URL.Path)
