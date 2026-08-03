@@ -4,6 +4,26 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-08-04
+
+### Added
+- The Proxy Hosts table now shows backend health inline: a host whose
+  upstream fails its health probe gets a red-tinted row and a `down` badge
+  next to the upstream. Pool hosts keep their `N/N up` badge and pick up
+  the same row tint when part of the pool is down. Uses the same health
+  data as the Overview donut, refreshed every time the page is opened.
+
+### Fixed
+- HTTP/3 requests were proxied upstream as `Transfer-Encoding: chunked`:
+  quic-go reports "unknown length" for bodyless requests, so every browser
+  GET arriving over h3 was forwarded chunked, which strict upstreams (for
+  example lighttpd) reject with 400 Bad Request before routing. Bodyless
+  GET/HEAD requests are now normalized to an explicit empty body on both
+  the host proxy and per-location proxies; POST/PUT bodies stream as
+  before.
+
+[1.6.0]: https://github.com/Quicgate/quicgate/releases/tag/v1.6.0
+
 ## [1.5.2] - 2026-07-30
 
 ### Changed
