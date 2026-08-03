@@ -77,6 +77,8 @@ textarea { resize: vertical; }
 .table th { text-align: left; font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--ls-wide); text-transform: uppercase; color: var(--c-text-faint); padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--c-border); }
 .table td { padding: var(--sp-3); border-bottom: 1px solid var(--c-border); vertical-align: middle; }
 .table tr:last-child td { border-bottom: none; }
+/* host rows whose backend is down: tint so dead upstreams stand out when scanning */
+.table tr.row--down td { background: var(--c-danger-bg); }
 .table .domain { font-family: var(--font-mono); font-size: var(--fs-sm); }
 .empty { text-align: center; color: var(--c-text-faint); padding: var(--sp-8); }
 
