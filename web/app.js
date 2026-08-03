@@ -269,9 +269,12 @@ function renderHosts() {
     } else {
       const pool = [h.upstream, ...(h.upstreams || [])];
       const primary = `${h.upstream.scheme}://${h.upstream.host}:${h.upstream.port}`;
+      const up = pool.filter((u) => healthMap[`${u.scheme}://${u.host}:${u.port}`] !== false).length;
+      if (up < pool.length) tr.classList.add('row--down');
       if (pool.length > 1) {
-        const up = pool.filter((u) => healthMap[`${u.scheme}://${u.host}:${u.port}`] !== false).length;
         tdUpstream.innerHTML = `${primary} <span class="badge ${up === pool.length ? 'badge--success' : 'badge--danger'}">${up}/${pool.length} up</span>`;
+      } else if (up === 0) {
+        tdUpstream.innerHTML = `${primary} <span class="badge badge--danger">down</span>`;
       } else {
         tdUpstream.textContent = primary;
       }
