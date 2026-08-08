@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -295,7 +296,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 		}
 		for _, u := range append([]store.Upstream{h.Upstream}, h.Upstreams...) {
 			if u.Host != "" {
-				hp := fmt.Sprintf("%s:%d", u.Host, u.Port)
+				hp := hostPort(u.Host, u.Port)
 				healthTargets[u.Scheme+"://"+hp] = struct{ scheme, hostport string }{u.Scheme, hp}
 			}
 		}
@@ -531,13 +532,13 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 	bal := &balancer{health: e.health}
 	pool := append([]store.Upstream{h.Upstream}, h.Upstreams...)
 	for _, u := range pool {
-		hp := fmt.Sprintf("%s:%d", u.Host, u.Port)
+		hp := hostPort(u.Host, u.Port)
 		bal.targets = append(bal.targets, balTarget{
 			key: u.Scheme + "://" + hp, url: u.Scheme + "://" + hp, hostport: hp,
 			id: targetID(u.Scheme + "://" + hp),
 		})
 	}
-	target := &url.URL{Scheme: h.Upstream.Scheme, Host: fmt.Sprintf("%s:%d", h.Upstream.Host, h.Upstream.Port)}
+	target := &url.URL{Scheme: h.Upstream.Scheme, Host: hostPort(h.Upstream.Host, h.Upstream.Port)}
 
 	transport := newUpstreamTransport(h)
 
@@ -745,7 +746,7 @@ func (e *Engine) locationDispatcher(h store.Host, def http.Handler, transport *h
 	}
 	var locs []loc
 	for _, l := range h.Locations {
-		target := &url.URL{Scheme: l.Upstream.Scheme, Host: fmt.Sprintf("%s:%d", l.Upstream.Host, l.Upstream.Port)}
+		target := &url.URL{Scheme: l.Upstream.Scheme, Host: hostPort(l.Upstream.Host, l.Upstream.Port)}
 		rw := compileRewrite(l.PathRewrite)
 		lp := &httputil.ReverseProxy{
 			Transport: transport,
@@ -1023,6 +1024,15 @@ func (e *Engine) Run(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// hostPort joins a host and port into a dial/URL address, bracketing IPv6
+// literals: "2001:db8::1" + 8080 -> "[2001:db8::1]:8080". A bare
+// fmt.Sprintf("%s:%d") yields "2001:db8::1:8080", which net.Dial rejects with
+// "too many colons in address", so every upstream/forward address goes through
+// this.
+func hostPort(host string, port int) string {
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 func portOf(addr string) int {

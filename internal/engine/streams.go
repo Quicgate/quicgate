@@ -106,7 +106,7 @@ func (m *StreamManager) Sync(streams []store.Stream, loadCert certLoader, resolv
 					fwdPort = s.ForwardPort + (port - s.ListenPort)
 				}
 				ps := *spec
-				ps.target = fmt.Sprintf("%s:%d", s.ForwardHost, fwdPort)
+				ps.target = hostPort(s.ForwardHost, fwdPort)
 				ps.tcp.defaultDest = ps.target
 				ps.sig = spec.sig + fmt.Sprintf("|p%d", port)
 				portSpec = &ps
@@ -140,7 +140,7 @@ func (m *StreamManager) Sync(streams []store.Stream, loadCert certLoader, resolv
 }
 
 func buildStreamSpec(s store.Stream, loadCert certLoader, resolveACL aclNetResolver) *streamSpec {
-	target := fmt.Sprintf("%s:%d", s.ForwardHost, s.ForwardPort)
+	target := hostPort(s.ForwardHost, s.ForwardPort)
 	spec := &streamSpec{
 		target: target,
 		tcp: tcpOpts{
@@ -175,7 +175,7 @@ func buildStreamSpec(s store.Stream, loadCert certLoader, resolveACL aclNetResol
 	if len(s.SNIRoutes) > 0 {
 		spec.tcp.sniRoutes = map[string]string{}
 		for _, r := range s.SNIRoutes {
-			spec.tcp.sniRoutes[r.Host] = fmt.Sprintf("%s:%d", r.ForwardHost, r.ForwardPort)
+			spec.tcp.sniRoutes[r.Host] = hostPort(r.ForwardHost, r.ForwardPort)
 		}
 	}
 	return spec
