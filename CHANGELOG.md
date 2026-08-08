@@ -24,6 +24,20 @@ All notable changes to quicgate are documented here. The format follows
 
 [1.6.0]: https://github.com/Quicgate/quicgate/releases/tag/v1.6.0
 
+## [1.5.3] - 2026-07-30
+
+### Fixed
+- **IPv6 literal upstreams and stream targets.** Addresses were built as
+  `host:port`, which produces `2001:db8::1:8080` for an IPv6 literal — an
+  address `net.Dial` rejects ("too many colons in address"). Health checks
+  therefore marked every IPv6-literal backend permanently **down**, and IPv6
+  stream forwards (and SNI-route targets) failed outright. All upstream, pool,
+  location, stream and SNI addresses are now built with `net.JoinHostPort`, so
+  they are correctly bracketed (`[2001:db8::1]:8080`). Hostnames that resolve to
+  AAAA records were unaffected; only literal IPv6 addresses were.
+
+[1.5.3]: https://github.com/Quicgate/quicgate/releases/tag/v1.5.3
+
 ## [1.5.2] - 2026-07-30
 
 ### Changed

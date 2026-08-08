@@ -416,3 +416,55 @@ func TestStickySessions(t *testing.T) {
 		}
 	}
 }
+
+// --- IPv6 ---
+
+// TestIPv6Addressing pins the IPv6 address handling: literal IPv6 upstreams and
+// stream targets must be bracketed, or net.Dial rejects them ("too many colons
+// in address") and health checks mark every such backend down.
+func TestIPv6Addressing(t *testing.T) {
+	if got, want := hostPort("2001:db8::1", 8080), "[2001:db8::1]:8080"; got != want {
+		t.Errorf("hostPort(v6) = %q, want %q", got, want)
+	}
+	if got, want := hostPort("10.0.0.1", 8080), "10.0.0.1:8080"; got != want {
+		t.Errorf("hostPort(v4) = %q, want %q", got, want)
+	}
+	// The address a literal-IPv6 upstream produces must actually be dialable.
+	l, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skip("no IPv6 loopback on this host")
+	}
+	defer l.Close()
+	_, portStr, _ := net.SplitHostPort(l.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+	c, err := net.Dial("tcp", hostPort("::1", port))
+	if err != nil {
+		t.Fatalf("dial IPv6 upstream address: %v", err)
+	}
+	_ = c.Close()
+}
+
+// TestIPv6AccessList proves IPv6 CIDR rules gate IPv6 clients.
+func TestIPv6AccessList(t *testing.T) {
+	e, st := newTestEngine(t)
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
+	id := mustCreateACL(t, st, &store.AccessList{Name: "v6", Satisfy: "any",
+		Rules: []store.AccessRule{{Action: "allow", CIDR: "2001:db8::/32"}}})
+	mustCreateHost(t, st, &store.Host{Type: "proxy", Domains: []string{"v6acl.test"}, Upstream: up, AccessListID: &id})
+	reload(t, e)
+
+	do := func(ip string) int {
+		r := httptest.NewRequest(http.MethodGet, "http://v6acl.test/", nil)
+		r.Host = "v6acl.test"
+		r.RemoteAddr = net.JoinHostPort(ip, "50000")
+		rr := httptest.NewRecorder()
+		e.serveHTTPS(rr, r)
+		return rr.Code
+	}
+	if code := do("2001:db8::5"); code != http.StatusOK {
+		t.Errorf("in-range IPv6 client: got %d, want 200", code)
+	}
+	if code := do("2001:dead::5"); code != http.StatusForbidden {
+		t.Errorf("out-of-range IPv6 client: got %d, want 403", code)
+	}
+}
