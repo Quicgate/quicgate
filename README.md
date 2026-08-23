@@ -50,10 +50,11 @@ Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (a passwo
 
 ## Features
 
-- **Hosts**: proxy, redirection (301/302/307/308), 404, and static-file hosts. Wildcard domains. Load-balanced upstream pools with active health checks and **cookie sticky sessions**. Custom locations (path prefix to a different upstream), path rewrites (strip/add prefix, RE2 regex). Per-host **maintenance mode** (503 page) and **response caching**.
+- **Hosts**: proxy, redirection (301/302/307/308), 404, and static-file hosts. Wildcard domains. Load-balanced upstream pools with active health checks and **cookie sticky sessions**, with backend health shown inline in the hosts table. Custom locations (path prefix to a different upstream), path rewrites (strip/add prefix, RE2 regex). Per-host **maintenance mode** (503 page) and **response caching**.
 - **TLS**: automatic Let's Encrypt (HTTP-01), DNS-01 wildcards, custom cert upload, self-signed generation, custom ACME CAs (ZeroSSL, step-ca), mTLS client certificates, per-host minimum TLS version, HSTS, hardened AEAD-only cipher defaults.
 - **Security**: access lists (ordered CIDR / dynamic-DNS hostname / GeoIP-country rules + basic auth, satisfy any/all), forward-auth (Authelia / Authentik / Keycloak), per-IP rate limiting, block-common-exploits, bad-bot blocking, fail2ban-style auto-ban, search-engine noindex. **Real client IP** behind a trusted proxy (Cloudflare / another LB), so IP rules, GeoIP and rate limits still work.
 - **Streams (TCP/UDP)**: L4 port forwards with source whitelists, PROXY protocol v1/v2 (send and accept), TLS termination, SNI-based passthrough routing, port ranges. Plus pure router port-forwards managed over **UPnP IGD** (quicgate keeps your router's forwards in sync, self-healing after reboots).
+- **Dual-stack IPv4/IPv6**: listeners accept IPv6 clients out of the box, upstreams and stream targets can be IPv6 literals or AAAA hostnames, and access lists and trusted-proxy lists take IPv6 CIDRs (a bare address is treated as `/128`). Per-IP rate limiting, auto-ban and GeoIP country lookup all handle IPv6 clients the same as IPv4.
 - **Docker labels**: opt a container in with `quicgate.enable=true` and quicgate derives its host (and TCP/UDP streams) from labels automatically — Traefik's provider idea without the router/service/middleware label soup. Reuses named access lists, works with a host-networked quicgate, and every derived route is visible (with the reason it is or isn't routing) on the Docker page. See [Docker labels](#docker-labels-config-from-containers).
 - **Ops**: an at-a-glance **Overview dashboard**, JSON access logs with a built-in viewer (per-host and system-wide), Prometheus `/metrics` (global + per-host), one-click backup/restore, declarative JSON import, effective-config viewer, certificate renewal visibility with webhook alerts (ntfy/Gotify style).
 - **Admin**: forced first-password change, TOTP 2FA, long-lived API tokens, optional OIDC and LDAP login (both additive, so a broken IdP can never lock you out), dark/light theme, Swagger UI at `/docs.html`.
@@ -115,6 +116,7 @@ The TLS listener serves h1/h2 on TCP 443 and h3 on UDP 443 from the same certifi
 | `QG_DOCKER_HOST_ADDR` | `127.0.0.1` | address where the local host's published ports are reachable |
 | `QG_DOCKER_ENDPOINTS` | | JSON list of Docker hosts to watch (overrides the single local socket) |
 | `QG_DOCKER_DOMAIN` | | default base domain for containers without `quicgate.host` |
+| `QG_DOCKER_LABEL_PREFIX` | `quicgate` | label namespace to read (`<prefix>.enable`, `<prefix>.host`, ...) |
 
 Most settings (ACME email/staging/CA, DNS provider, alert webhook, default site, auto-ban, OIDC/LDAP, and the Docker default-domain) are editable live in the Settings page and stored in the database. Drop a `GeoLite2-Country.mmdb` into `QG_DATA` to enable GeoIP country rules in access lists.
 
