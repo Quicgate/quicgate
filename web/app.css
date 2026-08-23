@@ -143,3 +143,30 @@ textarea { resize: vertical; }
 .help details p { margin: var(--sp-2) 0 0; color: var(--c-text-muted); line-height: var(--lh-base); }
 .help code { font-family: var(--font-mono); font-size: var(--fs-sm); background: var(--c-surface-2); padding: 1px 5px; border-radius: var(--r-sm); color: var(--c-text); }
 .help a { color: var(--c-accent); }
+
+/* built-in guides (Help page) */
+.guide-index { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: var(--sp-3); }
+.guide-card {
+  display: flex; flex-direction: column; gap: var(--sp-1); text-align: left; cursor: pointer;
+  background: var(--c-bg-inset, var(--c-bg)); border: 1px solid var(--c-border); border-radius: 8px;
+  padding: var(--sp-3); font: inherit; color: inherit;
+}
+.guide-card:hover { border-color: var(--c-accent); }
+.guide-card__title { font-family: var(--font-mono); font-weight: 600; }
+.guide-card__blurb { color: var(--c-text-muted); font-size: var(--fs-sm); }
+.md h1 { font-size: var(--fs-xl); margin: var(--sp-2) 0 var(--sp-3); }
+.md h2 { font-size: var(--fs-lg); margin: var(--sp-5) 0 var(--sp-2); }
+.md h3 { font-size: var(--fs-md); margin: var(--sp-4) 0 var(--sp-2); }
+.md p, .md li { line-height: 1.6; color: var(--c-text); }
+.md p { margin: 0 0 var(--sp-3); }
+.md ul, .md ol { margin: 0 0 var(--sp-3); padding-left: var(--sp-5); }
+.md a { color: var(--c-accent); }
+.md code { font-family: var(--font-mono); font-size: 0.9em; background: var(--c-bg-inset, rgba(128,128,128,.12)); padding: 1px 5px; border-radius: 4px; }
+.md pre { background: var(--c-bg-inset, rgba(128,128,128,.08)); border: 1px solid var(--c-border); border-radius: 8px; padding: var(--sp-3); overflow-x: auto; margin: 0 0 var(--sp-3); }
+.md pre code { background: none; padding: 0; font-size: var(--fs-sm); }
+.md-tablewrap { overflow-x: auto; margin: 0 0 var(--sp-3); }
+.md table { border-collapse: collapse; width: 100%; font-size: var(--fs-sm); }
+.md th, .md td { border: 1px solid var(--c-border); padding: var(--sp-2) var(--sp-3); text-align: left; vertical-align: top; }
+.md th { font-family: var(--font-mono); color: var(--c-text-muted); }
+.md blockquote { border-left: 3px solid var(--c-accent); margin: 0 0 var(--sp-3); padding: var(--sp-1) var(--sp-3); color: var(--c-text-muted); }
+.md hr { border: none; border-top: 1px solid var(--c-border); margin: var(--sp-4) 0; }
