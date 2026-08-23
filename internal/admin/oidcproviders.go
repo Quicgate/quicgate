@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"quicgate/internal/store"
 )
@@ -98,6 +99,16 @@ func (s *Server) handleDeleteOIDCProvider(w http.ResponseWriter, r *http.Request
 			writeErr(w, http.StatusBadRequest, "provider is in use by host "+h.Domains[0])
 			return
 		}
+		for _, r := range h.Options.AuthRules {
+			if r.OIDC != nil && r.OIDC.ProviderID == id {
+				writeErr(w, http.StatusBadRequest, "provider is in use by "+h.Domains[0]+" path "+r.Path)
+				return
+			}
+		}
+	}
+	if s.store.GetSetting("admin_oidc_provider_id", "") == strconv.FormatInt(id, 10) {
+		writeErr(w, http.StatusBadRequest, "provider is in use by the admin login")
+		return
 	}
 	if err := s.store.DeleteOIDCProvider(id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

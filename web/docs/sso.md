@@ -19,6 +19,12 @@ quicgate can run the OpenID Connect login itself — no Authelia, oauth2-proxy o
 2. **Register the redirect URI** at the IdP: `https://<host>/.qg/oidc/callback` for every protected host. Keycloak accepts wildcards (`https://*.example.com/.qg/oidc/callback`); Entra ID needs each host listed.
 3. **Enable OIDC SSO on the host** (Security tab): pick the provider and set the policy — allowed emails, allowed domains, allowed groups. All three empty means any authenticated user. Any one match admits.
 
+**Groups need a mapper.** Keycloak does not put groups in the ID token by default: add a *group membership* mapper to the client (claim name `groups`, full path off) or every group rule silently matches nothing. Entra ID needs the equivalent groups claim configured on the app registration.
+
+**Several providers on one host.** Define as many providers as you like and reference them per host, or per path via a path rule. Two entries may share an issuer with different client ids, which is the tidy way to give each host its own app registration, secret and mappers. Sessions are bound to the provider that issued them as well as to the host, so a login through one IdP never satisfies a path gated by another.
+
+**The admin login can reuse a provider too.** Settings → OIDC login has an *Identity provider* picker listing the same providers; leave it on "use the fields below" to keep configuring the admin IdP inline. Give the control plane its own client on the IdP regardless: it deserves a separate audience from the applications behind it, and its own allow-list applies either way.
+
 What happens at runtime: an anonymous request is redirected to the IdP (auth-code flow with PKCE and a nonce); after login quicgate verifies the ID token against the IdP's keys, applies your policy, and sets a signed session cookie. Sessions are stateless, survive restarts, and are bound to the exact host they were minted for — a session for one host can never be replayed against another. Sign out at `/.qg/oidc/logout`.
 
 **Identity headers.** With *Pass identity upstream* enabled, the upstream receives `Remote-User`, `Remote-Email` and `Remote-Groups` — apps that support proxy auth log the user straight in. Inbound copies of these headers are always stripped on OIDC hosts (public paths included), so a client can never spoof them through quicgate. Make sure the upstream only accepts traffic from quicgate, or header trust is meaningless.
@@ -36,7 +42,7 @@ Security tab → **Path authentication** takes ordered rules of path + match (**
 - **Public** — no auth for this path.
 - **Access list** — a specific list, possibly different from the host's.
 - **Forward auth** — the host's forward-auth endpoint.
-- **OIDC SSO** — the host's OIDC login.
+- **OIDC SSO** — an OpenID Connect login. By default the host's provider; a rule can name a *different* provider (and its own allowed groups), so one host can send `/staff` to the company IdP and `/partner` to another, or use a separate app registration per URL on the same IdP.
 
 The longest matching path wins (exact beats prefix at equal length); a path matching no rule keeps the host's own gate. Rules can be scoped to HTTP verbs. Typical use: an SSO-gated app whose licensing callback, webhook receiver or health probe must answer without credentials:
 

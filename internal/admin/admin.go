@@ -187,6 +187,9 @@ var settingsKeys = map[string]bool{
 	"oidc_client_secret":  true,
 	"oidc_redirect_url":   true,
 	"oidc_allowed_emails": true,
+	// Reuse a provider from the Identity providers list instead of repeating
+	// issuer/client id/secret here; the inline fields remain the fallback.
+	"admin_oidc_provider_id": true,
 	// LDAP admin login (additive)
 	"ldap_enabled":          true,
 	"ldap_url":              true,
@@ -920,6 +923,13 @@ func (s *Server) hostACLRefs(h store.Host) error {
 	if h.Options.OIDC != nil {
 		if err := s.oidcProviderExists(h.Options.OIDC.ProviderID); err != nil {
 			return err
+		}
+	}
+	for _, r := range h.Options.AuthRules {
+		if r.OIDC != nil {
+			if err := s.oidcProviderExists(r.OIDC.ProviderID); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

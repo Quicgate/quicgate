@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,27 @@ func (s *Server) oidcConfig(ctx context.Context) (*oidc.Provider, oauth2.Config,
 	issuer := s.store.GetSetting("oidc_issuer", "")
 	clientID := s.store.GetSetting("oidc_client_id", "")
 	clientSecret := s.store.GetSetting("oidc_client_secret", "")
+	scopes := []string{oidc.ScopeOpenID, "email", "profile"}
+	// The admin plane can reuse an identity provider defined for proxied hosts
+	// instead of repeating issuer/client here. Give it its own client on the
+	// IdP even so: the control plane deserves a separate audience from the
+	// applications behind it. The inline fields stay as the fallback, so
+	// existing configurations keep working untouched.
+	if id := s.store.GetSetting("admin_oidc_provider_id", ""); id != "" {
+		list, err := s.store.ListOIDCProviders()
+		if err != nil {
+			return nil, oauth2.Config{}, false, err
+		}
+		for _, p := range list {
+			if strconv.FormatInt(p.ID, 10) == id {
+				issuer, clientID, clientSecret = p.Issuer, p.ClientID, p.ClientSecret
+				if len(p.Scopes) > 0 {
+					scopes = p.Scopes
+				}
+				break
+			}
+		}
+	}
 	redirect := s.store.GetSetting("oidc_redirect_url", "")
 	if issuer == "" || clientID == "" || redirect == "" {
 		return nil, oauth2.Config{}, false, nil
@@ -36,7 +58,7 @@ func (s *Server) oidcConfig(ctx context.Context) (*oidc.Provider, oauth2.Config,
 		ClientSecret: clientSecret,
 		Endpoint:     provider.Endpoint(),
 		RedirectURL:  redirect,
-		Scopes:       []string{oidc.ScopeOpenID, "email", "profile"},
+		Scopes:       scopes,
 	}
 	return provider, cfg, true, nil
 }

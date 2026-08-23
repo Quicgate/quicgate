@@ -48,6 +48,7 @@ type oidcSession struct {
 	Groups []string `json:"g,omitempty"`
 	Host   string   `json:"h"`
 	Expiry int64    `json:"x"`
+	Prov   int64    `json:"p"` // provider that authenticated this session
 }
 
 // oidcState carries the in-flight login through the redirect round-trip.
@@ -57,6 +58,7 @@ type oidcState struct {
 	Verifier string `json:"v"` // PKCE code verifier
 	Host     string `json:"h"`
 	Expiry   int64  `json:"x"`
+	Prov     int64  `json:"p"` // provider whose login is in flight
 }
 
 // discoveredProvider caches the (network-fetched) OIDC discovery result per
@@ -125,6 +127,10 @@ type oidcGate struct {
 	engine   *engineOIDC
 	provider store.OIDCProvider
 	auth     store.OIDCAuth
+	// siblings lets whichever gate receives the shared callback path hand the
+	// request to the gate whose login is actually in flight. Keyed by provider
+	// id, wired once per host at reload.
+	siblings map[int64]*oidcGate
 }
 
 // engineOIDC is the tiny slice of Engine the gate needs; a separate type keeps
@@ -227,7 +233,11 @@ func (g *oidcGate) session(r *http.Request) *oidcSession {
 	if !g.verify(c.Value, &s) {
 		return nil
 	}
-	if s.Host != requestHostname(r) || time.Now().Unix() > s.Expiry {
+	// Bound to the host it was minted for AND to the provider that issued it.
+	// Without the provider check, a host whose /partner path trusts a second
+	// IdP would accept a session from that IdP on its staff-only paths: log in
+	// wherever you can get an account, walk in everywhere.
+	if s.Host != requestHostname(r) || s.Prov != g.provider.ID || time.Now().Unix() > s.Expiry {
 		return nil
 	}
 	return &s
@@ -318,6 +328,7 @@ func (g *oidcGate) startLogin(w http.ResponseWriter, r *http.Request) {
 		Verifier: oauth2.GenerateVerifier(),
 		Host:     requestHostname(r),
 		Expiry:   time.Now().Add(5 * time.Minute).Unix(),
+		Prov:     g.provider.ID,
 	}
 	payload, _ := json.Marshal(st)
 	signed := g.sign(payload)
@@ -339,6 +350,18 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if !g.verify(c.Value, &st) || st.Host != requestHostname(r) ||
 		time.Now().Unix() > st.Expiry || r.URL.Query().Get("state") != st.Nonce {
 		http.Error(w, "state mismatch", http.StatusBadRequest)
+		return
+	}
+	// A different provider may have started this login: a path rule can name
+	// its own IdP, and every one of them redirects back to the same callback
+	// path. The state cookie is signed, so its provider id decides who
+	// finishes the flow.
+	if st.Prov != 0 && st.Prov != g.provider.ID {
+		if other := g.siblings[st.Prov]; other != nil {
+			other.handleCallback(w, r)
+			return
+		}
+		http.Error(w, "login is for an identity provider this path no longer uses", http.StatusBadRequest)
 		return
 	}
 	g.setCookie(w, r, oidcStateName, "", -1)
@@ -413,7 +436,7 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 		ttl = 12 * time.Hour
 	}
 	sess := oidcSession{Email: strings.ToLower(email), Groups: groups,
-		Host: requestHostname(r), Expiry: time.Now().Add(ttl).Unix()}
+		Host: requestHostname(r), Prov: g.provider.ID, Expiry: time.Now().Add(ttl).Unix()}
 	payload, _ := json.Marshal(sess)
 	g.setCookie(w, r, oidcSessionName, g.sign(payload), int(ttl.Seconds()))
 	// Only ever return to a same-host relative path: the value came back

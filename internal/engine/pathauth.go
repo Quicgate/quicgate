@@ -64,7 +64,9 @@ func (p *pathAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // A rule naming an access list that no longer exists falls back to the host's
 // own gate rather than becoming public: a dangling reference must never open a
 // path up. The admin API rejects such a reference on write as well.
-func buildPathAuth(rules []store.AuthRule, o store.Options, acls map[int64]*compiledAccess, sso *oidcGate, inner, fallback http.Handler) http.Handler {
+// ssoFor builds the gate for a rule that names its own identity provider, so
+// one host can send different URLs to different IdPs.
+func buildPathAuth(rules []store.AuthRule, o store.Options, acls map[int64]*compiledAccess, sso *oidcGate, ssoFor func(store.OIDCAuth) *oidcGate, inner, fallback http.Handler) http.Handler {
 	gates := make([]pathGate, 0, len(rules))
 	for _, r := range rules {
 		g := pathGate{path: r.Path, exact: r.Exact}
@@ -84,11 +86,15 @@ func buildPathAuth(rules []store.AuthRule, o store.Options, acls map[int64]*comp
 			}
 			g.handler = forwardAuth(o.ForwardAuth, inner)
 		case "oidc":
-			if sso == nil {
+			gate := sso
+			if r.OIDC != nil {
+				gate = ssoFor(*r.OIDC)
+			}
+			if gate == nil {
 				g.handler = fallback
 				break
 			}
-			g.handler = sso.wrap(inner)
+			g.handler = gate.wrap(inner)
 		case "accessList":
 			acl := (*compiledAccess)(nil)
 			if r.AccessListID != nil {
@@ -115,6 +121,16 @@ func buildPathAuth(rules []store.AuthRule, o store.Options, acls map[int64]*comp
 	// that gates only /admin/ with SSO would send the browser to the IdP and
 	// then hand the redirect back to whatever rule matched /.qg/oidc/callback,
 	// so the session was never minted and the user looped through login.
+	if sso == nil {
+		// No host-level SSO, but a rule may still have named a provider: the
+		// callback has to be served by one of those gates.
+		for _, r := range rules {
+			if r.Mode == "oidc" && r.OIDC != nil {
+				sso = ssoFor(*r.OIDC)
+				break
+			}
+		}
+	}
 	if sso != nil {
 		pa.reserved = sso.wrap(inner)
 	}
