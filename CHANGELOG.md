@@ -7,6 +7,19 @@ All notable changes to quicgate are documented here. The format follows
 ## [1.8.0] - 2026-08-23
 
 ### Added
+- **Theme chooser with a second theme.** The top bar gains a theme picker
+  next to the light/dark toggle. **Console** stays the default and is
+  unchanged; **Brass & Iron** is a warm-metallic alternative — brass, copper
+  and aged iron surfaces, Playfair Display for headings, Lora for body text,
+  JetBrains Mono for data, and a thin brass edge along the top of each card.
+  Each theme has its own light variant, so there are four combinations, and
+  both choices persist and are applied before first paint.
+  The theme is token overrides scoped to `html[data-skin="brass"]`, so
+  components pick it up without their own rules changing. All three
+  typefaces are vendored as variable fonts (107 KB total): the admin origin
+  serves a strict CSP and has to keep working offline, so nothing is fetched
+  from a font CDN — and for the same reason the pre-paint theme script is a
+  file rather than an inline `<script>`.
 - **Per-path identity providers.** A `mode: oidc` path rule can now name its
   own provider and policy instead of inheriting the host's, so one host can
   gate `/staff` with the company IdP and `/partner` with another, or use a

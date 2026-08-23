@@ -235,3 +235,112 @@
 .hs-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
 .hs-stack  { display: flex; flex-direction: column; gap: var(--sp-3); }
 .hs-row    { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+
+/* ============================================================
+   Theme: "Brass & Iron" — steampunk, restrained
+   Opt in with data-skin="brass" on <html>. Everything below is
+   token overrides, so the whole UI re-skins without component
+   rules changing; the one addition is the brass edge on cards.
+   Selector weight: [data-skin] beats the bare :root defaults,
+   and the light block carries both attributes so it beats this.
+   ============================================================ */
+html[data-skin="brass"] {
+  /* surfaces: deep espresso/iron, not pure black */
+  --c-bg:            #0f0c08;
+  --c-bg-2:          #1a1510;
+  --c-surface:       #1e1812;
+  --c-surface-2:     #262018;
+  --c-border:        #3a3025;
+  --c-border-strong: #5a4a38;
+
+  /* text: warm ivory instead of cool white */
+  --c-text:        #e8dcc8;
+  --c-text-muted:  #9a8b74;
+  --c-text-faint:  #6b5e4d;
+  --c-text-invert: #1a0f04;
+
+  /* accent: brass/amber */
+  --c-accent:        #d4a843;
+  --c-accent-strong: #b8922e;
+  --c-accent-2:      #c47a3a;
+  --c-accent-bg:     #1e1808;
+  --c-accent-border: #4a3d20;
+  --c-accent-glow:   rgba(212,168,67,.35);
+
+  /* semantic: warm status colours */
+  --c-success: #7cb87c;
+  --c-warning: #d4a843;
+  --c-danger:  #c45a4a;
+  --c-info:    #6a9aaa;
+  --c-success-bg: #141e14;
+  --c-danger-bg:  #1e1212;
+
+  /* typography: Victorian display, readable serif body, mechanical mono */
+  --font-display: 'Playfair Display', 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
+  --font-body:    'Lora', Georgia, 'Times New Roman', serif;
+  --font-num:     'Lora', Georgia, serif;
+  --font-mono:    'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace;
+
+  /* spacing: a little roomier, more editorial */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 18px;
+  --sp-5: 24px; --sp-6: 30px; --sp-8: 42px; --sp-10: 54px; --sp-12: 66px;
+
+  /* radius: squarer, more industrial */
+  --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
+
+  /* elevation: warmer shadows */
+  --sh-sm:  0 1px 3px rgba(0,0,0,.5);
+  --sh-md:  0 6px 20px -8px rgba(0,0,0,.7);
+  --sh-lg:  0 24px 60px -28px rgba(0,0,0,.8);
+  --sh-glow: 0 4px 18px -4px rgba(212,168,67,.40);
+  --sh-inset-hi: inset 0 1px 0 rgba(212,168,67,.04);
+
+  --fs-xs: 11px; --fs-sm: 13px; --fs-base: 15px; --fs-lg: 17px;
+  --fs-xl: 22px; --fs-2xl: 28px; --fs-3xl: 38px;
+}
+
+/* light: parchment / leather-bound manual */
+html[data-skin="brass"][data-theme="light"] {
+  --c-bg:            #f7f1e7;
+  --c-bg-2:          #efe6d8;
+  --c-surface:       #fdf9f2;
+  --c-surface-2:     #f5edd9;
+  --c-border:        #c8b99e;
+  --c-border-strong: #a8987e;
+
+  --c-text:        #2a1f12;
+  --c-text-muted:  #6b5e4d;
+  --c-text-faint:  #9e8e78;
+  --c-text-invert: #1a0f04;
+
+  --c-accent:        #8b6914;
+  --c-accent-strong: #6e5210;
+  --c-accent-2:      #a0522d;
+  --c-accent-bg:     #f9f0da;
+  --c-accent-border: #d4c4a0;
+  --c-accent-glow:   rgba(139,105,20,.22);
+
+  --c-success-bg: #e8f2e4;
+  --c-danger-bg:  #f5e4e0;
+
+  --sh-md: 0 6px 20px -10px rgba(42,31,18,.20);
+  --sh-lg: 0 24px 60px -28px rgba(42,31,18,.25);
+  --sh-glow: 0 4px 18px -6px rgba(139,105,20,.30);
+  --sh-inset-hi: inset 0 1px 0 rgba(255,255,255,.5);
+}
+
+/* The one decorative addition: a thin brass edge along the top of each card.
+   Cards need a positioning context and clipping for it, which the Console
+   theme does not otherwise require. */
+html[data-skin="brass"] .card {
+  position: relative;
+  overflow: hidden;
+}
+html[data-skin="brass"] .card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--c-accent), var(--c-accent-2), transparent);
+  opacity: .5;
+}

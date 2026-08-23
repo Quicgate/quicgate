@@ -46,6 +46,17 @@ Force-SSL redirects HTTP to HTTPS per host; HSTS (with subdomains/preload) is a 
 - **404 host** — claims a domain and serves a 404 (with a certificate, so the browser error is clean).
 - **Static** — serves files from a directory in the container.
 
+## Appearance
+
+Two controls sit in the top bar. The **theme picker** chooses the skin:
+
+- **Console** — the default: near-black surfaces, a single lime accent, Geist.
+- **Brass & Iron** — warm metallics instead of cold neon: brass, copper and aged iron, with a Victorian display serif (Playfair Display), a readable body serif (Lora) and a mechanical mono (JetBrains Mono). Cards gain a thin brass edge along the top.
+
+The **◐ button** switches light and dark *within* the chosen skin, so there are four combinations. Both choices persist in the browser and are applied before the first paint, so reloading never flashes the wrong palette.
+
+Every typeface is vendored into the binary. Nothing is fetched from a font CDN, which keeps the admin origin's strict CSP intact and the whole UI working offline.
+
 ## Where things live
 
 Everything is stored in `QG_DATA` (default `/data`): `quicgate.db` (all config), `certs/` (certmagic storage), and JSON access logs. One-click backup/restore lives under Settings; the backup contains hosts, access lists, identity providers, streams, settings, users and certificates.

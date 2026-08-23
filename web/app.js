@@ -12,12 +12,39 @@ let editingAclId = null;
 let editingStreamId = null;
 let editingCertId = null;
 
-/* ---- theme ---- */
+/* ---- theme ----
+   Two independent axes: the skin (palette + typefaces) and light/dark within
+   it. Both live on <html> as data attributes and in localStorage, and the
+   skin is applied before first paint by an inline script in index.html so the
+   UI never flashes the wrong palette. */
+const SKINS = [
+  { id: 'console', name: 'Console' },
+  { id: 'brass', name: 'Brass & Iron' },
+];
+
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem('qg_theme', theme);
 }
+function applySkin(skin) {
+  if (!SKINS.some((s) => s.id === skin)) skin = SKINS[0].id;
+  document.documentElement.dataset.skin = skin;
+  localStorage.setItem('qg_skin', skin);
+  const picker = $('skin-picker');
+  if (picker) picker.value = skin;
+}
 applyTheme(localStorage.getItem('qg_theme') || 'dark');
+{
+  const picker = $('skin-picker');
+  for (const s of SKINS) {
+    const opt = document.createElement('option');
+    opt.value = s.id;
+    opt.textContent = s.name;
+    picker.appendChild(opt);
+  }
+  applySkin(localStorage.getItem('qg_skin') || SKINS[0].id);
+  picker.addEventListener('change', () => applySkin(picker.value));
+}
 $('btn-theme').addEventListener('click', () => {
   applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
 });

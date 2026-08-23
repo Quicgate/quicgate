@@ -144,6 +144,18 @@ textarea { resize: vertical; }
 .help code { font-family: var(--font-mono); font-size: var(--fs-sm); background: var(--c-surface-2); padding: 1px 5px; border-radius: var(--r-sm); color: var(--c-text); }
 .help a { color: var(--c-accent); }
 
+.skin-picker {
+  background: transparent;
+  color: var(--c-text-muted);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  padding: 3px var(--sp-2);
+  cursor: pointer;
+}
+.skin-picker:hover { color: var(--c-text); border-color: var(--c-border-strong); }
+
 /* built-in guides (Help page) */
 .guide-index { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: var(--sp-3); }
 .guide-card {
@@ -154,6 +166,9 @@ textarea { resize: vertical; }
 .guide-card:hover { border-color: var(--c-accent); }
 .guide-card__title { font-family: var(--font-mono); font-weight: 600; }
 .guide-card__blurb { color: var(--c-text-muted); font-size: var(--fs-sm); }
+/* Headings use the theme's display face; identical to the body face in
+   Console, a Victorian serif under Brass & Iron. */
+.md h1, .md h2, .md h3 { font-family: var(--font-display); }
 .md h1 { font-size: var(--fs-xl); margin: var(--sp-2) 0 var(--sp-3); }
 .md h2 { font-size: var(--fs-lg); margin: var(--sp-5) 0 var(--sp-2); }
 .md h3 { font-size: var(--fs-md); margin: var(--sp-4) 0 var(--sp-2); }
