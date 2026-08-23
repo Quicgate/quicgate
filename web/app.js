@@ -1729,6 +1729,7 @@ async function loadSettings() {
   $('set-ldap-enabled').checked = s.ldap_enabled === '1';
   $('set-ldap-url').value = s.ldap_url || '';
   $('set-ldap-dn').value = s.ldap_bind_dn_template || '';
+  $('set-ldap-allowed').value = s.ldap_allowed_users || '';
   $('set-trustedproxies').value = s.trusted_proxies || '';
   $('set-realip-header').value = s.real_ip_header || '';
   syncDnsField();
@@ -1756,6 +1757,7 @@ $('ldap-form').addEventListener('submit', async (e) => {
       ldap_enabled: $('set-ldap-enabled').checked ? '1' : '0',
       ldap_url: $('set-ldap-url').value.trim(),
       ldap_bind_dn_template: $('set-ldap-dn').value.trim(),
+      ldap_allowed_users: $('set-ldap-allowed').value.trim(),
     });
   } catch (err) { alert(err.message); }
 });

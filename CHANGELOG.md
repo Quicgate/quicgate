@@ -4,6 +4,51 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.2] - 2026-08-23
+
+### Security
+- **Admin OIDC login admitted anyone the provider would authenticate.** With
+  `oidc_allowed_emails` empty, `emailAllowed()` returned true for every
+  address, so enabling admin SSO against a tenant you do not exclusively
+  control handed full proxy administration to every account in it. An external
+  identity now needs either a local account with the same address or an
+  explicit allow-list entry; an empty list matches nobody. Password login is
+  unaffected, so this cannot lock anyone out.
+- **Admin OIDC ignored `email_verified`.** The claim was parsed and never
+  read. A provider that lets users choose their own address could therefore be
+  used to claim an administrator's address. A login is now refused when the
+  provider explicitly marks the address unverified.
+- **Any directory user could administer the proxy over LDAP.** A successful
+  bind was treated as authorisation, so every account in a corporate directory
+  held root over the ingress. Binding now only proves the password;
+  administering also requires a local account or an entry in the new
+  `ldap_allowed_users` list.
+- **LDAP used filter escaping on a distinguished name.** `EscapeFilter`
+  escapes search-filter metacharacters and leaves `,`, `=`, `+` and friends
+  alone, so a crafted username could restructure the DN it was spliced into.
+  Now `EscapeDN`, as the value's context requires.
+- **LDAP binds refuse plaintext transport.** `ldap://` sent the admin password
+  in clear text; `ldaps://` is now required, with a 5s dial and 10s operation
+  timeout so a hung directory cannot pin a login request.
+- **Restore could be used as a decompression bomb.** The upload limit bounded
+  the compressed body only, so a few megabytes of zeroes could expand without
+  bound and fill the data volume. Expansion is now capped at 2 GiB, and
+  archives carrying duplicate or non-regular (symlink, device) members are
+  rejected.
+- Admin sessions minted by OIDC now get the same cookie treatment as password
+  logins: `SameSite=Strict` and `Secure` on HTTPS, instead of `Lax` and never
+  `Secure`. Entropy failures when minting the session id are no longer ignored.
+
+### Fixed
+- `/api/me` returned 500 for an approved OIDC/LDAP identity with no local
+  database row, breaking the UI right after a successful external login. It
+  now reports the session identity and no local 2FA.
+- An LDAP user who also has a local account keeps that local identity on the
+  session, so the forced password change, 2FA and the profile page resolve to
+  the real account instead of an `ldap:`-prefixed stand-in.
+
+[1.7.2]: https://github.com/Quicgate/quicgate/releases/tag/v1.7.2
+
 ## [1.7.1] - 2026-08-23
 
 ### Security

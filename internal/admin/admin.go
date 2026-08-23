@@ -191,6 +191,7 @@ var settingsKeys = map[string]bool{
 	"ldap_enabled":          true,
 	"ldap_url":              true,
 	"ldap_bind_dn_template": true,
+	"ldap_allowed_users":    true, // directory users permitted to administer quicgate
 	// Docker label provider (default-domain is live; endpoints apply on restart)
 	"docker_default_domain": true, // base domain for containers without quicgate.host
 	"docker_endpoints":      true, // JSON list of Docker hosts to watch (restart to apply)
@@ -753,6 +754,12 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// isExternalIdentity reports whether a session belongs to a directory or IdP
+// user with no local account, which the login handlers mark with a prefix.
+func isExternalIdentity(email string) bool {
+	return strings.HasPrefix(email, "oidc:") || strings.HasPrefix(email, "ldap:")
+}
+
 func isHTTPS(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
@@ -783,13 +790,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	localOK := err == nil && bcrypt.CompareHashAndPassword([]byte(u.Hash), []byte(body.Password)) == nil
 	if !localOK {
 		// Additive LDAP fallback; local admin always still works.
-		if !s.ldapAuth(body.Email, body.Password) {
+		// Binding proves the directory knows the password; being allowed to
+		// administer the proxy is a separate decision.
+		if !s.ldapAuth(body.Email, body.Password) || !s.ldapIdentityApproved(body.Email) {
 			s.logins.fail(ip)
 			time.Sleep(400 * time.Millisecond) // flat cost for wrong email and wrong password alike
 			writeErr(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
-		u.Email = "ldap:" + body.Email // directory user, no local record
+		if u.Email == "" {
+			u.Email = "ldap:" + body.Email // directory user, no local record
+		}
 	}
 	// Second factor, when enabled.
 	if u.TOTPSecret != "" {
@@ -835,6 +846,16 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	sess := r.Context().Value(sessionKey).(session)
 	u, err := s.store.GetUserByEmail(sess.email)
 	if err != nil {
+		// An allow-listed OIDC/LDAP identity has no local row; the directory
+		// owns the credential, so report the session identity and no local 2FA
+		// rather than failing the profile call.
+		if isExternalIdentity(sess.email) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"email": sess.email, "mustChange": false, "totpEnabled": false,
+				"external": true, "version": s.engine.Version(),
+			})
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

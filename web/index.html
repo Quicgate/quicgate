@@ -294,6 +294,8 @@
           <label class="check"><input type="checkbox" id="set-ldap-enabled"><span>Enable LDAP login</span></label>
           <label class="field"><span>Server URL</span><input id="set-ldap-url" class="mono" placeholder="ldaps://ldap.example.com:636"></label>
           <label class="field"><span>Bind DN template <em>(%s = username)</em></span><input id="set-ldap-dn" class="mono" placeholder="uid=%s,ou=people,dc=example,dc=com"></label>
+          <label class="field"><span>Allowed directory users <em>(comma-separated; a binding user also needs a local account or an entry here)</em></span><input id="set-ldap-allowed" class="mono" placeholder="alice, bob"></label>
+          <p class="hs-muted" style="font-size:var(--fs-xs)">Requires <code>ldaps://</code>: a plain <code>ldap://</code> bind would put the password on the wire in clear text.</p>
           <div class="modal-actions"><button type="submit" class="btn btn--primary">Save</button></div>
         </form>
       </div>
