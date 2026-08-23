@@ -107,6 +107,18 @@
         </table>
         <div id="acl-empty" class="empty" hidden>No access lists. Add one, then assign it to a proxy host.</div>
       </div>
+      <div class="card" style="margin-top:var(--sp-4)">
+        <div class="card-head">
+          <h2>Identity providers <em class="hs-muted" style="font-size:var(--fs-xs)">(OpenID Connect, for built-in host SSO)</em></h2>
+          <button id="btn-add-idp" class="btn btn--secondary btn--sm">Add provider</button>
+        </div>
+        <table class="table" id="idp-table">
+          <thead><tr><th>Name</th><th>Issuer</th><th>Client ID</th><th>Session</th><th></th></tr></thead>
+          <tbody id="idp-body"></tbody>
+        </table>
+        <div id="idp-empty" class="empty" hidden>No identity providers. Add your Keycloak / Entra ID / Authentik here, then enable OIDC SSO on a proxy host.</div>
+        <p class="hs-muted" style="font-size:var(--fs-xs);padding:0 var(--sp-4) var(--sp-4)">Register each protected host's redirect URI at the IdP: <code>https://&lt;host&gt;/.qg/oidc/callback</code> (Keycloak accepts wildcards like <code>https://*.example.com/.qg/oidc/callback</code>).</p>
+      </div>
     </div>
 
     <div id="page-streams" hidden>
@@ -397,8 +409,8 @@
           <p><b>No.</b> Never expose the admin port (81) to the internet. Put it behind quicgate itself with an access list, a VPN, or a firewall rule — treat it like any other private service. Change the default <code>admin@example.com</code>/<code>changeme</code> on first run and enable 2FA (Profile).</p></details>
         <details><summary>How do I script quicgate / use the API?</summary>
           <p>Create a bearer token in <b>Profile → API tokens</b> and send <code>Authorization: Bearer &lt;token&gt;</code>. Everything the UI does is a REST call — see the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>. <code>POST /api/import</code> does idempotent bulk config-as-code.</p></details>
-        <details><summary>Forward-auth / SSO in front of a host?</summary>
-          <p>On a proxy host, enable <b>Forward authentication</b> and point it at an Authelia / Authentik / Keycloak verify endpoint. quicgate itself stays password + optional OIDC/LDAP for the admin login.</p></details>
+        <details><summary>SSO in front of a host?</summary>
+          <p>Two ways. <b>Built-in OIDC</b> (no extra service): add your IdP under <b>Access Lists &rarr; Identity providers</b>, then enable <b>OIDC SSO</b> on the host's Security tab. quicgate runs the OpenID Connect login itself, keeps a signed per-host session, checks the allowed emails/domains/groups you set, and can pass the identity upstream as <code>Remote-User</code> / <code>Remote-Email</code> / <code>Remote-Groups</code> (spoofed inbound copies are always stripped). Register the redirect URI <code>https://&lt;host&gt;/.qg/oidc/callback</code> at the IdP; sign out at <code>/.qg/oidc/logout</code>. Or use <b>Forward authentication</b> against an Authelia / Authentik verify endpoint if you already run one.</p></details>
         <details><summary>Can one path be public while the rest of the host needs auth?</summary>
           <p>Yes. On a proxy host, <b>Security → Path authentication</b> takes ordered per-URL rules: a path, <em>prefix</em> or <em>exact</em> match, and what gates it (<b>Public</b>, a specific <b>access list</b>, or the host's <b>forward auth</b>). The longest matching path wins, and any path matching no rule keeps the host's own access list and forward auth. Use it for a licensing callback, a webhook receiver or a health probe that cannot log in. Optionally scope a rule to certain verbs, e.g. public <code>GET</code> but gated <code>POST</code>. Rate limits, bad-bot and exploit filters stay host-wide and still apply to public paths.</p></details>
         <details><summary>Backup, metrics, logs?</summary>
@@ -457,6 +469,34 @@
       <div id="acl-error" class="form-error" hidden></div>
       <div class="modal-actions">
         <button type="button" class="btn btn--secondary" id="acl-btn-cancel">Cancel</button>
+        <button type="submit" class="btn btn--primary">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- identity provider modal -->
+<div id="idp-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="card-head"><h2 id="idp-modal-title">Add identity provider</h2><button id="idp-modal-close" class="btn btn--ghost btn--sm">&times;</button></div>
+    <form id="idp-form">
+      <div class="field-row">
+        <label class="field field--sm"><span>Name</span><input id="i-name" required placeholder="keycloak"></label>
+        <label class="field"><span>Issuer URL <em>(OIDC discovery base)</em></span><input id="i-issuer" class="mono" required placeholder="https://idp.example.com/realms/main"></label>
+      </div>
+      <div class="field-row">
+        <label class="field"><span>Client ID</span><input id="i-client" class="mono" required></label>
+        <label class="field"><span>Client secret <em>(leave empty to keep existing)</em></span><input id="i-secret" class="mono" type="password" autocomplete="off"></label>
+      </div>
+      <div class="field-row">
+        <label class="field field--sm"><span>Groups claim</span><input id="i-groups-claim" class="mono" placeholder="groups"></label>
+        <label class="field field--sm"><span>Session (hours)</span><input id="i-session" type="number" min="1" placeholder="12"></label>
+        <label class="check"><input type="checkbox" id="i-skipverify"><span>Skip TLS verify <em>(internal CA)</em></span></label>
+      </div>
+      <label class="field"><span>Scopes <em>(comma-separated; empty = openid, email, profile)</em></span><input id="i-scopes" class="mono" placeholder="openid, email, profile, groups"></label>
+      <div id="idp-error" class="form-error" hidden></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn--secondary" id="idp-btn-cancel">Cancel</button>
         <button type="submit" class="btn btn--primary">Save</button>
       </div>
     </form>
@@ -608,6 +648,23 @@
           <label class="field"><span>Auth URL <em>(Authelia/Authentik/Keycloak verify endpoint)</em></span><input id="f-fauth-url" class="mono" placeholder="https://auth.example.com/api/verify"></label>
           <label class="field"><span>Copy response headers upstream <em>(comma-separated, e.g. Remote-User,Remote-Groups)</em></span><input id="f-fauth-headers" class="mono"></label>
           <label class="check"><input type="checkbox" id="f-fauth-skipverify"><span>Skip TLS verify on auth endpoint</span></label>
+        </fieldset>
+        <fieldset class="group" data-proxyonly>
+          <legend>OIDC SSO (built-in; quicgate runs the login itself)</legend>
+          <label class="check"><input type="checkbox" id="f-oidc"><span>Require an OpenID Connect login for this host</span></label>
+          <div id="f-oidc-fields" hidden>
+            <div class="field-row">
+              <label class="field field--sm"><span>Provider</span><select id="f-oidc-provider"></select></label>
+              <label class="check"><input type="checkbox" id="f-oidc-pass" checked><span>Pass identity upstream <em>(Remote-User / Remote-Email / Remote-Groups)</em></span></label>
+            </div>
+            <label class="field"><span>Allowed emails <em>(comma-separated; empty = no email restriction)</em></span><input id="f-oidc-emails" class="mono" placeholder="you@example.com"></label>
+            <div class="field-row">
+              <label class="field"><span>Allowed domains</span><input id="f-oidc-domains" class="mono" placeholder="example.com"></label>
+              <label class="field"><span>Allowed groups <em>(from the groups claim)</em></span><input id="f-oidc-groups" class="mono" placeholder="admins"></label>
+            </div>
+            <p class="hs-muted" style="font-size:var(--fs-xs)">All three empty = any authenticated user. Register this redirect URI at the IdP: <code id="f-oidc-redirect-hint">https://&lt;host&gt;/.qg/oidc/callback</code>. Sign out at <code>/.qg/oidc/logout</code>.</p>
+            <div id="f-oidc-warn" class="form-error" hidden>No identity providers exist yet — add one on the Access Lists page first.</div>
+          </div>
         </fieldset>
         <fieldset class="group" data-proxyonly>
           <legend>Path authentication (per-URL overrides; longest matching path wins)</legend>

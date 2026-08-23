@@ -63,7 +63,19 @@ components:
         forceSsl: { type: boolean }
         enabled: { type: boolean }
         accessListId: { type: integer, nullable: true }
-        options: { type: object, description: typed advanced options (headers, timeouts, hsts, rateLimit, forwardAuth, authRules, clientCert, pathRewrite, blockExploits, blockBadBots, compression, badGatewayHtml, ...) }
+        options: { type: object, description: typed advanced options (headers, timeouts, hsts, rateLimit, forwardAuth, oidc, authRules, clientCert, pathRewrite, blockExploits, blockBadBots, compression, badGatewayHtml, ...) }
+    OIDCProvider:
+      type: object
+      properties:
+        id: { type: integer, readOnly: true }
+        name: { type: string }
+        issuer: { type: string, description: OIDC discovery base URL }
+        clientId: { type: string }
+        clientSecret: { type: string, description: write-mostly, masked in responses }
+        scopes: { type: array, items: { type: string }, description: "default: openid email profile" }
+        groupsClaim: { type: string, description: "ID-token claim holding groups (default: groups)" }
+        sessionHours: { type: integer, description: "session cookie lifetime (default: 12)" }
+        skipTlsVerify: { type: boolean }
     AccessList:
       type: object
       properties:
@@ -188,6 +200,24 @@ paths:
       responses: { "200": { description: ok } }
     delete:
       summary: Delete access list
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      responses: { "200": { description: deleted } }
+  /api/oidc-providers:
+    get:
+      summary: List OIDC identity providers (client secrets masked)
+      responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/OIDCProvider' } } } } } }
+    post:
+      summary: Create OIDC identity provider
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/OIDCProvider' } } } }
+      responses: { "201": { description: created } }
+  /api/oidc-providers/{id}:
+    put:
+      summary: Update OIDC identity provider (empty or masked clientSecret keeps the stored one)
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/OIDCProvider' } } } }
+      responses: { "200": { description: ok } }
+    delete:
+      summary: Delete OIDC identity provider (rejected while a host references it)
       parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
       responses: { "200": { description: deleted } }
   /api/streams:

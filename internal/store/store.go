@@ -58,7 +58,7 @@ type ForwardAuth struct {
 type AuthRule struct {
 	Path         string   `json:"path"`                   // matched as a prefix unless Exact
 	Exact        bool     `json:"exact,omitempty"`        // match this exact path only
-	Mode         string   `json:"mode"`                   // public | accessList | forwardAuth
+	Mode         string   `json:"mode"`                   // public | accessList | forwardAuth | oidc
 	AccessListID *int64   `json:"accessListId,omitempty"` // required when mode=accessList
 	Methods      []string `json:"methods,omitempty"`      // empty = every method
 }
@@ -118,7 +118,8 @@ type Options struct {
 	BlockBadBots  bool         `json:"blockBadBots"`  // block known scraper/bot user-agents
 	RateLimit     *RateLimit   `json:"rateLimit,omitempty"`
 	ForwardAuth   *ForwardAuth `json:"forwardAuth,omitempty"`
-	AuthRules     []AuthRule   `json:"authRules,omitempty"` // path-scoped overrides of the two above
+	OIDC          *OIDCAuth    `json:"oidc,omitempty"`      // built-in OpenID Connect SSO
+	AuthRules     []AuthRule   `json:"authRules,omitempty"` // path-scoped overrides of the gates above
 	ClientCert    *ClientCert  `json:"clientCert,omitempty"` // mTLS
 
 	// Response group (continued)
@@ -390,6 +391,11 @@ func (o *Options) validate() error {
 	if o.HSTS.Enabled && o.HSTS.MaxAge <= 0 {
 		o.HSTS.MaxAge = 15552000 // 180 days, NPM's default
 	}
+	if o.OIDC != nil {
+		if err := o.OIDC.validate(); err != nil {
+			return err
+		}
+	}
 	if err := o.validateAuthRules(); err != nil {
 		return err
 	}
@@ -423,12 +429,17 @@ func (o *Options) validateAuthRules() error {
 			if o.ForwardAuth == nil || strings.TrimSpace(o.ForwardAuth.URL) == "" {
 				return fmt.Errorf("auth rule %d: mode forwardAuth needs forward authentication configured on this host", i+1)
 			}
+		case "oidc":
+			r.AccessListID = nil
+			if o.OIDC == nil {
+				return fmt.Errorf("auth rule %d: mode oidc needs OIDC SSO configured on this host", i+1)
+			}
 		case "accessList":
 			if r.AccessListID == nil {
 				return fmt.Errorf("auth rule %d: mode accessList needs an access list", i+1)
 			}
 		default:
-			return fmt.Errorf("auth rule %d: mode must be public, accessList or forwardAuth, got %q", i+1, r.Mode)
+			return fmt.Errorf("auth rule %d: mode must be public, accessList, forwardAuth or oidc, got %q", i+1, r.Mode)
 		}
 		if len(r.Methods) > 0 {
 			methods := make([]string, 0, len(r.Methods))
@@ -513,6 +524,17 @@ CREATE TABLE IF NOT EXISTS port_forwards (
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS oidc_providers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  issuer TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  client_secret TEXT NOT NULL DEFAULT '',
+  scopes TEXT NOT NULL DEFAULT '',
+  groups_claim TEXT NOT NULL DEFAULT 'groups',
+  session_hours INTEGER NOT NULL DEFAULT 12,
+  skip_tls_verify INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`)
 	if err != nil {
@@ -732,7 +754,7 @@ func (s *Store) Snapshot(path string) error {
 	return err
 }
 
-var backupTables = []string{"hosts", "users", "access_lists", "streams", "settings", "custom_certs"}
+var backupTables = []string{"hosts", "users", "access_lists", "streams", "settings", "custom_certs", "oidc_providers"}
 
 // RestoreFrom replaces all configuration with the contents of the snapshot
 // database at dbPath, atomically. Fails cleanly (nothing changed) when the
@@ -747,6 +769,16 @@ func (s *Store) RestoreFrom(dbPath string) error {
 		return err
 	}
 	for _, t := range backupTables {
+		// A backup made by an older version may predate a table; keep this
+		// binary's (empty) table rather than failing the whole restore.
+		var n int
+		if err := tx.QueryRow("SELECT count(*) FROM backup.sqlite_master WHERE type='table' AND name=?", t).Scan(&n); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if n == 0 {
+			continue
+		}
 		if _, err := tx.Exec("DELETE FROM " + t); err != nil {
 			tx.Rollback()
 			return err
