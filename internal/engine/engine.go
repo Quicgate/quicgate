@@ -266,7 +266,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 		if h.AccessListID != nil {
 			acl = access[*h.AccessListID]
 		}
-		r := e.buildRoute(h, acl)
+		r := e.buildRoute(h, acl, access)
 		placed := false
 		for _, d := range h.Domains {
 			if strings.HasPrefix(d, "*.") {
@@ -503,13 +503,13 @@ func newUpstreamTransport(h store.Host) *http.Transport {
 }
 
 // buildRoute compiles one host's typed options into a ready http.Handler chain.
-func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
+func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*compiledAccess) *route {
 	o := h.Options
 
 	// Maintenance mode short-circuits every request to a 503 page, whatever the
 	// host type. Access lists and rate limits still apply (via wrapCommon).
 	if o.Maintenance {
-		return &route{host: h, proxy: wrapCommon(maintenanceHandler(o.MaintenanceHTML), o, acl)}
+		return &route{host: h, proxy: wrapCommon(maintenanceHandler(o.MaintenanceHTML), o, acl, acls)}
 	}
 
 	// Non-proxy hosts skip the proxy machinery entirely, but still get the
@@ -520,12 +520,12 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 		if h.Redirect != nil {
 			handler = buildRedirectHandler(*h.Redirect)
 		}
-		return &route{host: h, proxy: wrapCommon(handler, o, acl)}
+		return &route{host: h, proxy: wrapCommon(handler, o, acl, acls)}
 	case "dead":
-		return &route{host: h, proxy: wrapCommon(deadHandler(), o, acl)}
+		return &route{host: h, proxy: wrapCommon(deadHandler(), o, acl, acls)}
 	case "static":
 		fs := http.FileServer(http.Dir(h.StaticRoot))
-		return &route{host: h, proxy: wrapCommon(fs, o, acl)}
+		return &route{host: h, proxy: wrapCommon(fs, o, acl, acls)}
 	}
 
 	// Build the balancer target list: primary plus any pool members.
@@ -627,7 +627,7 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess) *route {
 			inner.ServeHTTP(w, r)
 		})
 	}
-	handler = wrapCommon(handler, o, acl)
+	handler = wrapCommon(handler, o, acl, acls)
 	return &route{host: h, proxy: handler}
 }
 
@@ -698,7 +698,10 @@ func maintenanceHandler(customHTML string) http.Handler {
 
 // wrapCommon applies the middleware shared by every host type, outermost
 // first: access list -> forward-auth -> rate limit -> bots -> exploit filter.
-func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess) http.Handler {
+// With path-scoped auth rules configured, the access list and forward-auth
+// layers become per-path (see pathauth.go); everything below them stays
+// host-wide.
+func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess, acls map[int64]*compiledAccess) http.Handler {
 	if o.BlockExploits {
 		handler = blockExploits(handler)
 	}
@@ -708,13 +711,19 @@ func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess) http
 	if o.RateLimit != nil {
 		handler = newRateLimiter(o.RateLimit).wrap(handler)
 	}
-	if o.ForwardAuth != nil && o.ForwardAuth.URL != "" {
-		handler = forwardAuth(o.ForwardAuth, handler)
+	hostGate := func(h http.Handler) http.Handler {
+		if o.ForwardAuth != nil && o.ForwardAuth.URL != "" {
+			h = forwardAuth(o.ForwardAuth, h)
+		}
+		if acl != nil {
+			h = acl.wrap(h)
+		}
+		return h
 	}
-	if acl != nil {
-		handler = acl.wrap(handler)
+	if len(o.AuthRules) > 0 {
+		return buildPathAuth(o.AuthRules, o, acls, handler, hostGate(handler))
 	}
-	return handler
+	return hostGate(handler)
 }
 
 // badGatewayHandler renders the upstream-down page, using a per-host custom

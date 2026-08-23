@@ -63,7 +63,7 @@ components:
         forceSsl: { type: boolean }
         enabled: { type: boolean }
         accessListId: { type: integer, nullable: true }
-        options: { type: object, description: typed advanced options (headers, timeouts, hsts, rateLimit, forwardAuth, clientCert, pathRewrite, blockExploits, blockBadBots, compression, badGatewayHtml, ...) }
+        options: { type: object, description: typed advanced options (headers, timeouts, hsts, rateLimit, forwardAuth, authRules, clientCert, pathRewrite, blockExploits, blockBadBots, compression, badGatewayHtml, ...) }
     AccessList:
       type: object
       properties:

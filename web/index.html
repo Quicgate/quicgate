@@ -399,6 +399,8 @@
           <p>Create a bearer token in <b>Profile → API tokens</b> and send <code>Authorization: Bearer &lt;token&gt;</code>. Everything the UI does is a REST call — see the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>. <code>POST /api/import</code> does idempotent bulk config-as-code.</p></details>
         <details><summary>Forward-auth / SSO in front of a host?</summary>
           <p>On a proxy host, enable <b>Forward authentication</b> and point it at an Authelia / Authentik / Keycloak verify endpoint. quicgate itself stays password + optional OIDC/LDAP for the admin login.</p></details>
+        <details><summary>Can one path be public while the rest of the host needs auth?</summary>
+          <p>Yes. On a proxy host, <b>Security → Path authentication</b> takes ordered per-URL rules: a path, <em>prefix</em> or <em>exact</em> match, and what gates it (<b>Public</b>, a specific <b>access list</b>, or the host's <b>forward auth</b>). The longest matching path wins, and any path matching no rule keeps the host's own access list and forward auth. Use it for a licensing callback, a webhook receiver or a health probe that cannot log in. Optionally scope a rule to certain verbs, e.g. public <code>GET</code> but gated <code>POST</code>. Rate limits, bad-bot and exploit filters stay host-wide and still apply to public paths.</p></details>
         <details><summary>Backup, metrics, logs?</summary>
           <p><b>System</b> page has the JSON access-log viewer (per-host logs are on each host's <em>Logs</em> button). <b>Settings</b> has one-click backup/restore. Prometheus scrape at <code>/metrics</code> (needs a bearer token).</p></details>
 
@@ -606,6 +608,12 @@
           <label class="field"><span>Auth URL <em>(Authelia/Authentik/Keycloak verify endpoint)</em></span><input id="f-fauth-url" class="mono" placeholder="https://auth.example.com/api/verify"></label>
           <label class="field"><span>Copy response headers upstream <em>(comma-separated, e.g. Remote-User,Remote-Groups)</em></span><input id="f-fauth-headers" class="mono"></label>
           <label class="check"><input type="checkbox" id="f-fauth-skipverify"><span>Skip TLS verify on auth endpoint</span></label>
+        </fieldset>
+        <fieldset class="group" data-proxyonly>
+          <legend>Path authentication (per-URL overrides; longest matching path wins)</legend>
+          <div id="f-auth-rules" class="hdr-rules"></div>
+          <button type="button" class="btn btn--ghost btn--sm" id="btn-add-authrule">+ Add path rule</button>
+          <p class="hs-muted" style="font-size:var(--fs-xs)">Paths that match no rule use this host's access list and forward auth. Use it to keep a callback or webhook reachable without credentials while the rest of the host stays gated. Rate limits, bot and exploit filters still apply everywhere.</p>
         </fieldset>
         <fieldset class="group">
           <legend>Client certificate (mTLS)</legend>

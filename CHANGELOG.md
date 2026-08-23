@@ -4,6 +4,28 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] - 2026-08-23
+
+### Added
+- **Path authentication.** A proxy host's access list and forward auth used to
+  gate the whole host; they can now be overridden per URL. Each rule is a path
+  (prefix or exact), a mode (`public`, a named access list, or the host's
+  forward auth) and optional HTTP verbs, and the longest matching path wins.
+  Anything matching no rule keeps the host's own gate. This covers the case a
+  reverse proxy in front of SSO always runs into: a licensing callback, webhook
+  receiver or health probe that has to answer without credentials while the
+  rest of the host stays behind authentication. Rate limits, bad-bot and
+  exploit filters remain host-wide, so a public path is still protected from
+  abuse. Editable under **Security -> Path authentication** in the host modal;
+  stored as `options.authRules`. A rule naming an access list that no longer
+  exists falls back to the host's gate instead of opening the path, and the API
+  rejects such a reference on write.
+- The Proxy Hosts table links each domain to the site itself (new tab), with
+  the scheme taken from the host's certificate mode. Wildcard domains stay
+  plain text since they have no single address to visit.
+
+[1.7.0]: https://github.com/Quicgate/quicgate/releases/tag/v1.7.0
+
 ## [1.6.1] - 2026-08-23
 
 ### Changed

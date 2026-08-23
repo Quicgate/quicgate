@@ -50,6 +50,19 @@ type ForwardAuth struct {
 	SkipTLSVerify    bool     `json:"skipTlsVerify"`    // for https auth endpoints with self-signed certs
 }
 
+// AuthRule scopes authentication to a URL path, so one host can keep a few
+// endpoints reachable without credentials while everything else stays behind
+// an access list or forward auth (a licensing callback, a webhook, a health
+// probe). Rules are matched longest-path-first; a request matching no rule
+// falls back to the host's own access list and forward-auth settings.
+type AuthRule struct {
+	Path         string   `json:"path"`                   // matched as a prefix unless Exact
+	Exact        bool     `json:"exact,omitempty"`        // match this exact path only
+	Mode         string   `json:"mode"`                   // public | accessList | forwardAuth
+	AccessListID *int64   `json:"accessListId,omitempty"` // required when mode=accessList
+	Methods      []string `json:"methods,omitempty"`      // empty = every method
+}
+
 // ClientCert configures mutual TLS for a host.
 type ClientCert struct {
 	Mode  string `json:"mode"`  // require | request
@@ -105,6 +118,7 @@ type Options struct {
 	BlockBadBots  bool         `json:"blockBadBots"`  // block known scraper/bot user-agents
 	RateLimit     *RateLimit   `json:"rateLimit,omitempty"`
 	ForwardAuth   *ForwardAuth `json:"forwardAuth,omitempty"`
+	AuthRules     []AuthRule   `json:"authRules,omitempty"` // path-scoped overrides of the two above
 	ClientCert    *ClientCert  `json:"clientCert,omitempty"` // mTLS
 
 	// Response group (continued)
@@ -376,6 +390,9 @@ func (o *Options) validate() error {
 	if o.HSTS.Enabled && o.HSTS.MaxAge <= 0 {
 		o.HSTS.MaxAge = 15552000 // 180 days, NPM's default
 	}
+	if err := o.validateAuthRules(); err != nil {
+		return err
+	}
 	for name, v := range map[string]int{
 		"dialTimeoutSec": o.DialTimeoutSec, "responseHeaderTimeoutSec": o.ResponseHeaderTimeoutSec,
 		"idleTimeoutSec": o.IdleTimeoutSec, "maxIdleConnsPerHost": o.MaxIdleConnsPerHost,
@@ -383,6 +400,49 @@ func (o *Options) validate() error {
 	} {
 		if v < 0 {
 			return fmt.Errorf("%s cannot be negative", name)
+		}
+	}
+	return nil
+}
+
+// validateAuthRules checks the path-scoped auth overrides. A rule that names a
+// mode the engine does not know would silently gate nothing, so every field is
+// checked here rather than shrugged off at request time.
+func (o *Options) validateAuthRules() error {
+	for i := range o.AuthRules {
+		r := &o.AuthRules[i]
+		r.Path = strings.TrimSpace(r.Path)
+		if !strings.HasPrefix(r.Path, "/") {
+			return fmt.Errorf("auth rule %d: path must start with /", i+1)
+		}
+		switch r.Mode {
+		case "public":
+			r.AccessListID = nil
+		case "forwardAuth":
+			r.AccessListID = nil
+			if o.ForwardAuth == nil || strings.TrimSpace(o.ForwardAuth.URL) == "" {
+				return fmt.Errorf("auth rule %d: mode forwardAuth needs forward authentication configured on this host", i+1)
+			}
+		case "accessList":
+			if r.AccessListID == nil {
+				return fmt.Errorf("auth rule %d: mode accessList needs an access list", i+1)
+			}
+		default:
+			return fmt.Errorf("auth rule %d: mode must be public, accessList or forwardAuth, got %q", i+1, r.Mode)
+		}
+		if len(r.Methods) > 0 {
+			methods := make([]string, 0, len(r.Methods))
+			for _, m := range r.Methods {
+				m = strings.ToUpper(strings.TrimSpace(m))
+				if m == "" {
+					continue
+				}
+				if !validHTTPMethods[m] {
+					return fmt.Errorf("auth rule %d: unknown HTTP method %q", i+1, m)
+				}
+				methods = append(methods, m)
+			}
+			r.Methods = methods
 		}
 	}
 	return nil

@@ -44,7 +44,7 @@ The admin port itself should stay network-gated (e.g. behind Pangolin/an IP allo
 
 Host object (fields depend on `type`): `{id, type, domains[], upstream{scheme,host,port}, upstreams[], redirect{httpCode,targetScheme,targetHost,preservePath}, staticRoot, certMode, certId, forceSsl, enabled, accessListId, options{...}}`.
 
-`type` ∈ `proxy | redirect | dead | static`. `certMode` ∈ `auto | custom | none`. `options` carries the typed advanced settings (headers, timeouts, hsts, rateLimit, forwardAuth, clientCert, blockExploits, blockIndexing, compression, …).
+`type` ∈ `proxy | redirect | dead | static`. `certMode` ∈ `auto | custom | none`. `options` carries the typed advanced settings (headers, timeouts, hsts, rateLimit, forwardAuth, authRules, clientCert, blockExploits, blockIndexing, compression, …).
 
 | Method | Path | Notes |
 |---|---|---|

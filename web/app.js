@@ -434,6 +434,76 @@ function readHdrRows(containerId) {
 $('btn-add-reqhdr').addEventListener('click', () => addHdrRow('req-headers'));
 $('btn-add-resphdr').addEventListener('click', () => addHdrRow('resp-headers'));
 
+/* ---- path authentication rows ---- */
+// One row = one path-scoped override of the host's access list / forward auth.
+// The access-list picker only appears for mode=accessList, so a row never
+// carries a reference the server would reject.
+function addAuthRuleRow(rule) {
+  const row = document.createElement('div');
+  row.className = 'hdr-rule';
+  const verbs = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
+  const chips = verbs.map((v) => `<span class="mchip" data-m="${v}" tabindex="0">${v}</span>`).join('');
+  row.innerHTML =
+    '<input class="a-path mono" placeholder="/manage/" style="flex:0 0 130px">' +
+    '<select class="a-match" style="flex:0 0 90px"><option value="prefix">prefix</option><option value="exact">exact</option></select>' +
+    '<select class="a-mode" style="flex:0 0 130px">' +
+      '<option value="public">Public</option>' +
+      '<option value="accessList">Access list</option>' +
+      '<option value="forwardAuth">Forward auth</option>' +
+    '</select>' +
+    '<select class="a-acl" style="flex:1" hidden></select>' +
+    '<span class="r-methods" title="Click the verbs this rule applies to. None selected = all methods.">' + chips + '</span>' +
+    '<button type="button" class="btn btn--ghost btn--sm a-del">&times;</button>';
+  const mode = row.querySelector('.a-mode');
+  const acl = row.querySelector('.a-acl');
+  for (const a of accessLists) {
+    const opt = document.createElement('option');
+    opt.value = String(a.id);
+    opt.textContent = a.name;
+    acl.appendChild(opt);
+  }
+  const syncMode = () => { acl.hidden = mode.value !== 'accessList'; };
+  mode.addEventListener('change', syncMode);
+  const toggle = (ch) => ch.classList.toggle('on');
+  row.querySelectorAll('.mchip').forEach((ch) => {
+    ch.addEventListener('click', () => toggle(ch));
+    ch.addEventListener('keydown', (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(ch); } });
+  });
+  if (rule) {
+    row.querySelector('.a-path').value = rule.path || '';
+    row.querySelector('.a-match').value = rule.exact ? 'exact' : 'prefix';
+    mode.value = rule.mode || 'public';
+    if (rule.accessListId) acl.value = String(rule.accessListId);
+    for (const m of rule.methods || []) {
+      const c = row.querySelector(`.mchip[data-m="${m}"]`);
+      if (c) c.classList.add('on');
+    }
+  }
+  syncMode();
+  row.querySelector('.a-del').addEventListener('click', () => row.remove());
+  $('f-auth-rules').appendChild(row);
+}
+$('btn-add-authrule').addEventListener('click', () => addAuthRuleRow());
+
+function readAuthRules() {
+  const out = [];
+  for (const row of $('f-auth-rules').children) {
+    const path = row.querySelector('.a-path').value.trim();
+    if (!path) continue;
+    const rule = { path, mode: row.querySelector('.a-mode').value };
+    if (row.querySelector('.a-match').value === 'exact') rule.exact = true;
+    if (rule.mode === 'accessList') {
+      const id = row.querySelector('.a-acl').value;
+      if (!id) continue;
+      rule.accessListId = parseInt(id, 10);
+    }
+    const methods = [...row.querySelectorAll('.r-methods .mchip.on')].map((c) => c.dataset.m);
+    if (methods.length) rule.methods = methods;
+    out.push(rule);
+  }
+  return out;
+}
+
 /* ---- custom location rows ---- */
 function addLocationRow(loc) {
   const row = document.createElement('div');
@@ -564,6 +634,8 @@ function openModal(h) {
   $('f-fauth-url').value = fa.url || '';
   $('f-fauth-headers').value = (fa.responseHeaders || []).join(',');
   $('f-fauth-skipverify').checked = !!fa.skipTlsVerify;
+  $('f-auth-rules').innerHTML = '';
+  for (const r of o.authRules || []) addAuthRuleRow(r);
   const cc = o.clientCert || {};
   $('f-mtls-mode').value = cc.mode || '';
   $('f-mtls-ca').value = cc.caPem || '';
@@ -660,6 +732,7 @@ $('host-form').addEventListener('submit', async (e) => {
             skipTlsVerify: $('f-fauth-skipverify').checked,
           }
         : null,
+      authRules: type === 'proxy' ? readAuthRules() : [],
       clientCert: $('f-mtls-mode').value
         ? { mode: $('f-mtls-mode').value, caPem: $('f-mtls-ca').value }
         : null,
