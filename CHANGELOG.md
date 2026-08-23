@@ -4,6 +4,16 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.6.1] - 2026-08-23
+
+### Changed
+- Dependency updates: `klauspost/compress` 1.19.1 -> 1.19.2 (gzip/zstd
+  compression), `golang.org/x/crypto` 0.54.0 -> 0.55.0 and
+  `modernc.org/sqlite` 1.55.0 -> 1.56.0 (the config store), plus the
+  indirect bumps they pull in. No functional changes.
+
+[1.6.1]: https://github.com/Quicgate/quicgate/releases/tag/v1.6.1
+
 ## [1.6.0] - 2026-08-04
 
 ### Added
