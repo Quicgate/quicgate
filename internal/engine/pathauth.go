@@ -38,9 +38,16 @@ func (g *pathGate) matches(r *http.Request) bool {
 type pathAuth struct {
 	gates    []pathGate
 	fallback http.Handler
+	// reserved handles the OIDC callback and logout paths whenever the host
+	// has SSO configured, ahead of every rule.
+	reserved http.Handler
 }
 
 func (p *pathAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.reserved != nil && (r.URL.Path == oidcCallbackPath || r.URL.Path == oidcLogoutPath) {
+		p.reserved.ServeHTTP(w, r)
+		return
+	}
 	for i := range p.gates {
 		if p.gates[i].matches(r) {
 			p.gates[i].handler.ServeHTTP(w, r)
@@ -103,5 +110,13 @@ func buildPathAuth(rules []store.AuthRule, o store.Options, acls map[int64]*comp
 		}
 		return gates[i].exact && !gates[j].exact
 	})
-	return &pathAuth{gates: gates, fallback: fallback}
+	pa := &pathAuth{gates: gates, fallback: fallback}
+	// The login callback must always reach the OIDC gate. Without this, a host
+	// that gates only /admin/ with SSO would send the browser to the IdP and
+	// then hand the redirect back to whatever rule matched /.qg/oidc/callback,
+	// so the session was never minted and the user looped through login.
+	if sso != nil {
+		pa.reserved = sso.wrap(inner)
+	}
+	return pa
 }

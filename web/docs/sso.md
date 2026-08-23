@@ -52,3 +52,25 @@ Rate limits, bad-bot and exploit filters stay host-wide — they are abuse contr
 ## Evaluation order
 
 Per request, outermost first: access list → forward auth → OIDC SSO → rate limit → bad bots → exploit filter → cache/compression → proxy. Path rules replace the first three for matching paths. Auto-ban records failures from access-list denials and repeated offenders are banned at the IP level.
+
+## Security model
+
+What quicgate guarantees, and what it expects from you.
+
+**Path handling.** Any request whose path contains a `.` or `..` segment is rejected with 400 before it reaches a gate, a path rule or an upstream. Otherwise `/public/../admin` would match a public rule here while an upstream that resolves dot segments served `/admin` — a bypass of every gate on the host. Dot-prefixed names such as `/.well-known/acme-challenge/...` are unaffected: only whole `.`/`..` segments are refused.
+
+**Identity headers cannot be spoofed.** On a host with OIDC SSO, `Remote-User`, `Remote-Email` and `Remote-Groups` are stripped from every inbound request, including public path carve-outs, before any gate runs. On a forward-auth host, whatever headers you list under *Copy response headers upstream* are stripped from the inbound request too, so a 2xx from the auth server that omits one cannot let the client's own value through.
+
+**Still, restrict your backends.** Header-based identity is only as good as the network path. If an upstream is reachable directly, anyone who can reach it can set `Remote-User` themselves and quicgate never sees the request. Bind backends to the quicgate host, or firewall them to it.
+
+**Sessions.** The SSO cookie is HMAC-signed with a per-install secret, `HttpOnly`, `SameSite=Lax`, and marked `Secure` whenever the client connection is HTTPS — including when TLS terminates on a proxy in front (`X-Forwarded-Proto`). It is bound to the exact host it was minted for, so a session for one host cannot be replayed against another that trusts different groups. Sessions are stateless: they cannot be revoked individually before they expire, so keep the lifetime modest for sensitive hosts. Rotating the provider or clearing `sso_cookie_secret` invalidates every session at once. Group membership is captured at login, so a group change takes effect at the next login (or when the session expires), while the host's allow-lists are re-evaluated on every request.
+
+**Email verification.** A login is refused when the identity provider explicitly marks the address unverified (`email_verified: false`), so an IdP that lets users set their own address cannot be used to claim someone@your-domain and satisfy an allowed-domains rule. Providers that omit the claim are taken at their word.
+
+**Empty policy means any authenticated user.** With no allowed emails, domains or groups, every account the IdP will authenticate gets in. That is fine for a private Keycloak realm and dangerous for a public IdP — set at least a domain or group rule when the provider is not exclusively yours.
+
+**CORS preflights pass the gate.** An `OPTIONS` request carrying `Access-Control-Request-Method` reaches the upstream unauthenticated, by spec: preflights carry no credentials, and gating them breaks every cross-origin app. The real request that follows is gated normally, and identity headers are stripped from the preflight too.
+
+**Admin API.** Failed logins are counted per client IP and the address is locked out after 10 failures in 15 minutes, covering the six-digit TOTP code as well as the password. The admin UI sets `SameSite=Strict` session cookies, applies a same-origin check to cookie-authenticated writes, and serves a strict CSP. Credentials for other systems (the IdP client secret, DNS provider keys) are never returned by the settings API — reads show a mask, and sending the mask back keeps the stored value.
+
+**Never expose the admin port.** Port 81 behind an access list, VPN or firewall, always.

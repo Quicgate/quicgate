@@ -40,6 +40,15 @@ func forwardAuth(fa *store.ForwardAuth, next http.Handler) http.Handler {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The auth server owns these headers on this host: whatever the client
+		// sent under those names is a forgery attempt. Strip them before the
+		// auth subrequest and before the upstream can see them, because the
+		// copy below only overwrites names the auth response actually returns —
+		// a 2xx that omits Remote-User would otherwise let the client's own
+		// value through to an upstream that trusts it.
+		for _, h := range fa.ResponseHeaders {
+			r.Header.Del(h)
+		}
 		areq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, fa.URL, nil)
 		if err != nil {
 			http.Error(w, "auth misconfigured", http.StatusInternalServerError)

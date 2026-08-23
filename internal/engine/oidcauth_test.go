@@ -285,3 +285,42 @@ func TestOIDCMissingProviderFailsClosed(t *testing.T) {
 		t.Fatalf("missing provider: got %d, want 403", rr.Code)
 	}
 }
+
+// A host that gates only part of its paths with SSO must still complete the
+// login: the IdP redirects back to /.qg/oidc/callback, which matches no rule.
+func TestOIDCCallbackReachableWithPathRules(t *testing.T) {
+	e, st := newTestEngine(t)
+	idp := newFakeIdP(t)
+	idp.email = "gijs@example.com"
+	pid := mustCreateOIDCProvider(t, st, idp)
+
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := &store.Host{Type: "proxy", Domains: []string{"part.test"}, Upstream: up}
+	h.Options.OIDC = &store.OIDCAuth{ProviderID: pid}
+	// Everything is public except /admin/, which requires the SSO login.
+	h.Options.AuthRules = []store.AuthRule{
+		{Path: "/", Mode: "public"},
+		{Path: "/admin/", Mode: "oidc"},
+	}
+	mustCreateHost(t, st, h)
+	reload(t, e)
+
+	if rr := req(e, "GET", "part.test", "/", "203.0.113.9", nil); rr.Code != http.StatusOK {
+		t.Fatalf("public root: got %d, want 200", rr.Code)
+	}
+	r1 := req(e, "GET", "part.test", "/admin/panel", "203.0.113.9", nil)
+	if r1.Code != http.StatusFound {
+		t.Fatalf("gated path: got %d, want 302 to the IdP", r1.Code)
+	}
+	loc, _ := url.Parse(r1.Header().Get("Location"))
+	idp.nonce = loc.Query().Get("nonce")
+	// The callback would otherwise be swallowed by the "/" public rule.
+	r2 := req(e, "GET", "part.test", oidcCallbackPath+"?code=c1&state="+loc.Query().Get("state"),
+		"203.0.113.9", map[string]string{"Cookie": cookieHeader(r1)})
+	if r2.Code != http.StatusFound {
+		t.Fatalf("callback: got %d, want 302 (body %q)", r2.Code, r2.Body.String())
+	}
+	if !strings.Contains(cookieHeader(r2), oidcSessionName+"=") {
+		t.Fatal("callback set no session cookie")
+	}
+}
