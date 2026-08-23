@@ -4,6 +4,38 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] - 2026-08-23
+
+### Added
+- **Per-path identity providers.** A `mode: oidc` path rule can now name its
+  own provider and policy instead of inheriting the host's, so one host can
+  gate `/staff` with the company IdP and `/partner` with another, or use a
+  separate app registration per URL on the same IdP. Every provider redirects
+  back to the one callback path; the signed state cookie records which login
+  is in flight, so the gate that started it finishes it.
+- **The admin login can reuse a provider entry.** Settings gains an identity
+  provider picker (`admin_oidc_provider_id`) listing the same providers the
+  hosts use, instead of repeating issuer, client id and secret in its own
+  fields. Those fields remain the fallback, so existing setups are untouched,
+  and the admin allow-list stays separate either way.
+
+### Security
+- **SSO sessions are now bound to the issuing provider.** They were bound to
+  the host only, so once a host could reference two providers, a session
+  obtained from the less trusted one satisfied a path gated by the more
+  trusted one: get an account wherever you can, walk in everywhere. Sessions
+  carry the provider id and a gate accepts only its own. Existing sessions do
+  not carry it and are re-authenticated once.
+- Deleting a provider is refused while a path rule or the admin login still
+  references it, matching the existing check for hosts.
+
+### Fixed
+- The host modal's OIDC provider pickers were empty unless the Access Lists
+  page had been opened first, so saving a host from that state silently
+  dropped the provider it was using. The hosts page loads providers itself.
+
+[1.8.0]: https://github.com/Quicgate/quicgate/releases/tag/v1.8.0
+
 ## [1.7.2] - 2026-08-23
 
 ### Security

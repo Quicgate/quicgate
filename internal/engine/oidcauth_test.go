@@ -324,3 +324,69 @@ func TestOIDCCallbackReachableWithPathRules(t *testing.T) {
 		t.Fatal("callback set no session cookie")
 	}
 }
+
+// One host, two identity providers: /staff logs in against one IdP and
+// /partner against another. Both redirect back to the same callback path, so
+// this also proves the callback reaches the provider that started the login.
+func TestOIDCPerPathProviders(t *testing.T) {
+	e, st := newTestEngine(t)
+	staffIdP := newFakeIdP(t)
+	staffIdP.email = "employee@example.com"
+	partnerIdP := newFakeIdP(t)
+	partnerIdP.email = "contractor@partner.test"
+
+	staffID := mustCreateOIDCProvider(t, st, staffIdP)
+	p := &store.OIDCProvider{Name: "partner-idp", Issuer: partnerIdP.srv.URL, ClientID: "quicgate-test", ClientSecret: "s"}
+	if err := st.CreateOIDCProvider(p); err != nil {
+		t.Fatalf("create partner provider: %v", err)
+	}
+
+	var seen string
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("Remote-User")
+		w.WriteHeader(http.StatusOK)
+	})
+	h := &store.Host{Type: "proxy", Domains: []string{"multi.test"}, Upstream: up}
+	h.Options.OIDC = &store.OIDCAuth{ProviderID: staffID, PassIdentity: true}
+	h.Options.AuthRules = []store.AuthRule{
+		{Path: "/partner/", Mode: "oidc", OIDC: &store.OIDCAuth{ProviderID: p.ID, PassIdentity: true}},
+	}
+	mustCreateHost(t, st, h)
+	reload(t, e)
+
+	// The gated default path goes to the staff IdP...
+	r1 := req(e, "GET", "multi.test", "/staff", "203.0.113.9", nil)
+	if r1.Code != http.StatusFound || !strings.HasPrefix(r1.Header().Get("Location"), staffIdP.srv.URL) {
+		t.Fatalf("/staff went to %q, want the staff IdP", r1.Header().Get("Location"))
+	}
+	// ...and the partner path to the partner IdP.
+	r2 := req(e, "GET", "multi.test", "/partner/x", "203.0.113.9", nil)
+	if r2.Code != http.StatusFound || !strings.HasPrefix(r2.Header().Get("Location"), partnerIdP.srv.URL) {
+		t.Fatalf("/partner/x went to %q, want the partner IdP", r2.Header().Get("Location"))
+	}
+
+	// Finish the partner login. The callback path is not under /partner/, so it
+	// is served by the host's staff gate and must be handed to the partner one.
+	loc, _ := url.Parse(r2.Header().Get("Location"))
+	partnerIdP.nonce = loc.Query().Get("nonce")
+	r3 := req(e, "GET", "multi.test", oidcCallbackPath+"?code=c&state="+loc.Query().Get("state"),
+		"203.0.113.9", map[string]string{"Cookie": cookieHeader(r2)})
+	if r3.Code != http.StatusFound {
+		t.Fatalf("partner callback: got %d, want 302 (body %q)", r3.Code, r3.Body.String())
+	}
+	if got := r3.Header().Get("Location"); got != "/partner/x" {
+		t.Fatalf("partner callback returned to %q, want /partner/x", got)
+	}
+
+	cookie := cookieHeader(r3)
+	if rr := req(e, "GET", "multi.test", "/partner/x", "203.0.113.9", map[string]string{"Cookie": cookie}); rr.Code != http.StatusOK {
+		t.Fatalf("partner path with its session: got %d, want 200", rr.Code)
+	}
+	if seen != "contractor@partner.test" {
+		t.Fatalf("upstream saw %q, want the partner identity", seen)
+	}
+	// The partner session must not unlock the staff-gated part of the host.
+	if rr := req(e, "GET", "multi.test", "/staff", "203.0.113.9", map[string]string{"Cookie": cookie}); rr.Code != http.StatusFound {
+		t.Fatalf("partner session on a staff path: got %d, want a redirect to the staff IdP", rr.Code)
+	}
+}

@@ -288,9 +288,13 @@ $('host-search').addEventListener('input', () => renderHosts());
 let healthMap = {};
 async function refresh() {
   let health;
-  [hosts, accessLists, customCerts, health] = await Promise.all([
+  // Providers load here too: the host modal's OIDC pickers would otherwise be
+  // empty until the Access Lists page had been opened once, and saving a host
+  // from an empty picker drops the provider it was using.
+  [hosts, accessLists, customCerts, health, oidcProviders] = await Promise.all([
     api('GET', '/api/hosts'), api('GET', '/api/access-lists'), api('GET', '/api/custom-certs'),
     api('GET', '/api/health').catch(() => []),
+    api('GET', '/api/oidc-providers').catch(() => []),
   ]);
   healthMap = {};
   for (const t of health) healthMap[t.target] = t.up;
@@ -510,6 +514,8 @@ function addAuthRuleRow(rule) {
       '<option value="oidc">OIDC SSO</option>' +
     '</select>' +
     '<select class="a-acl" style="flex:1" hidden></select>' +
+    '<select class="a-prov" style="flex:0 0 150px" hidden title="Which identity provider gates this path"></select>' +
+    '<input class="a-groups mono" style="flex:1" hidden placeholder="allowed groups (optional)" title="Comma-separated. Empty = any user this provider authenticates.">' +
     '<span class="r-methods" title="Click the verbs this rule applies to. None selected = all methods.">' + chips + '</span>' +
     '<button type="button" class="btn btn--ghost btn--sm a-del">&times;</button>';
   const mode = row.querySelector('.a-mode');
@@ -520,7 +526,26 @@ function addAuthRuleRow(rule) {
     opt.textContent = a.name;
     acl.appendChild(opt);
   }
-  const syncMode = () => { acl.hidden = mode.value !== 'accessList'; };
+  const prov = row.querySelector('.a-prov');
+  const groups = row.querySelector('.a-groups');
+  const hostOpt = document.createElement('option');
+  hostOpt.value = '';
+  hostOpt.textContent = "host's provider";
+  prov.appendChild(hostOpt);
+  for (const pv of oidcProviders) {
+    const opt = document.createElement('option');
+    opt.value = String(pv.id);
+    opt.textContent = pv.name;
+    prov.appendChild(opt);
+  }
+  const syncMode = () => {
+    acl.hidden = mode.value !== 'accessList';
+    prov.hidden = mode.value !== 'oidc';
+    // Per-rule policy only applies when the rule has its own provider; with
+    // the host's provider it also keeps the host's allow-lists.
+    groups.hidden = mode.value !== 'oidc' || !prov.value;
+  };
+  prov.addEventListener('change', syncMode);
   mode.addEventListener('change', syncMode);
   const toggle = (ch) => ch.classList.toggle('on');
   row.querySelectorAll('.mchip').forEach((ch) => {
@@ -532,6 +557,10 @@ function addAuthRuleRow(rule) {
     row.querySelector('.a-match').value = rule.exact ? 'exact' : 'prefix';
     mode.value = rule.mode || 'public';
     if (rule.accessListId) acl.value = String(rule.accessListId);
+    if (rule.oidc) {
+      prov.value = String(rule.oidc.providerId);
+      groups.value = (rule.oidc.allowedGroups || []).join(', ');
+    }
     for (const m of rule.methods || []) {
       const c = row.querySelector(`.mchip[data-m="${m}"]`);
       if (c) c.classList.add('on');
@@ -554,6 +583,16 @@ function readAuthRules() {
       const id = row.querySelector('.a-acl').value;
       if (!id) continue;
       rule.accessListId = parseInt(id, 10);
+    }
+    if (rule.mode === 'oidc') {
+      const pid = row.querySelector('.a-prov').value;
+      if (pid) {
+        rule.oidc = {
+          providerId: parseInt(pid, 10),
+          allowedGroups: row.querySelector('.a-groups').value.split(',').map((s) => s.trim()).filter(Boolean),
+          passIdentity: true,
+        };
+      }
     }
     const methods = [...row.querySelectorAll('.r-methods .mchip.on')].map((c) => c.dataset.m);
     if (methods.length) rule.methods = methods;
@@ -1707,6 +1746,8 @@ $('geoip-test-btn').addEventListener('click', async () => {
 
 async function loadSettings() {
   refreshGeoIP();
+  // The admin-login provider picker lists the same providers as the hosts use.
+  oidcProviders = await api('GET', '/api/oidc-providers').catch(() => oidcProviders);
   const s = await api('GET', '/api/settings');
   $('set-acme-email').value = s.acme_email || '';
   $('set-acme-staging').checked = s.acme_staging === '1';
@@ -1721,6 +1762,19 @@ async function loadSettings() {
   $('set-ban-window').value = s.ban_window_sec || '';
   $('set-ban-duration').value = s.ban_duration_sec || '';
   $('set-oidc-enabled').checked = s.oidc_enabled === '1';
+  const adminProv = $('set-oidc-provider');
+  adminProv.innerHTML = '';
+  const inlineOpt = document.createElement('option');
+  inlineOpt.value = '';
+  inlineOpt.textContent = 'use the fields below';
+  adminProv.appendChild(inlineOpt);
+  for (const pv of oidcProviders) {
+    const opt = document.createElement('option');
+    opt.value = String(pv.id);
+    opt.textContent = pv.name;
+    adminProv.appendChild(opt);
+  }
+  adminProv.value = s.admin_oidc_provider_id || '';
   $('set-oidc-issuer').value = s.oidc_issuer || '';
   $('set-oidc-client-id').value = s.oidc_client_id || '';
   $('set-oidc-client-secret').value = s.oidc_client_secret || '';
@@ -1741,6 +1795,7 @@ $('oidc-form').addEventListener('submit', async (e) => {
   try {
     await api('PUT', '/api/settings', {
       oidc_enabled: $('set-oidc-enabled').checked ? '1' : '0',
+      admin_oidc_provider_id: $('set-oidc-provider').value,
       oidc_issuer: $('set-oidc-issuer').value.trim(),
       oidc_client_id: $('set-oidc-client-id').value.trim(),
       oidc_client_secret: $('set-oidc-client-secret').value,

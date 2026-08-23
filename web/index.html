@@ -276,6 +276,8 @@
         <p class="hs-muted">Additive: password login always keeps working, so a misconfigured IdP cannot lock you out.</p>
         <form id="oidc-form">
           <label class="check"><input type="checkbox" id="set-oidc-enabled"><span>Enable OIDC login</span></label>
+          <label class="field"><span>Identity provider <em>(reuse one from Access Lists, or fill the fields below)</em></span>
+            <select id="set-oidc-provider"></select></label>
           <label class="field"><span>Issuer URL</span><input id="set-oidc-issuer" type="url" class="mono" placeholder="https://auth.example.com/application/o/quicgate/"></label>
           <div class="field-row">
             <label class="field"><span>Client ID</span><input id="set-oidc-client-id" class="mono"></label>

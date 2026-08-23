@@ -60,7 +60,12 @@ type AuthRule struct {
 	Exact        bool     `json:"exact,omitempty"`        // match this exact path only
 	Mode         string   `json:"mode"`                   // public | accessList | forwardAuth | oidc
 	AccessListID *int64   `json:"accessListId,omitempty"` // required when mode=accessList
-	Methods      []string `json:"methods,omitempty"`      // empty = every method
+	// OIDC, when set on a mode=oidc rule, gates this path with its own
+	// identity provider and policy instead of the host's. That is how one host
+	// can put staff behind the work IdP and a partner endpoint behind another,
+	// or use a separate app registration per URL on the same IdP.
+	OIDC    *OIDCAuth `json:"oidc,omitempty"`
+	Methods []string  `json:"methods,omitempty"` // empty = every method
 }
 
 // ClientCert configures mutual TLS for a host.
@@ -424,17 +429,24 @@ func (o *Options) validateAuthRules() error {
 		switch r.Mode {
 		case "public":
 			r.AccessListID = nil
+			r.OIDC = nil
 		case "forwardAuth":
 			r.AccessListID = nil
+			r.OIDC = nil
 			if o.ForwardAuth == nil || strings.TrimSpace(o.ForwardAuth.URL) == "" {
 				return fmt.Errorf("auth rule %d: mode forwardAuth needs forward authentication configured on this host", i+1)
 			}
 		case "oidc":
 			r.AccessListID = nil
-			if o.OIDC == nil {
-				return fmt.Errorf("auth rule %d: mode oidc needs OIDC SSO configured on this host", i+1)
+			if r.OIDC != nil {
+				if err := r.OIDC.validate(); err != nil {
+					return fmt.Errorf("auth rule %d: %w", i+1, err)
+				}
+			} else if o.OIDC == nil {
+				return fmt.Errorf("auth rule %d: mode oidc needs an identity provider on the rule or OIDC SSO on this host", i+1)
 			}
 		case "accessList":
+			r.OIDC = nil
 			if r.AccessListID == nil {
 				return fmt.Errorf("auth rule %d: mode accessList needs an access list", i+1)
 			}

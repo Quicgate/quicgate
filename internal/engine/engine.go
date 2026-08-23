@@ -516,15 +516,33 @@ func newUpstreamTransport(h store.Host) *http.Transport {
 // buildRoute compiles one host's typed options into a ready http.Handler chain.
 func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*compiledAccess, oidcProv map[int64]store.OIDCProvider) *route {
 	o := h.Options
+	// One gate per identity provider this host uses: the host default plus any
+	// named by a path rule. They share a siblings map so the single callback
+	// path can be finished by whichever provider started the login.
+	siblings := map[int64]*oidcGate{}
+	newGate := func(auth store.OIDCAuth) *oidcGate {
+		if g, ok := siblings[auth.ProviderID]; ok {
+			return g
+		}
+		g := e.newOIDCGate(auth, oidcProv)
+		g.siblings = siblings
+		siblings[auth.ProviderID] = g
+		return g
+	}
 	var sso *oidcGate
 	if o.OIDC != nil {
-		sso = e.newOIDCGate(*o.OIDC, oidcProv)
+		sso = newGate(*o.OIDC)
+	}
+	for _, r := range o.AuthRules {
+		if r.Mode == "oidc" && r.OIDC != nil {
+			newGate(*r.OIDC)
+		}
 	}
 
 	// Maintenance mode short-circuits every request to a 503 page, whatever the
 	// host type. Access lists and rate limits still apply (via wrapCommon).
 	if o.Maintenance {
-		return &route{host: h, proxy: wrapCommon(maintenanceHandler(o.MaintenanceHTML), o, acl, acls, sso)}
+		return &route{host: h, proxy: wrapCommon(maintenanceHandler(o.MaintenanceHTML), o, acl, acls, sso, newGate)}
 	}
 
 	// Non-proxy hosts skip the proxy machinery entirely, but still get the
@@ -535,12 +553,12 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 		if h.Redirect != nil {
 			handler = buildRedirectHandler(*h.Redirect)
 		}
-		return &route{host: h, proxy: wrapCommon(handler, o, acl, acls, sso)}
+		return &route{host: h, proxy: wrapCommon(handler, o, acl, acls, sso, newGate)}
 	case "dead":
-		return &route{host: h, proxy: wrapCommon(deadHandler(), o, acl, acls, sso)}
+		return &route{host: h, proxy: wrapCommon(deadHandler(), o, acl, acls, sso, newGate)}
 	case "static":
 		fs := http.FileServer(http.Dir(h.StaticRoot))
-		return &route{host: h, proxy: wrapCommon(fs, o, acl, acls, sso)}
+		return &route{host: h, proxy: wrapCommon(fs, o, acl, acls, sso, newGate)}
 	}
 
 	// Build the balancer target list: primary plus any pool members.
@@ -642,7 +660,7 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 			inner.ServeHTTP(w, r)
 		})
 	}
-	handler = wrapCommon(handler, o, acl, acls, sso)
+	handler = wrapCommon(handler, o, acl, acls, sso, newGate)
 	return &route{host: h, proxy: handler}
 }
 
@@ -718,7 +736,7 @@ func maintenanceHandler(customHTML string) http.Handler {
 // A host with OIDC configured additionally strips the Remote-* identity
 // headers from every inbound request, public paths included, so an upstream
 // that trusts them can never be fed a spoofed value through quicgate.
-func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess, acls map[int64]*compiledAccess, sso *oidcGate) http.Handler {
+func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess, acls map[int64]*compiledAccess, sso *oidcGate, newGate func(store.OIDCAuth) *oidcGate) http.Handler {
 	if o.BlockExploits {
 		handler = blockExploits(handler)
 	}
@@ -742,7 +760,7 @@ func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess, acls
 	}
 	out := hostGate(handler)
 	if len(o.AuthRules) > 0 {
-		out = buildPathAuth(o.AuthRules, o, acls, sso, handler, out)
+		out = buildPathAuth(o.AuthRules, o, acls, sso, newGate, handler, out)
 	}
 	// The strip sits OUTSIDE every gate: inbound spoofed values are removed
 	// before any chain runs, and the gate's own injection happens after.
