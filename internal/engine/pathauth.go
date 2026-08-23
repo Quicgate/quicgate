@@ -57,7 +57,7 @@ func (p *pathAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // A rule naming an access list that no longer exists falls back to the host's
 // own gate rather than becoming public: a dangling reference must never open a
 // path up. The admin API rejects such a reference on write as well.
-func buildPathAuth(rules []store.AuthRule, o store.Options, acls map[int64]*compiledAccess, inner, fallback http.Handler) http.Handler {
+func buildPathAuth(rules []store.AuthRule, o store.Options, acls map[int64]*compiledAccess, sso *oidcGate, inner, fallback http.Handler) http.Handler {
 	gates := make([]pathGate, 0, len(rules))
 	for _, r := range rules {
 		g := pathGate{path: r.Path, exact: r.Exact}
@@ -76,6 +76,12 @@ func buildPathAuth(rules []store.AuthRule, o store.Options, acls map[int64]*comp
 				break
 			}
 			g.handler = forwardAuth(o.ForwardAuth, inner)
+		case "oidc":
+			if sso == nil {
+				g.handler = fallback
+				break
+			}
+			g.handler = sso.wrap(inner)
 		case "accessList":
 			acl := (*compiledAccess)(nil)
 			if r.AccessListID != nil {

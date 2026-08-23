@@ -5,6 +5,7 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': 
 const views = ['view-login', 'view-password', 'view-app'];
 let hosts = [];
 let accessLists = [];
+let oidcProviders = [];
 let customCerts = [];
 let editingId = null;
 let editingAclId = null;
@@ -450,6 +451,7 @@ function addAuthRuleRow(rule) {
       '<option value="public">Public</option>' +
       '<option value="accessList">Access list</option>' +
       '<option value="forwardAuth">Forward auth</option>' +
+      '<option value="oidc">OIDC SSO</option>' +
     '</select>' +
     '<select class="a-acl" style="flex:1" hidden></select>' +
     '<span class="r-methods" title="Click the verbs this rule applies to. None selected = all methods.">' + chips + '</span>' +
@@ -564,6 +566,7 @@ function syncCertMode() {
 $('f-certmode').addEventListener('change', syncCertMode);
 $('f-mtls-mode').addEventListener('change', () => { $('f-mtls-ca-field').hidden = !$('f-mtls-mode').value; });
 $('f-maintenance').addEventListener('change', () => { $('f-maintenance-html-field').hidden = !$('f-maintenance').checked; });
+$('f-oidc').addEventListener('change', () => { $('f-oidc-fields').hidden = !$('f-oidc').checked; });
 
 function openModal(h) {
   editingId = h ? h.id : null;
@@ -634,6 +637,25 @@ function openModal(h) {
   $('f-fauth-url').value = fa.url || '';
   $('f-fauth-headers').value = (fa.responseHeaders || []).join(',');
   $('f-fauth-skipverify').checked = !!fa.skipTlsVerify;
+  const oi = o.oidc || {};
+  $('f-oidc').checked = !!o.oidc;
+  $('f-oidc-fields').hidden = !o.oidc;
+  const provSel = $('f-oidc-provider');
+  provSel.innerHTML = '';
+  for (const pv of oidcProviders) {
+    const opt = document.createElement('option');
+    opt.value = String(pv.id);
+    opt.textContent = pv.name;
+    provSel.appendChild(opt);
+  }
+  if (oi.providerId) provSel.value = String(oi.providerId);
+  $('f-oidc-warn').hidden = oidcProviders.length > 0;
+  $('f-oidc-pass').checked = o.oidc ? !!oi.passIdentity : true;
+  $('f-oidc-emails').value = (oi.allowedEmails || []).join(', ');
+  $('f-oidc-domains').value = (oi.allowedDomains || []).join(', ');
+  $('f-oidc-groups').value = (oi.allowedGroups || []).join(', ');
+  const firstDomain = (h && h.domains && h.domains[0]) || '<host>';
+  $('f-oidc-redirect-hint').textContent = `https://${firstDomain.replace('*.', 'www.')}/.qg/oidc/callback`;
   $('f-auth-rules').innerHTML = '';
   for (const r of o.authRules || []) addAuthRuleRow(r);
   const cc = o.clientCert || {};
@@ -732,6 +754,15 @@ $('host-form').addEventListener('submit', async (e) => {
             skipTlsVerify: $('f-fauth-skipverify').checked,
           }
         : null,
+      oidc: type === 'proxy' && $('f-oidc').checked && $('f-oidc-provider').value
+        ? {
+            providerId: parseInt($('f-oidc-provider').value, 10),
+            allowedEmails: $('f-oidc-emails').value.split(',').map((s) => s.trim()).filter(Boolean),
+            allowedDomains: $('f-oidc-domains').value.split(',').map((s) => s.trim()).filter(Boolean),
+            allowedGroups: $('f-oidc-groups').value.split(',').map((s) => s.trim()).filter(Boolean),
+            passIdentity: $('f-oidc-pass').checked,
+          }
+        : null,
       authRules: type === 'proxy' ? readAuthRules() : [],
       clientCert: $('f-mtls-mode').value
         ? { mode: $('f-mtls-mode').value, caPem: $('f-mtls-ca').value }
@@ -760,7 +791,10 @@ $('host-form').addEventListener('submit', async (e) => {
 
 /* ---- access lists page ---- */
 async function refreshAcls() {
-  accessLists = await api('GET', '/api/access-lists');
+  [accessLists, oidcProviders] = await Promise.all([
+    api('GET', '/api/access-lists'), api('GET', '/api/oidc-providers').catch(() => []),
+  ]);
+  renderIdps();
   const body = $('acl-body');
   body.innerHTML = '';
   $('acl-empty').hidden = accessLists.length > 0;
@@ -952,6 +986,91 @@ $('acl-form').addEventListener('submit', async (e) => {
     refreshAcls();
   } catch (err) {
     setError('acl-error', err);
+  }
+});
+
+/* ---- identity providers (OIDC) ---- */
+function renderIdps() {
+  const body = $('idp-body');
+  body.innerHTML = '';
+  $('idp-empty').hidden = oidcProviders.length > 0;
+  for (const p of oidcProviders) {
+    const tr = document.createElement('tr');
+    const tdName = document.createElement('td');
+    tdName.textContent = p.name;
+    const tdIssuer = document.createElement('td');
+    tdIssuer.className = 'domain';
+    tdIssuer.textContent = p.issuer;
+    const tdClient = document.createElement('td');
+    tdClient.className = 'domain';
+    tdClient.textContent = p.clientId;
+    const tdSession = document.createElement('td');
+    tdSession.innerHTML = `<span class="badge">${p.sessionHours || 12}h</span>`;
+    const tdActions = document.createElement('td');
+    tdActions.style.textAlign = 'right';
+    const btnEdit = document.createElement('button');
+    btnEdit.className = 'btn btn--secondary btn--sm';
+    btnEdit.textContent = 'Edit';
+    btnEdit.addEventListener('click', () => openIdpModal(p));
+    const btnDel = document.createElement('button');
+    btnDel.className = 'btn btn--danger btn--sm';
+    btnDel.textContent = 'Delete';
+    btnDel.style.marginLeft = '8px';
+    btnDel.addEventListener('click', async () => {
+      if (!confirm(`Delete identity provider "${p.name}"?`)) return;
+      try {
+        await api('DELETE', `/api/oidc-providers/${p.id}`);
+        refreshAcls();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+    tdActions.append(btnEdit, btnDel);
+    tr.append(tdName, tdIssuer, tdClient, tdSession, tdActions);
+    body.appendChild(tr);
+  }
+}
+
+let editingIdpId = null;
+function openIdpModal(p) {
+  editingIdpId = p ? p.id : null;
+  $('idp-modal-title').textContent = p ? 'Edit identity provider' : 'Add identity provider';
+  setError('idp-error', null);
+  $('i-name').value = p ? p.name : '';
+  $('i-issuer').value = p ? p.issuer : '';
+  $('i-client').value = p ? p.clientId : '';
+  $('i-secret').value = '';
+  $('i-groups-claim').value = p ? (p.groupsClaim || '') : '';
+  $('i-session').value = p ? (p.sessionHours || '') : '';
+  $('i-skipverify').checked = p ? !!p.skipTlsVerify : false;
+  $('i-scopes').value = p && p.scopes ? p.scopes.join(', ') : '';
+  $('idp-modal').hidden = false;
+}
+$('btn-add-idp').addEventListener('click', () => openIdpModal(null));
+$('idp-modal-close').addEventListener('click', () => { $('idp-modal').hidden = true; });
+$('idp-btn-cancel').addEventListener('click', () => { $('idp-modal').hidden = true; });
+
+$('idp-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  setError('idp-error', null);
+  const p = {
+    name: $('i-name').value.trim(),
+    issuer: $('i-issuer').value.trim(),
+    clientId: $('i-client').value.trim(),
+    clientSecret: $('i-secret').value,
+    groupsClaim: $('i-groups-claim').value.trim(),
+    skipTlsVerify: $('i-skipverify').checked,
+    scopes: $('i-scopes').value.split(',').map((s) => s.trim()).filter(Boolean),
+  };
+  const hours = parseInt($('i-session').value, 10);
+  if (hours > 0) p.sessionHours = hours;
+  try {
+    if (editingIdpId) await api('PUT', `/api/oidc-providers/${editingIdpId}`, p);
+    else await api('POST', '/api/oidc-providers', p);
+    $('idp-modal').hidden = true;
+    refreshAcls();
+  } catch (err) {
+    setError('idp-error', err);
   }
 });
 

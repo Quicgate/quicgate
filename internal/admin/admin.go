@@ -104,6 +104,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/access-lists", s.auth(s.handleCreateAccessList))
 	mux.HandleFunc("PUT /api/access-lists/{id}", s.auth(s.handleUpdateAccessList))
 	mux.HandleFunc("DELETE /api/access-lists/{id}", s.auth(s.handleDeleteAccessList))
+	mux.HandleFunc("GET /api/oidc-providers", s.auth(s.handleListOIDCProviders))
+	mux.HandleFunc("POST /api/oidc-providers", s.auth(s.handleCreateOIDCProvider))
+	mux.HandleFunc("PUT /api/oidc-providers/{id}", s.auth(s.handleUpdateOIDCProvider))
+	mux.HandleFunc("DELETE /api/oidc-providers/{id}", s.auth(s.handleDeleteOIDCProvider))
 	mux.HandleFunc("GET /api/settings", s.auth(s.handleGetSettings))
 	mux.HandleFunc("PUT /api/settings", s.auth(s.handlePutSettings))
 	mux.HandleFunc("GET /api/backup", s.auth(s.handleBackup))
@@ -851,14 +855,19 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, hosts)
 }
 
-// hostACLRefs checks every access list a host points at, including the ones
-// named by path-scoped auth rules.
+// hostACLRefs checks every reference a host makes to another object: its
+// access lists (host-level and per path rule) and its OIDC provider.
 func (s *Server) hostACLRefs(h store.Host) error {
 	if err := s.aclExists(h.AccessListID); err != nil {
 		return err
 	}
 	for _, r := range h.Options.AuthRules {
 		if err := s.aclExists(r.AccessListID); err != nil {
+			return err
+		}
+	}
+	if h.Options.OIDC != nil {
+		if err := s.oidcProviderExists(h.Options.OIDC.ProviderID); err != nil {
 			return err
 		}
 	}

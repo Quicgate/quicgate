@@ -52,7 +52,7 @@ Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (a passwo
 
 - **Hosts**: proxy, redirection (301/302/307/308), 404, and static-file hosts. Wildcard domains. Load-balanced upstream pools with active health checks and **cookie sticky sessions**, with backend health shown inline in the hosts table. Custom locations (path prefix to a different upstream), path rewrites (strip/add prefix, RE2 regex). Per-host **maintenance mode** (503 page) and **response caching**.
 - **TLS**: automatic Let's Encrypt (HTTP-01), DNS-01 wildcards, custom cert upload, self-signed generation, custom ACME CAs (ZeroSSL, step-ca), mTLS client certificates, per-host minimum TLS version, HSTS, hardened AEAD-only cipher defaults.
-- **Security**: access lists (ordered CIDR / dynamic-DNS hostname / GeoIP-country rules + basic auth, satisfy any/all), forward-auth (Authelia / Authentik / Keycloak), per-IP rate limiting, block-common-exploits, bad-bot blocking, fail2ban-style auto-ban, search-engine noindex. **Path authentication**: per-URL overrides of the host's gate (longest match wins), so a licensing callback or webhook stays reachable without credentials while the rest of the host is behind an access list or SSO. **Real client IP** behind a trusted proxy (Cloudflare / another LB), so IP rules, GeoIP and rate limits still work.
+- **Security**: access lists (ordered CIDR / dynamic-DNS hostname / GeoIP-country rules + basic auth, satisfy any/all), **built-in OIDC SSO** (quicgate runs the OpenID Connect login itself against Keycloak / Entra ID / Authentik — per-host allowed emails/domains/groups, identity passed upstream as `Remote-User`, no Authelia sidecar needed), forward-auth (Authelia / Authentik / Keycloak), per-IP rate limiting, block-common-exploits, bad-bot blocking, fail2ban-style auto-ban, search-engine noindex. **Path authentication**: per-URL overrides of the host's gate (longest match wins), so a licensing callback or webhook stays reachable without credentials while the rest of the host is behind an access list or SSO. **Real client IP** behind a trusted proxy (Cloudflare / another LB), so IP rules, GeoIP and rate limits still work.
 - **Streams (TCP/UDP)**: L4 port forwards with source whitelists, PROXY protocol v1/v2 (send and accept), TLS termination, SNI-based passthrough routing, port ranges. Plus pure router port-forwards managed over **UPnP IGD** (quicgate keeps your router's forwards in sync, self-healing after reboots).
 - **Dual-stack IPv4/IPv6**: listeners accept IPv6 clients out of the box, upstreams and stream targets can be IPv6 literals or AAAA hostnames, and access lists and trusted-proxy lists take IPv6 CIDRs (a bare address is treated as `/128`). Per-IP rate limiting, auto-ban and GeoIP country lookup all handle IPv6 clients the same as IPv4.
 - **Docker labels**: opt a container in with `quicgate.enable=true` and quicgate derives its host (and TCP/UDP streams) from labels automatically — Traefik's provider idea without the router/service/middleware label soup. Reuses named access lists, works with a host-networked quicgate, and every derived route is visible (with the reason it is or isn't routing) on the Docker page. See [Docker labels](#docker-labels-config-from-containers).
@@ -71,7 +71,7 @@ Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (a passwo
 | ACME | HTTP-01, DNS-01 wildcards, custom CAs | certbot (many DNS plugins) | Let's Encrypt |
 | TCP/UDP streams | yes + PROXY protocol + SNI routing + TLS termination | yes (basic) | via tunnels |
 | WireGuard tunnels to remote sites | no | no | **yes (newt/olm), Pangolin's killer feature** |
-| Identity-aware SSO on resources | forward-auth (Authelia etc.) | no | **built-in IdP/SSO** |
+| Identity-aware SSO on resources | **built-in OIDC SSO** + forward-auth | no | **built-in IdP/SSO** |
 | Access lists (IP/CIDR) | yes + **GeoIP country + dynamic-DNS rules** | yes | yes |
 | Auto-ban / abuse | built-in fail2ban-style + JSON logs for CrowdSec | no | CrowdSec integration |
 | Router integration | **UPnP port-forward management** | no | no |
@@ -82,7 +82,7 @@ Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (a passwo
 | Backup | one-click full backup/restore + JSON import | manual volume copy | manual |
 | Maturity | **young, read the caveats** | battle-tested, huge community | growing fast |
 
-**Choose NPM** if you want the most battle-tested option with years of community answers. **Choose Pangolin** if you need WireGuard tunnels to expose services on remote machines or built-in SSO in front of every resource. **Choose quicgate** if you want one small container that replaces the whole stack with a modern engine — this repo runs my entire homelab ingress (~50 hosts) as its production deployment.
+**Choose NPM** if you want the most battle-tested option with years of community answers. **Choose Pangolin** if you need WireGuard tunnels to expose services on remote machines. **Choose quicgate** if you want one small container that replaces the whole stack with a modern engine — this repo runs my entire homelab ingress (~50 hosts) as its production deployment.
 
 ### Honest caveats
 

@@ -7,10 +7,27 @@ All notable changes to quicgate are documented here. The format follows
 ## [1.7.0] - 2026-08-23
 
 ### Added
+- **Built-in OIDC SSO.** A proxy host can now require an OpenID Connect login
+  served by quicgate itself, replacing the Pomerium/Authelia/oauth2-proxy
+  sidecar for the common case. Identity providers (Keycloak, Entra ID,
+  Authentik, any spec-compliant IdP) are defined once under **Access Lists ->
+  Identity providers** and referenced per host; quicgate runs the auth-code
+  flow with PKCE and a nonce, keeps a stateless HMAC-signed session cookie
+  that is bound to the exact host it was minted for, and enforces a per-host
+  policy of allowed emails, domains and/or groups (from a configurable groups
+  claim). The identity can be passed upstream as `Remote-User` /
+  `Remote-Email` / `Remote-Groups`; inbound copies of those headers are
+  always stripped, on public paths too, so they can never be spoofed through
+  quicgate. Gated hosts reserve `/.qg/oidc/callback` (the redirect URI to
+  register at the IdP) and `/.qg/oidc/logout`. IdP discovery is lazy and
+  cached, so config reloads never block on the IdP, and a host whose
+  provider was deleted fails closed with 403. Providers are managed via
+  `/api/oidc-providers` (client secret masked in responses; an empty secret
+  on update keeps the stored one) and included in backups.
 - **Path authentication.** A proxy host's access list and forward auth used to
   gate the whole host; they can now be overridden per URL. Each rule is a path
-  (prefix or exact), a mode (`public`, a named access list, or the host's
-  forward auth) and optional HTTP verbs, and the longest matching path wins.
+  (prefix or exact), a mode (`public`, a named access list, the host's
+  forward auth, or the host's OIDC SSO) and optional HTTP verbs, and the longest matching path wins.
   Anything matching no rule keeps the host's own gate. This covers the case a
   reverse proxy in front of SSO always runs into: a licensing callback, webhook
   receiver or health probe that has to answer without credentials while the

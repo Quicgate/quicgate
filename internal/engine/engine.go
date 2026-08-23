@@ -117,6 +117,9 @@ type Engine struct {
 	dockerHosts   atomic.Pointer[[]store.Host]   // in-memory hosts from the Docker label provider
 	dockerStreams atomic.Pointer[[]store.Stream] // in-memory L4 streams from the Docker label provider
 	realIP        atomic.Pointer[realIPConfig]   // compiled trusted-proxy / real-client-IP config
+	oidcProviders sync.Map                       // issuer -> *discoveredProvider (lazy IdP discovery)
+	oidcSecretMu  sync.Mutex
+	oidcSecretKey []byte // HMAC key for SSO session cookies, persisted in settings
 }
 
 // SetDockerRoutes replaces the hosts and streams derived from Docker labels and
@@ -249,6 +252,14 @@ func (e *Engine) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	oidcList, err := e.store.ListOIDCProviders()
+	if err != nil {
+		return err
+	}
+	oidcProv := map[int64]store.OIDCProvider{}
+	for _, p := range oidcList {
+		oidcProv[p.ID] = p
+	}
 	e.loadCustomCerts(hosts)
 	t := &routingTable{exact: map[string]*route{}, wildcard: map[string]*route{}}
 	healthTargets := map[string]struct{ scheme, hostport string }{}
@@ -266,7 +277,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 		if h.AccessListID != nil {
 			acl = access[*h.AccessListID]
 		}
-		r := e.buildRoute(h, acl, access)
+		r := e.buildRoute(h, acl, access, oidcProv)
 		placed := false
 		for _, d := range h.Domains {
 			if strings.HasPrefix(d, "*.") {
@@ -503,13 +514,17 @@ func newUpstreamTransport(h store.Host) *http.Transport {
 }
 
 // buildRoute compiles one host's typed options into a ready http.Handler chain.
-func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*compiledAccess) *route {
+func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*compiledAccess, oidcProv map[int64]store.OIDCProvider) *route {
 	o := h.Options
+	var sso *oidcGate
+	if o.OIDC != nil {
+		sso = e.newOIDCGate(*o.OIDC, oidcProv)
+	}
 
 	// Maintenance mode short-circuits every request to a 503 page, whatever the
 	// host type. Access lists and rate limits still apply (via wrapCommon).
 	if o.Maintenance {
-		return &route{host: h, proxy: wrapCommon(maintenanceHandler(o.MaintenanceHTML), o, acl, acls)}
+		return &route{host: h, proxy: wrapCommon(maintenanceHandler(o.MaintenanceHTML), o, acl, acls, sso)}
 	}
 
 	// Non-proxy hosts skip the proxy machinery entirely, but still get the
@@ -520,12 +535,12 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 		if h.Redirect != nil {
 			handler = buildRedirectHandler(*h.Redirect)
 		}
-		return &route{host: h, proxy: wrapCommon(handler, o, acl, acls)}
+		return &route{host: h, proxy: wrapCommon(handler, o, acl, acls, sso)}
 	case "dead":
-		return &route{host: h, proxy: wrapCommon(deadHandler(), o, acl, acls)}
+		return &route{host: h, proxy: wrapCommon(deadHandler(), o, acl, acls, sso)}
 	case "static":
 		fs := http.FileServer(http.Dir(h.StaticRoot))
-		return &route{host: h, proxy: wrapCommon(fs, o, acl, acls)}
+		return &route{host: h, proxy: wrapCommon(fs, o, acl, acls, sso)}
 	}
 
 	// Build the balancer target list: primary plus any pool members.
@@ -627,7 +642,7 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 			inner.ServeHTTP(w, r)
 		})
 	}
-	handler = wrapCommon(handler, o, acl, acls)
+	handler = wrapCommon(handler, o, acl, acls, sso)
 	return &route{host: h, proxy: handler}
 }
 
@@ -697,11 +712,13 @@ func maintenanceHandler(customHTML string) http.Handler {
 }
 
 // wrapCommon applies the middleware shared by every host type, outermost
-// first: access list -> forward-auth -> rate limit -> bots -> exploit filter.
-// With path-scoped auth rules configured, the access list and forward-auth
-// layers become per-path (see pathauth.go); everything below them stays
-// host-wide.
-func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess, acls map[int64]*compiledAccess) http.Handler {
+// first: access list -> forward-auth -> OIDC SSO -> rate limit -> bots ->
+// exploit filter. With path-scoped auth rules configured, the auth layers
+// become per-path (see pathauth.go); everything below them stays host-wide.
+// A host with OIDC configured additionally strips the Remote-* identity
+// headers from every inbound request, public paths included, so an upstream
+// that trusts them can never be fed a spoofed value through quicgate.
+func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess, acls map[int64]*compiledAccess, sso *oidcGate) http.Handler {
 	if o.BlockExploits {
 		handler = blockExploits(handler)
 	}
@@ -712,6 +729,9 @@ func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess, acls
 		handler = newRateLimiter(o.RateLimit).wrap(handler)
 	}
 	hostGate := func(h http.Handler) http.Handler {
+		if sso != nil {
+			h = sso.wrap(h)
+		}
 		if o.ForwardAuth != nil && o.ForwardAuth.URL != "" {
 			h = forwardAuth(o.ForwardAuth, h)
 		}
@@ -720,10 +740,16 @@ func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess, acls
 		}
 		return h
 	}
+	out := hostGate(handler)
 	if len(o.AuthRules) > 0 {
-		return buildPathAuth(o.AuthRules, o, acls, handler, hostGate(handler))
+		out = buildPathAuth(o.AuthRules, o, acls, sso, handler, out)
 	}
-	return hostGate(handler)
+	// The strip sits OUTSIDE every gate: inbound spoofed values are removed
+	// before any chain runs, and the gate's own injection happens after.
+	if sso != nil {
+		out = stripIdentityHeaders(out)
+	}
+	return out
 }
 
 // badGatewayHandler renders the upstream-down page, using a per-host custom
