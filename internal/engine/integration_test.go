@@ -468,3 +468,103 @@ func TestIPv6AccessList(t *testing.T) {
 		t.Errorf("out-of-range IPv6 client: got %d, want 403", code)
 	}
 }
+
+// --- path-scoped authentication ---
+
+// A host gated by an access list can still expose individual paths without
+// credentials, which is what a licensing callback or webhook needs.
+func TestPathAuthPublicCarveOut(t *testing.T) {
+	e, st := newTestEngine(t)
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
+	id := mustCreateACL(t, st, &store.AccessList{Name: "staff", Satisfy: "all",
+		Rules: []store.AccessRule{{Action: "allow", CIDR: "10.0.0.0/8"}}})
+	h := &store.Host{Type: "proxy", Domains: []string{"pa.test"}, Upstream: up, AccessListID: &id}
+	h.Options.AuthRules = []store.AuthRule{
+		{Path: "/validate.asmx", Exact: true, Mode: "public"},
+		{Path: "/public/", Mode: "public"},
+	}
+	mustCreateHost(t, st, h)
+	reload(t, e)
+
+	outside := "203.0.113.9"
+	if rr := req(e, "GET", "pa.test", "/validate.asmx", outside, nil); rr.Code != http.StatusOK {
+		t.Fatalf("exact public path: got %d, want 200", rr.Code)
+	}
+	if rr := req(e, "GET", "pa.test", "/public/x/y", outside, nil); rr.Code != http.StatusOK {
+		t.Fatalf("public prefix: got %d, want 200", rr.Code)
+	}
+	if rr := req(e, "GET", "pa.test", "/", outside, nil); rr.Code != http.StatusForbidden {
+		t.Fatalf("unmatched path from outside: got %d, want 403", rr.Code)
+	}
+	// An exact rule must not open the whole subtree below it.
+	if rr := req(e, "GET", "pa.test", "/validate.asmx/extra", outside, nil); rr.Code != http.StatusForbidden {
+		t.Fatalf("path below an exact rule: got %d, want 403", rr.Code)
+	}
+	if rr := req(e, "GET", "pa.test", "/", "10.1.2.3", nil); rr.Code != http.StatusOK {
+		t.Fatalf("unmatched path from an allowed IP: got %d, want 200", rr.Code)
+	}
+}
+
+// The longest matching path wins, so a stricter rule can sit inside a public
+// subtree, and a rule can name a different access list than the host's.
+func TestPathAuthLongestMatchAndOwnList(t *testing.T) {
+	e, st := newTestEngine(t)
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
+	admins := mustCreateACL(t, st, &store.AccessList{Name: "admins", Satisfy: "all",
+		Users: []store.AccessUser{{Username: "root", Password: "s3cret"}}})
+	h := &store.Host{Type: "proxy", Domains: []string{"pl.test"}, Upstream: up}
+	h.Options.AuthRules = []store.AuthRule{
+		{Path: "/app/admin/", Mode: "accessList", AccessListID: &admins},
+		{Path: "/app/", Mode: "public"},
+	}
+	mustCreateHost(t, st, h)
+	reload(t, e)
+
+	if rr := req(e, "GET", "pl.test", "/app/home", "203.0.113.9", nil); rr.Code != http.StatusOK {
+		t.Fatalf("public subtree: got %d, want 200", rr.Code)
+	}
+	if rr := req(e, "GET", "pl.test", "/app/admin/panel", "203.0.113.9", nil); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("nested gated path: got %d, want 401", rr.Code)
+	}
+	rr := req(e, "GET", "pl.test", "/app/admin/panel", "203.0.113.9", map[string]string{"Authorization": basic("root", "s3cret")})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("nested gated path with credentials: got %d, want 200", rr.Code)
+	}
+}
+
+// Method scoping keeps reads public while writes stay behind the host's gate.
+func TestPathAuthMethodScoped(t *testing.T) {
+	e, st := newTestEngine(t)
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	id := mustCreateACL(t, st, &store.AccessList{Name: "lan", Satisfy: "all",
+		Rules: []store.AccessRule{{Action: "allow", CIDR: "10.0.0.0/8"}}})
+	h := &store.Host{Type: "proxy", Domains: []string{"pm.test"}, Upstream: up, AccessListID: &id}
+	h.Options.AuthRules = []store.AuthRule{{Path: "/api/", Mode: "public", Methods: []string{"GET", "HEAD"}}}
+	mustCreateHost(t, st, h)
+	reload(t, e)
+
+	if rr := req(e, "GET", "pm.test", "/api/items", "203.0.113.9", nil); rr.Code != http.StatusOK {
+		t.Fatalf("public GET: got %d, want 200", rr.Code)
+	}
+	if rr := req(e, "POST", "pm.test", "/api/items", "203.0.113.9", nil); rr.Code != http.StatusForbidden {
+		t.Fatalf("POST on the same path: got %d, want 403", rr.Code)
+	}
+}
+
+// A rule pointing at an access list that no longer exists must fall back to
+// the host's own gate, never silently open the path.
+func TestPathAuthDanglingListFailsClosed(t *testing.T) {
+	e, st := newTestEngine(t)
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	id := mustCreateACL(t, st, &store.AccessList{Name: "lan", Satisfy: "all",
+		Rules: []store.AccessRule{{Action: "allow", CIDR: "10.0.0.0/8"}}})
+	missing := id + 999
+	h := &store.Host{Type: "proxy", Domains: []string{"pd.test"}, Upstream: up, AccessListID: &id}
+	h.Options.AuthRules = []store.AuthRule{{Path: "/x/", Mode: "accessList", AccessListID: &missing}}
+	mustCreateHost(t, st, h)
+	reload(t, e)
+
+	if rr := req(e, "GET", "pd.test", "/x/y", "203.0.113.9", nil); rr.Code != http.StatusForbidden {
+		t.Fatalf("dangling access list: got %d, want 403", rr.Code)
+	}
+}

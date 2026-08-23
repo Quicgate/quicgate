@@ -469,9 +469,10 @@ func (s *Server) handleListStreams(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, streams)
 }
 
-// streamACLExists guards a stream's optional access-list source reference: a
-// dangling id would silently drop to "no restriction", so reject it.
-func (s *Server) streamACLExists(id *int64) error {
+// aclExists guards an optional access-list reference: a dangling id would
+// silently drop to "no restriction" on a stream, or send a path-scoped auth
+// rule back to the host's own gate, so reject it at write time instead.
+func (s *Server) aclExists(id *int64) error {
 	if id == nil {
 		return nil
 	}
@@ -493,7 +494,7 @@ func (s *Server) handleCreateStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.streamACLExists(st.AccessListID); err != nil {
+	if err := s.aclExists(st.AccessListID); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -520,7 +521,7 @@ func (s *Server) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st.ID = id
-	if err := s.streamACLExists(st.AccessListID); err != nil {
+	if err := s.aclExists(st.AccessListID); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -850,9 +851,27 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, hosts)
 }
 
+// hostACLRefs checks every access list a host points at, including the ones
+// named by path-scoped auth rules.
+func (s *Server) hostACLRefs(h store.Host) error {
+	if err := s.aclExists(h.AccessListID); err != nil {
+		return err
+	}
+	for _, r := range h.Options.AuthRules {
+		if err := s.aclExists(r.AccessListID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
 	var h store.Host
 	if err := decodeStrict(r, &h); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.hostACLRefs(h); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -879,6 +898,10 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.ID = id
+	if err := s.hostACLRefs(h); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := s.store.UpdateHost(&h); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "host not found")
