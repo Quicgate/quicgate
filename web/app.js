@@ -241,6 +241,20 @@ async function refresh() {
   refreshCerts();
 }
 
+// A host's domains link to the site itself, opened in a new tab. Wildcards have
+// no single address to visit, so they stay plain text.
+function domainLink(h, domain) {
+  if (domain.includes('*')) return document.createTextNode(domain);
+  const scheme = h.certMode === 'auto' || h.certMode === 'custom' ? 'https' : 'http';
+  const a = document.createElement('a');
+  a.href = `${scheme}://${domain}/`;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.textContent = domain;
+  a.title = `Open ${a.href} in a new tab`;
+  return a;
+}
+
 function renderHosts() {
   const q = $('host-search').value.trim().toLowerCase();
   const shown = hosts.filter((h) => hostMatches(h, q));
@@ -255,8 +269,11 @@ function renderHosts() {
 
     const tdDomains = document.createElement('td');
     tdDomains.className = 'domain';
-    tdDomains.textContent = h.domains.join('\n');
-    tdDomains.style.whiteSpace = 'pre';
+    for (const d of h.domains) {
+      const line = document.createElement('div');
+      line.append(domainLink(h, d));
+      tdDomains.append(line);
+    }
 
     const tdUpstream = document.createElement('td');
     tdUpstream.className = 'domain';

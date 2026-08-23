@@ -80,6 +80,9 @@ textarea { resize: vertical; }
 /* host rows whose backend is down: tint so dead upstreams stand out when scanning */
 .table tr.row--down td { background: var(--c-danger-bg); }
 .table .domain { font-family: var(--font-mono); font-size: var(--fs-sm); }
+/* domains link to the site itself: quiet dotted underline, accent on hover */
+.table .domain a { color: inherit; text-decoration: underline dotted var(--c-text-faint); text-underline-offset: 3px; }
+.table .domain a:hover, .table .domain a:focus-visible { color: var(--c-accent); text-decoration: underline solid currentColor; }
 .empty { text-align: center; color: var(--c-text-faint); padding: var(--sp-8); }
 
 /* modal */
