@@ -366,9 +366,16 @@
     </div>
 
     <div id="page-help" hidden>
-      <div class="card help">
-        <div class="card-head"><h2>Help &amp; FAQ</h2><a class="btn btn--ghost btn--sm" href="docs.html" target="_blank" rel="noopener">API docs</a></div>
-        <p class="hs-muted">Short answers to the things people ask most. Everything here is also in the <a href="https://github.com/Quicgate/quicgate" target="_blank" rel="noopener">README</a> and the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>.</p>
+      <div class="card help" id="help-guides-card">
+        <div class="card-head"><h2 id="guides-title">Guides</h2><span>
+          <button class="btn btn--ghost btn--sm" id="btn-guide-back" hidden>&larr; All guides</button>
+          <a class="btn btn--ghost btn--sm" href="docs.html" target="_blank" rel="noopener">API docs</a></span></div>
+        <div id="guide-index" class="guide-index"></div>
+        <div id="guide-view" class="md" hidden></div>
+      </div>
+      <div class="card help" id="help-faq-card" style="margin-top:var(--sp-4)">
+        <div class="card-head"><h2>FAQ</h2></div>
+        <p class="hs-muted">Short answers to the things people ask most. The guides above go deeper, and everything is also in the <a href="https://github.com/Quicgate/quicgate" target="_blank" rel="noopener">README</a> and the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>.</p>
 
         <h3>Access lists</h3>
         <details><summary>How is an access list evaluated?</summary>
@@ -412,7 +419,7 @@
         <details><summary>SSO in front of a host?</summary>
           <p>Two ways. <b>Built-in OIDC</b> (no extra service): add your IdP under <b>Access Lists &rarr; Identity providers</b>, then enable <b>OIDC SSO</b> on the host's Security tab. quicgate runs the OpenID Connect login itself, keeps a signed per-host session, checks the allowed emails/domains/groups you set, and can pass the identity upstream as <code>Remote-User</code> / <code>Remote-Email</code> / <code>Remote-Groups</code> (spoofed inbound copies are always stripped). Register the redirect URI <code>https://&lt;host&gt;/.qg/oidc/callback</code> at the IdP; sign out at <code>/.qg/oidc/logout</code>. Or use <b>Forward authentication</b> against an Authelia / Authentik verify endpoint if you already run one.</p></details>
         <details><summary>Can one path be public while the rest of the host needs auth?</summary>
-          <p>Yes. On a proxy host, <b>Security → Path authentication</b> takes ordered per-URL rules: a path, <em>prefix</em> or <em>exact</em> match, and what gates it (<b>Public</b>, a specific <b>access list</b>, or the host's <b>forward auth</b>). The longest matching path wins, and any path matching no rule keeps the host's own access list and forward auth. Use it for a licensing callback, a webhook receiver or a health probe that cannot log in. Optionally scope a rule to certain verbs, e.g. public <code>GET</code> but gated <code>POST</code>. Rate limits, bad-bot and exploit filters stay host-wide and still apply to public paths.</p></details>
+          <p>Yes. On a proxy host, <b>Security → Path authentication</b> takes ordered per-URL rules: a path, <em>prefix</em> or <em>exact</em> match, and what gates it (<b>Public</b>, a specific <b>access list</b>, the host's <b>forward auth</b>, or the host's <b>OIDC SSO</b>). The longest matching path wins, and any path matching no rule keeps the host's own access list and forward auth. Use it for a licensing callback, a webhook receiver or a health probe that cannot log in. Optionally scope a rule to certain verbs, e.g. public <code>GET</code> but gated <code>POST</code>. Rate limits, bad-bot and exploit filters stay host-wide and still apply to public paths.</p></details>
         <details><summary>Backup, metrics, logs?</summary>
           <p><b>System</b> page has the JSON access-log viewer (per-host logs are on each host's <em>Logs</em> button). <b>Settings</b> has one-click backup/restore. Prometheus scrape at <code>/metrics</code> (needs a bearer token).</p></details>
 
@@ -762,6 +769,7 @@
   </div>
 </div>
 
+<script src="md.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

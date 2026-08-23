@@ -55,7 +55,7 @@ Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (a passwo
 - **Security**: access lists (ordered CIDR / dynamic-DNS hostname / GeoIP-country rules + basic auth, satisfy any/all), **built-in OIDC SSO** (quicgate runs the OpenID Connect login itself against Keycloak / Entra ID / Authentik — per-host allowed emails/domains/groups, identity passed upstream as `Remote-User`, no Authelia sidecar needed), forward-auth (Authelia / Authentik / Keycloak), per-IP rate limiting, block-common-exploits, bad-bot blocking, fail2ban-style auto-ban, search-engine noindex. **Path authentication**: per-URL overrides of the host's gate (longest match wins), so a licensing callback or webhook stays reachable without credentials while the rest of the host is behind an access list or SSO. **Real client IP** behind a trusted proxy (Cloudflare / another LB), so IP rules, GeoIP and rate limits still work.
 - **Streams (TCP/UDP)**: L4 port forwards with source whitelists, PROXY protocol v1/v2 (send and accept), TLS termination, SNI-based passthrough routing, port ranges. Plus pure router port-forwards managed over **UPnP IGD** (quicgate keeps your router's forwards in sync, self-healing after reboots).
 - **Dual-stack IPv4/IPv6**: listeners accept IPv6 clients out of the box, upstreams and stream targets can be IPv6 literals or AAAA hostnames, and access lists and trusted-proxy lists take IPv6 CIDRs (a bare address is treated as `/128`). Per-IP rate limiting, auto-ban and GeoIP country lookup all handle IPv6 clients the same as IPv4.
-- **Docker labels**: opt a container in with `quicgate.enable=true` and quicgate derives its host (and TCP/UDP streams) from labels automatically — Traefik's provider idea without the router/service/middleware label soup. Reuses named access lists, works with a host-networked quicgate, and every derived route is visible (with the reason it is or isn't routing) on the Docker page. See [Docker labels](#docker-labels-config-from-containers).
+- **Docker labels**: opt a container in with `quicgate.enable=true` and quicgate derives its host (and TCP/UDP streams) from labels automatically — Traefik's provider idea without the router/service/middleware label soup. Reuses named access lists, works with a host-networked quicgate, and every derived route is visible (with the reason it is or isn't routing) on the Docker page. See [Docker labels](web/docs/docker.md).
 - **Ops**: an at-a-glance **Overview dashboard**, JSON access logs with a built-in viewer (per-host and system-wide), Prometheus `/metrics` (global + per-host), one-click backup/restore, declarative JSON import, effective-config viewer, certificate renewal visibility with webhook alerts (ntfy/Gotify style).
 - **Admin**: forced first-password change, TOTP 2FA, long-lived API tokens, optional OIDC and LDAP login (both additive, so a broken IdP can never lock you out), dark/light theme, Swagger UI at `/docs.html`.
 
@@ -94,96 +94,15 @@ Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (a passwo
 
 On an AMD Ryzen 7 9800X3D, one quicgate instance handles **~45,000 proxied requests/sec** to a local backend (loopback, no TLS) and **~180,000/sec** for cache hits, with a routing lookup costing ~9 ns and access lists adding no measurable overhead. A single core sustains ~8,900 TLS-proxied req/s. That puts it in line with the major reverse proxies for any realistic self-hosted load, the proxy is essentially never the bottleneck. Reproduce with `go test -bench=. ./internal/engine`; full methodology and numbers in [BENCHMARKS.md](BENCHMARKS.md).
 
-## HTTP/3 notes
+## Documentation
 
-The TLS listener serves h1/h2 on TCP 443 and h3 on UDP 443 from the same certificates. Browsers upgrade via `Alt-Svc` and cache that hint for 30 days; disabling h3 per host therefore sends `Alt-Svc: clear` to actively evict the cached hint. Remember to forward **UDP 443** on your router or firewall (or let `QG_UPNP=1` do it).
+Guides live in [`web/docs/`](web/docs/) and are **built into the web UI** — open Help (the `?` in the top bar) and pick a guide; they work fully offline, air-gapped installs included.
 
-## Configuration
-
-| Env var | Default | Meaning |
-|---|---|---|
-| `QG_DATA` | `./data` | SQLite db + certmagic storage + logs |
-| `QG_HTTP` | `:80` | plain HTTP listener (ACME + redirects) |
-| `QG_HTTPS` | `:443` | TLS listener, TCP and UDP (HTTP/3) |
-| `QG_ADMIN` | `:81` | management UI/API |
-| `QG_ACME_EMAIL` | | ACME account email |
-| `QG_ACME_STAGING` | | `1` = Let's Encrypt staging CA |
-| `QG_TLS` | | `off` = dev run without TLS/QUIC listeners |
-| `QG_H3` | | `off` = disable the HTTP/3 listener globally |
-| `QG_UPNP` | | `1` = manage router port forwards via UPnP IGD |
-| `QG_DOCKER` | | `1` = derive hosts/streams from container labels |
-| `QG_DOCKER_SOCKET` | `/var/run/docker.sock` | local Docker daemon socket (mount read-only) |
-| `QG_DOCKER_HOST_ADDR` | `127.0.0.1` | address where the local host's published ports are reachable |
-| `QG_DOCKER_ENDPOINTS` | | JSON list of Docker hosts to watch (overrides the single local socket) |
-| `QG_DOCKER_DOMAIN` | | default base domain for containers without `quicgate.host` |
-| `QG_DOCKER_LABEL_PREFIX` | `quicgate` | label namespace to read (`<prefix>.enable`, `<prefix>.host`, ...) |
-
-Most settings (ACME email/staging/CA, DNS provider, alert webhook, default site, auto-ban, OIDC/LDAP, and the Docker default-domain) are editable live in the Settings page and stored in the database. Drop a `GeoLite2-Country.mmdb` into `QG_DATA` to enable GeoIP country rules in access lists.
-
-## Docker labels (config from containers)
-
-quicgate can read container labels and turn them into hosts and streams automatically — the Traefik provider idea, minus the router/service/middleware label soup. Opt a container in with `quicgate.enable=true` and it appears on the **Docker** page; usually two labels is all it takes. Nothing is persisted: derived routes re-derive from live containers on every change and at startup.
-
-Enable the provider by mounting the daemon socket (read-only is enough — quicgate only ever lists, inspects, and watches events, it never writes) and setting `QG_DOCKER=1`:
-
-```yaml
-services:
-  quicgate:
-    image: ghcr.io/quicgate/quicgate:1
-    network_mode: host
-    environment:
-      QG_DOCKER: "1"
-      QG_DOCKER_DOMAIN: apps.example.com    # optional: default base domain
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - quicgate-data:/data
-
-  grafana:
-    image: grafana/grafana
-    ports: ["3000:3000"]
-    labels:
-      quicgate.enable: "true"
-      quicgate.host: metrics.example.com    # or omit this, with QG_DOCKER_DOMAIN set
-```
-
-### Labels
-
-| Label | Meaning | Default |
-|---|---|---|
-| `quicgate.enable` | opt this container in (**required**) | off |
-| `quicgate.host` | public hostname(s), comma-separated | `<name>.<default-domain>` if one is set |
-| `quicgate.port` | the app's port **inside the container** | auto if exactly one candidate |
-| `quicgate.exclude-ports` | ports to ignore when auto-detecting | none |
-| `quicgate.scheme` | upstream scheme `http` / `https` | `http` |
-| `quicgate.tls-skip-verify` | trust a self-signed upstream | `false` |
-| `quicgate.tls` | obtain a Let's Encrypt cert (public side) | `on` |
-| `quicgate.access-list` | attach an existing access list by name | none |
-| `quicgate.streams` | raw L4 forwards, comma-separated `[listen:]container[/proto]` | none |
-
-`quicgate.streams` exposes non-HTTP ports as TCP/UDP streams, e.g. `quicgate.streams=25565, 2222:22/tcp, 53/udp` (proto `tcp`/`udp`/`both`, default `tcp`; `listen:` remaps the public port). Stream ports are automatically excluded from HTTP port auto-detection, so a container with a web port and a game port needs no `exclude-ports`. A container can be HTTP-only, streams-only (no hostname needed), or both.
-
-Manual hosts always win a naming conflict — a label can never silently override a host you configured by hand. Anything beyond these labels (custom locations, header rules, mTLS, rate limits) lives in the UI: use **Convert to host** on the Docker page to turn a derived container into editable configuration with no downtime.
-
-### How quicgate reaches containers
-
-One rule: quicgate connects to the **Docker host's address** on the container's **published port**. `quicgate.port` names the app's port *inside* the container; quicgate uses that port's published host mapping (a `network_mode: host` container is reached at that port directly). So a container must publish the port you want routed. The local host's address defaults to `127.0.0.1` (`QG_DOCKER_HOST_ADDR`).
-
-### Multiple Docker hosts
-
-quicgate can watch several daemons at once. Give it a JSON list of endpoints (in `QG_DOCKER_ENDPOINTS`, or the **Docker hosts** box on the Docker page), each with a name, a connection, and the address where *its* published ports are reachable from quicgate:
-
-```json
-[
-  {"name": "local",    "connect": "/var/run/docker.sock",    "address": "127.0.0.1"},
-  {"name": "docker92", "connect": "tcp://192.168.1.92:2375", "address": "192.168.1.92"}
-]
-```
-
-A container on `docker92` is then reached at `192.168.1.92:<published port>`. Reach a remote daemon through a **read-only socket proxy** (below) exposing `tcp://` on the LAN. Endpoint-list changes apply on restart; the Docker page shows each host's connection state.
-
-### Socket security
-
-The provider is read-only, but the socket still grants broad access to the daemon. Mount it `:ro`, and for least privilege put a read-only socket proxy (e.g. `tecnativa/docker-socket-proxy` with only `CONTAINERS=1` and `EVENTS=1`) in front of it and point `QG_DOCKER_SOCKET` at the proxy.
+- [Getting started](web/docs/getting-started.md) — run it, first host, TLS modes, host types
+- [Configuration reference](web/docs/configuration.md) — every env var and setting, real client IP, GeoIP, HTTP/3, IPv6
+- [Access control & SSO](web/docs/sso.md) — access lists, **built-in OIDC login**, forward auth, per-path rules
+- [Docker labels](web/docs/docker.md) — hosts and streams from container labels, multi-host
+- [Streams & port forwards](web/docs/streams.md) — TCP/UDP forwarding, PROXY protocol, SNI routing, UPnP
 
 ## API
 

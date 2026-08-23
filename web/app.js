@@ -39,12 +39,68 @@ function switchPage(name) {
   if (name === 'system') loadSystem();
   if (name === 'settings') loadSettings();
   if (name === 'profile') loadProfile();
+  if (name === 'help') renderGuideIndex();
 }
 $('pagenav').addEventListener('click', (e) => {
   if (e.target.dataset.page) switchPage(e.target.dataset.page);
 });
 $('me-email').addEventListener('click', () => switchPage('profile'));
 $('btn-help').addEventListener('click', () => switchPage('help'));
+
+/* ---- built-in guides (markdown, embedded in the binary) ---- */
+const GUIDES = [
+  { id: 'getting-started', title: 'Getting started', blurb: 'Run quicgate, add your first host, TLS modes, host types.' },
+  { id: 'configuration', title: 'Configuration reference', blurb: 'Every env var and setting, real client IP, GeoIP, HTTP/3, IPv6.' },
+  { id: 'sso', title: 'Access control & SSO', blurb: 'Access lists, built-in OIDC login, forward auth, per-path rules.' },
+  { id: 'docker', title: 'Docker labels', blurb: 'Derive hosts and streams from container labels, multi-host.' },
+  { id: 'streams', title: 'Streams & port forwards', blurb: 'TCP/UDP forwarding, PROXY protocol, SNI routing, UPnP.' },
+];
+
+function renderGuideIndex() {
+  const idx = $('guide-index');
+  if (idx.childElementCount) return;
+  for (const g of GUIDES) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'guide-card';
+    b.innerHTML = `<span class="guide-card__title">${g.title}</span><span class="guide-card__blurb">${g.blurb}</span>`;
+    b.addEventListener('click', () => openGuide(g.id));
+    idx.appendChild(b);
+  }
+}
+
+async function openGuide(id) {
+  const g = GUIDES.find((x) => x.id === id);
+  if (!g) return;
+  let md;
+  try {
+    const res = await fetch(`docs/${id}.md`);
+    if (!res.ok) throw new Error(res.status);
+    md = await res.text();
+  } catch {
+    md = '# Unavailable\n\nThis guide could not be loaded.';
+  }
+  $('guide-view').innerHTML = renderMarkdown(md);
+  // Cross-guide links rendered by md.js carry data-guide.
+  $('guide-view').querySelectorAll('a[data-guide]').forEach((a) => {
+    a.addEventListener('click', (e) => { e.preventDefault(); openGuide(a.dataset.guide); });
+  });
+  $('guide-index').hidden = true;
+  $('guide-view').hidden = false;
+  $('btn-guide-back').hidden = false;
+  $('guides-title').textContent = g.title;
+  $('help-faq-card').hidden = true;
+  $('guide-view').closest('.card').scrollIntoView({ block: 'start' });
+}
+
+function closeGuide() {
+  $('guide-index').hidden = false;
+  $('guide-view').hidden = true;
+  $('btn-guide-back').hidden = true;
+  $('guides-title').textContent = 'Guides';
+  $('help-faq-card').hidden = false;
+}
+$('btn-guide-back').addEventListener('click', closeGuide);
 
 function show(view) {
   for (const v of views) $(v).hidden = v !== view;

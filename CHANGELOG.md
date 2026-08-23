@@ -37,6 +37,12 @@ All notable changes to quicgate are documented here. The format follows
   stored as `options.authRules`. A rule naming an access list that no longer
   exists falls back to the host's gate instead of opening the path, and the API
   rejects such a reference on write.
+- **Built-in guides.** The Help page now opens with five markdown guides
+  (getting started, configuration reference, access control & SSO, Docker
+  labels, streams & port forwards) rendered by a small vanilla markdown
+  renderer, embedded in the binary and fully offline. The same files live in
+  `web/docs/` on GitHub, and the README slimmed down to a pitch that links to
+  them.
 - The Proxy Hosts table links each domain to the site itself (new tab), with
   the scheme taken from the host's certificate mode. Wildcard domains stay
   plain text since they have no single address to visit.
