@@ -65,7 +65,12 @@
       <a id="qg-version" class="hs-muted mono" href="https://github.com/Quicgate/quicgate/releases" target="_blank" rel="noopener" style="font-size:var(--fs-xs);text-decoration:none" title="quicgate version — view releases"></a>
       <button id="me-email" class="hs-muted mono" data-page="profile" style="background:none;border:none;cursor:pointer;font:inherit" title="Profile"></button>
       <button id="btn-help" class="btn btn--ghost btn--sm" title="Help &amp; FAQ" aria-label="Help">?</button>
-      <select id="skin-picker" class="skin-picker" title="Theme" aria-label="Theme"></select>
+      <div class="skinmenu" id="skinmenu">
+        <button type="button" id="skin-btn" class="skinmenu__btn" aria-haspopup="menu" aria-expanded="false" title="Theme">
+          <span class="skinmenu__swatch" id="skin-swatch"></span><span id="skin-label">Console</span><span class="skinmenu__caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="skinmenu__pop" id="skin-pop" role="menu" hidden></div>
+      </div>
       <button id="btn-theme" class="btn btn--ghost btn--sm" title="Toggle light/dark">◐</button>
       <button id="btn-logout" class="btn btn--ghost btn--sm">Sign out</button>
       <button id="btn-add" class="btn btn--primary">Add host</button>
@@ -251,6 +256,7 @@
     </div>
 
     <div id="page-settings" hidden>
+      <h3 class="ov-h">Certificates</h3>
       <div class="card-grid">
       <div class="card">
         <div class="card-head"><h2>ACME / Let's Encrypt</h2></div>
@@ -273,20 +279,29 @@
         </form>
       </div>
 
+      </div>
+
+      <h3 class="ov-h">Who can administer quicgate</h3>
+      <p class="hs-muted set-lead">Both are additive: the local password login always keeps working, so a misconfigured directory or IdP can never lock you out.</p>
+      <div class="card-grid">
       <div class="card">
         <div class="card-head"><h2>Admin SSO (OIDC)</h2></div>
         <p class="hs-muted">Additive: password login always keeps working, so a misconfigured IdP cannot lock you out.</p>
         <form id="oidc-form">
           <label class="check"><input type="checkbox" id="set-oidc-enabled"><span>Enable OIDC login</span></label>
-          <label class="field"><span>Identity provider <em>(reuse one from Access Lists, or fill the fields below)</em></span>
-            <select id="set-oidc-provider"></select></label>
-          <label class="field"><span>Issuer URL</span><input id="set-oidc-issuer" type="url" class="mono" placeholder="https://auth.example.com/application/o/quicgate/"></label>
-          <div class="field-row">
-            <label class="field"><span>Client ID</span><input id="set-oidc-client-id" class="mono"></label>
-            <label class="field"><span>Client secret</span><input id="set-oidc-client-secret" type="password" class="mono"></label>
+          <div id="oidc-config" hidden>
+            <label class="field"><span>Identity provider <em>(reuse one from Access Lists, or fill the fields below)</em></span>
+              <select id="set-oidc-provider"></select></label>
+            <div id="oidc-inline-fields">
+              <label class="field"><span>Issuer URL</span><input id="set-oidc-issuer" type="url" class="mono" placeholder="https://auth.example.com/application/o/quicgate/"></label>
+              <div class="field-row">
+                <label class="field"><span>Client ID</span><input id="set-oidc-client-id" class="mono"></label>
+                <label class="field"><span>Client secret</span><input id="set-oidc-client-secret" type="password" class="mono"></label>
+              </div>
+            </div>
+            <label class="field"><span>Redirect URL</span><input id="set-oidc-redirect" type="url" class="mono" placeholder="https://proxy.example.com/api/oidc/callback"></label>
+            <label class="field"><span>Allowed emails <em>(who may administer; a matching local account also admits)</em></span><input id="set-oidc-emails" class="mono"></label>
           </div>
-          <label class="field"><span>Redirect URL</span><input id="set-oidc-redirect" type="url" class="mono" placeholder="https://proxy.example.com/api/oidc/callback"></label>
-          <label class="field"><span>Allowed emails <em>(comma-separated; blank = any verified)</em></span><input id="set-oidc-emails" class="mono"></label>
           <div class="modal-actions"><button type="submit" class="btn btn--primary">Save</button></div>
         </form>
       </div>
@@ -296,20 +311,26 @@
         <p class="hs-muted">Additive fallback checked only when local password auth fails.</p>
         <form id="ldap-form">
           <label class="check"><input type="checkbox" id="set-ldap-enabled"><span>Enable LDAP login</span></label>
-          <label class="field"><span>Server URL</span><input id="set-ldap-url" class="mono" placeholder="ldaps://ldap.example.com:636"></label>
-          <label class="field"><span>Bind DN template <em>(%s = username)</em></span><input id="set-ldap-dn" class="mono" placeholder="uid=%s,ou=people,dc=example,dc=com"></label>
-          <label class="field"><span>Allowed directory users <em>(comma-separated; a binding user also needs a local account or an entry here)</em></span><input id="set-ldap-allowed" class="mono" placeholder="alice, bob"></label>
-          <p class="hs-muted" style="font-size:var(--fs-xs)">Requires <code>ldaps://</code>: a plain <code>ldap://</code> bind would put the password on the wire in clear text.</p>
+          <div id="ldap-config" hidden>
+            <label class="field"><span>Server URL</span><input id="set-ldap-url" class="mono" placeholder="ldaps://ldap.example.com:636"></label>
+            <label class="field"><span>Bind DN template <em>(%s = username)</em></span><input id="set-ldap-dn" class="mono" placeholder="uid=%s,ou=people,dc=example,dc=com"></label>
+            <label class="field"><span>Allowed directory users <em>(comma-separated; a binding user also needs a local account or an entry here)</em></span><input id="set-ldap-allowed" class="mono" placeholder="alice, bob"></label>
+            <p class="hs-muted" style="font-size:var(--fs-xs)">Requires <code>ldaps://</code>: a plain <code>ldap://</code> bind would put the password on the wire in clear text.</p>
+          </div>
           <div class="modal-actions"><button type="submit" class="btn btn--primary">Save</button></div>
         </form>
       </div>
 
+      </div>
+
+      <h3 class="ov-h">Traffic handling</h3>
+      <div class="card-grid">
       <div class="card">
         <div class="card-head"><h2>Auto-ban (fail2ban-style)</h2></div>
         <p class="hs-muted">Ban a client IP after repeated access-list auth failures.</p>
         <form id="ban-form">
           <label class="check"><input type="checkbox" id="set-ban-enabled"><span>Enable auto-ban</span></label>
-          <div class="field-row">
+          <div class="field-row" id="ban-config" hidden>
             <label class="field field--sm"><span>Failures</span><input id="set-ban-threshold" type="number" min="1" placeholder="5"></label>
             <label class="field field--sm"><span>Within (s)</span><input id="set-ban-window" type="number" min="1" placeholder="300"></label>
             <label class="field field--sm"><span>Ban for (s)</span><input id="set-ban-duration" type="number" min="1" placeholder="3600"></label>
@@ -358,6 +379,10 @@
           <textarea id="set-trustedproxies" rows="3" class="mono" placeholder="173.245.48.0/20&#10;103.21.244.0/22"></textarea></label>
       </div>
 
+      </div>
+
+      <h3 class="ov-h">Data</h3>
+      <div class="card-grid">
       <div class="card col-span-2">
         <div class="card-head"><h2>Backup &amp; import</h2></div>
         <p class="hs-muted">The backup contains all hosts, access lists, streams, settings, users (incl. the admin password) and issued certificates. Restoring replaces everything.</p>

@@ -18,8 +18,8 @@ let editingCertId = null;
    skin is applied before first paint by an inline script in index.html so the
    UI never flashes the wrong palette. */
 const SKINS = [
-  { id: 'console', name: 'Console' },
-  { id: 'brass', name: 'Brass & Iron' },
+  { id: 'console', name: 'Console', note: 'near-black, lime, Geist', bg: '#0e0f13', accent: '#a3e635' },
+  { id: 'brass', name: 'Brass & Iron', note: 'warm metals, serif, brass', bg: '#0f0c08', accent: '#d4a843' },
 ];
 
 function applyTheme(theme) {
@@ -27,23 +27,53 @@ function applyTheme(theme) {
   localStorage.setItem('qg_theme', theme);
 }
 function applySkin(skin) {
-  if (!SKINS.some((s) => s.id === skin)) skin = SKINS[0].id;
-  document.documentElement.dataset.skin = skin;
-  localStorage.setItem('qg_skin', skin);
-  const picker = $('skin-picker');
-  if (picker) picker.value = skin;
+  const chosen = SKINS.find((s) => s.id === skin) || SKINS[0];
+  document.documentElement.dataset.skin = chosen.id;
+  localStorage.setItem('qg_skin', chosen.id);
+  $('skin-label').textContent = chosen.name;
+  $('skin-swatch').style.background = chosen.accent;
+  $('skin-swatch').style.borderColor = chosen.bg;
+  for (const item of $('skin-pop').children) {
+    item.setAttribute('aria-checked', String(item.dataset.skin === chosen.id));
+  }
 }
 applyTheme(localStorage.getItem('qg_theme') || 'dark');
+
+// A native <select> renders its dropdown with the operating system's own
+// colours, which fights any dark theme. This is a small popover we control:
+// each entry previews the theme it selects.
 {
-  const picker = $('skin-picker');
+  const btn = $('skin-btn');
+  const pop = $('skin-pop');
   for (const s of SKINS) {
-    const opt = document.createElement('option');
-    opt.value = s.id;
-    opt.textContent = s.name;
-    picker.appendChild(opt);
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'skinmenu__item';
+    item.dataset.skin = s.id;
+    item.setAttribute('role', 'menuitemradio');
+    item.innerHTML =
+      `<span class="skinmenu__preview" style="background:${s.bg}"><i style="background:${s.accent}"></i></span>` +
+      `<span class="skinmenu__text"><b>${s.name}</b><span>${s.note}</span></span>` +
+      '<span class="skinmenu__tick" aria-hidden="true">&check;</span>';
+    item.addEventListener('click', () => { applySkin(s.id); closeSkinMenu(); btn.focus(); });
+    pop.appendChild(item);
   }
+  const openSkinMenu = () => {
+    pop.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    document.addEventListener('click', onDocClick, true);
+    document.addEventListener('keydown', onKey, true);
+  };
+  window.closeSkinMenu = () => {
+    pop.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('click', onDocClick, true);
+    document.removeEventListener('keydown', onKey, true);
+  };
+  function onDocClick(e) { if (!$('skinmenu').contains(e.target)) closeSkinMenu(); }
+  function onKey(e) { if (e.key === 'Escape') { closeSkinMenu(); btn.focus(); } }
+  btn.addEventListener('click', () => (pop.hidden ? openSkinMenu() : closeSkinMenu()));
   applySkin(localStorage.getItem('qg_skin') || SKINS[0].id);
-  picker.addEventListener('change', () => applySkin(picker.value));
 }
 $('btn-theme').addEventListener('click', () => {
   applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
@@ -1771,6 +1801,30 @@ $('geoip-test-btn').addEventListener('click', async () => {
   } catch (err) { out.innerHTML = `&rarr; <span class="form-error" style="display:inline">${esc(err.message)}</span>`; }
 });
 
+// Settings only shows the fields for features that are switched on, and only
+// the inline IdP fields when no shared provider is selected. An unconfigured
+// page is then a short list of toggles rather than three screens of empty
+// inputs for things you do not use.
+function syncSettingsDisclosure() {
+  const pairs = [
+    ['set-oidc-enabled', 'oidc-config'],
+    ['set-ldap-enabled', 'ldap-config'],
+    ['set-ban-enabled', 'ban-config'],
+  ];
+  for (const [toggle, block] of pairs) {
+    const t = $(toggle);
+    const b = $(block);
+    if (t && b) b.hidden = !t.checked;
+  }
+  const prov = $('set-oidc-provider');
+  const inline = $('oidc-inline-fields');
+  if (prov && inline) inline.hidden = !!prov.value;
+}
+for (const id of ['set-oidc-enabled', 'set-ldap-enabled', 'set-ban-enabled', 'set-oidc-provider']) {
+  const el = $(id);
+  if (el) el.addEventListener('change', syncSettingsDisclosure);
+}
+
 async function loadSettings() {
   refreshGeoIP();
   // The admin-login provider picker lists the same providers as the hosts use.
@@ -1802,6 +1856,7 @@ async function loadSettings() {
     adminProv.appendChild(opt);
   }
   adminProv.value = s.admin_oidc_provider_id || '';
+  syncSettingsDisclosure();
   $('set-oidc-issuer').value = s.oidc_issuer || '';
   $('set-oidc-client-id').value = s.oidc_client_id || '';
   $('set-oidc-client-secret').value = s.oidc_client_secret || '';
