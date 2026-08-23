@@ -213,7 +213,7 @@ func requestHostname(r *http.Request) string {
 func (g *oidcGate) setCookie(w http.ResponseWriter, r *http.Request, name, value string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{
 		Name: name, Value: value, Path: "/", HttpOnly: true,
-		Secure: r.TLS != nil, SameSite: http.SameSiteLaxMode, MaxAge: maxAge,
+		Secure: requestIsTLS(r), SameSite: http.SameSiteLaxMode, MaxAge: maxAge,
 	})
 }
 
@@ -271,6 +271,17 @@ func (g *oidcGate) wrap(next http.Handler) http.Handler {
 	})
 }
 
+// claimIsTrue reads a boolean claim that some providers send as a string.
+func claimIsTrue(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		return strings.EqualFold(t, "true")
+	}
+	return false
+}
+
 func randToken() string {
 	b := make([]byte, 16)
 	rand.Read(b)
@@ -278,9 +289,9 @@ func randToken() string {
 }
 
 func (g *oidcGate) oauthConfig(r *http.Request, provider *oidc.Provider) oauth2.Config {
-	scheme := "https"
-	if r.TLS == nil {
-		scheme = "http"
+	scheme := "http"
+	if requestIsTLS(r) {
+		scheme = "https"
 	}
 	scopes := g.provider.Scopes
 	if len(scopes) == 0 {
@@ -377,6 +388,14 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "identity token carries no email", http.StatusForbidden)
 		return
 	}
+	// An unverified address must not satisfy an allowed-emails or
+	// allowed-domains policy: on IdPs where users can set their own address,
+	// that would let anyone claim to be someone@yourcompany.com. Providers that
+	// omit the claim entirely are taken at their word.
+	if v, present := claims["email_verified"]; present && !claimIsTrue(v) {
+		http.Error(w, "identity provider reports this address as unverified", http.StatusForbidden)
+		return
+	}
 	var groups []string
 	if raw, ok := claims[g.provider.GroupsClaim].([]any); ok {
 		for _, v := range raw {
@@ -400,7 +419,10 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// Only ever return to a same-host relative path: the value came back
 	// through a signed cookie, but defence in depth costs one check.
 	dest := st.Return
-	if !strings.HasPrefix(dest, "/") || strings.HasPrefix(dest, "//") {
+	// Browsers treat a backslash as a path separator in some positions, so
+	// "/\evil.com" can become protocol-relative; CR/LF would split the header.
+	if !strings.HasPrefix(dest, "/") || strings.HasPrefix(dest, "//") ||
+		strings.ContainsAny(dest, "\\\r\n") {
 		dest = "/"
 	}
 	http.Redirect(w, r, dest, http.StatusFound)

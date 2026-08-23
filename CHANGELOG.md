@@ -4,6 +4,53 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] - 2026-08-23
+
+### Security
+- **Path traversal could walk out of a public path rule.** A request for
+  `/public/../admin` matched a `public` auth rule on its raw path, while an
+  upstream that resolves dot segments (nginx, Apache, IIS, most frameworks)
+  served `/admin` — bypassing the host's access list, forward auth or SSO.
+  Any path containing a `.` or `..` segment is now refused with 400 before it
+  reaches a gate, a path rule, a custom location or an upstream. Whole
+  segments only, so `/.well-known/acme-challenge/...` and `/file.tar.gz` are
+  unaffected. Encoded forms (`%2e%2e`) are covered, since matching happens on
+  the decoded path.
+- **Forward-auth hosts passed client-supplied identity headers.** The headers
+  listed under *Copy response headers upstream* were only overwritten when the
+  auth server returned a non-empty value, so a 2xx response that omitted
+  `Remote-User` let the client's own `Remote-User` reach the upstream. Those
+  headers are now stripped from the inbound request before the auth subrequest
+  and before the upstream sees it. (OIDC hosts already stripped them.)
+- **SSO session cookies were not marked Secure behind a TLS-terminating
+  proxy.** `Secure` was set from `r.TLS` alone, so with TLS terminating on a
+  load balancer in front of quicgate the session cookie could ride a plain
+  HTTP hop. It now honours `X-Forwarded-Proto`, as the OIDC redirect URI
+  scheme does — which also fixes redirect-URI mismatches in that deployment.
+- **Unthrottled admin login.** A wrong password cost a flat 400ms and nothing
+  else, and the six-digit TOTP code had no limit at all, so an attacker
+  holding the password could walk the code space. Failed logins are now
+  counted per client IP, with a 15-minute lockout after 10 failures in 15
+  minutes, covering password, LDAP and TOTP failures alike.
+- **Credentials echoed by the settings API.** `GET /api/settings` returned the
+  admin OIDC client secret and the DNS provider config (which holds a private
+  key) in cleartext to any session or API token, putting them in the browser
+  and in any exported HAR. Both are masked on read; sending the mask back
+  keeps the stored value.
+
+### Fixed
+- The OIDC login callback is now always routed to the SSO gate. A host that
+  gated only some paths with SSO sent the browser to the IdP and then handed
+  the redirect back to whichever path rule matched `/.qg/oidc/callback`, so
+  the session was never minted and the user looped through login.
+- A login is refused when the IdP explicitly marks the address unverified
+  (`email_verified: false`), so a self-set address cannot satisfy an
+  allowed-domains policy.
+- The post-login redirect target rejects backslashes and CR/LF in addition to
+  protocol-relative paths.
+
+[1.7.1]: https://github.com/Quicgate/quicgate/releases/tag/v1.7.1
+
 ## [1.7.0] - 2026-08-23
 
 ### Added

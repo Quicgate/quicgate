@@ -749,7 +749,9 @@ func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess, acls
 	if sso != nil {
 		out = stripIdentityHeaders(out)
 	}
-	return out
+	// Outermost of all: a path that means different things to quicgate's rules
+	// and to the upstream can defeat every gate below, so refuse it first.
+	return rejectTraversal(out)
 }
 
 // badGatewayHandler renders the upstream-down page, using a per-host custom

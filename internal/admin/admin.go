@@ -39,13 +39,14 @@ type Server struct {
 	engine   *engine.Engine
 	docker   *docker.Provider // nil unless the Docker label provider is enabled
 	webFS    fs.FS
+	logins   *loginThrottle
 	dataDir  string
 	mu       sync.Mutex
 	sessions map[string]session
 }
 
 func New(st *store.Store, eng *engine.Engine, webFS fs.FS, dataDir string) *Server {
-	return &Server{store: st, engine: eng, webFS: webFS, dataDir: dataDir, sessions: map[string]session{}}
+	return &Server{store: st, engine: eng, webFS: webFS, dataDir: dataDir, sessions: map[string]session{}, logins: newLoginThrottle()}
 }
 
 // SetDocker attaches the Docker label provider so the API can report its status
@@ -198,6 +199,18 @@ var settingsKeys = map[string]bool{
 	"real_ip_header":  true, // header carrying the real client IP (e.g. X-Forwarded-For)
 }
 
+// secretSettings are never echoed back in cleartext. They are credentials for
+// other systems (an IdP client secret, a DNS provider's API key), so returning
+// them on every settings read puts them in the browser, in devtools and in any
+// HAR or screenshot the user shares. The UI sends the mask back unchanged when
+// the field was not edited, which handlePutSettings treats as "keep".
+var secretSettings = map[string]bool{
+	"oidc_client_secret": true,
+	"acme_dns_config":    true,
+}
+
+const secretMask = "********"
+
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	all, err := s.store.AllSettings()
 	if err != nil {
@@ -206,7 +219,11 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]string{}
 	for k := range settingsKeys {
-		out[k] = all[k]
+		v := all[k]
+		if secretSettings[k] && v != "" {
+			v = secretMask
+		}
+		out[k] = v
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -217,7 +234,11 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	for k := range body {
+	for k, v := range body {
+		if secretSettings[k] && v == secretMask {
+			delete(body, k) // unchanged in the UI: keep what is stored
+			continue
+		}
 		if !settingsKeys[k] {
 			writeErr(w, http.StatusBadRequest, "unsupported setting: "+k)
 			return
@@ -748,6 +769,11 @@ func (s *Server) passwordChangeRequired(sess session, r *http.Request) bool {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	ip := requestIP(r)
+	if !s.logins.allow(ip) {
+		writeErr(w, http.StatusTooManyRequests, "too many failed logins, try again later")
+		return
+	}
 	var body struct{ Email, Password, Code string }
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json")
@@ -758,6 +784,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !localOK {
 		// Additive LDAP fallback; local admin always still works.
 		if !s.ldapAuth(body.Email, body.Password) {
+			s.logins.fail(ip)
 			time.Sleep(400 * time.Millisecond) // flat cost for wrong email and wrong password alike
 			writeErr(w, http.StatusUnauthorized, "invalid credentials")
 			return
@@ -771,6 +798,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !totp.Validate(body.Code, u.TOTPSecret) {
+			// Counted like a wrong password: six digits are guessable fast.
+			s.logins.fail(ip)
 			writeErr(w, http.StatusUnauthorized, "invalid authentication code")
 			return
 		}
@@ -781,6 +810,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := hex.EncodeToString(tok)
+	s.logins.succeed(ip)
 	s.mu.Lock()
 	s.sessions[id] = session{userID: u.ID, email: u.Email, expires: time.Now().Add(sessionTTL)}
 	s.mu.Unlock()
