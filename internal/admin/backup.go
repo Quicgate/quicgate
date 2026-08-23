@@ -14,6 +14,12 @@ import (
 
 const maxRestoreBytes = 200 << 20
 
+// maxRestoreExpandedBytes caps what an upload may expand to. The compressed
+// limit above does not bound this: gzip happily turns a few megabytes of zeroes
+// into hundreds of gigabytes, which would fill the data volume before any of
+// the archive was validated.
+const maxRestoreExpandedBytes = 2 << 30
+
 // handleBackup streams a tar.gz of everything: a consistent SQLite snapshot
 // plus the certmagic storage tree.
 func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +88,8 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	tr := tar.NewReader(gz)
 	sawDB := false
+	seen := map[string]bool{}
+	var expanded int64
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -102,6 +110,20 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "path traversal in archive")
 			return
 		}
+		// Only real files: a symlink or device entry has no business in a
+		// backup, and honouring one would be a way out of the temp directory.
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeDir {
+			writeErr(w, http.StatusBadRequest, "unsupported archive entry: "+name)
+			return
+		}
+		if hdr.Typeflag == tar.TypeDir {
+			continue
+		}
+		if seen[name] {
+			writeErr(w, http.StatusBadRequest, "duplicate entry in archive: "+name)
+			return
+		}
+		seen[name] = true
 		if name == "quicgate.db" {
 			sawDB = true
 		}
@@ -115,7 +137,15 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if _, err := io.Copy(f, tr); err != nil {
+		room := maxRestoreExpandedBytes - expanded
+		n, err := io.Copy(f, io.LimitReader(tr, room+1))
+		expanded += n
+		if err == nil && n > room {
+			f.Close()
+			writeErr(w, http.StatusBadRequest, "archive expands beyond the restore size limit")
+			return
+		}
+		if err != nil {
 			f.Close()
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return

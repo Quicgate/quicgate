@@ -73,4 +73,9 @@ What quicgate guarantees, and what it expects from you.
 
 **Admin API.** Failed logins are counted per client IP and the address is locked out after 10 failures in 15 minutes, covering the six-digit TOTP code as well as the password. The admin UI sets `SameSite=Strict` session cookies, applies a same-origin check to cookie-authenticated writes, and serves a strict CSP. Credentials for other systems (the IdP client secret, DNS provider keys) are never returned by the settings API — reads show a mask, and sending the mask back keeps the stored value.
 
+**Admin SSO is authorisation, not just authentication.** Admin login through OIDC or LDAP admits an external identity only when it has a local account with the same address or is named in the allow-list (`oidc_allowed_emails`, `ldap_allowed_users`). An empty list matches nobody: a successful login at your IdP or directory proves who someone is, not that they should administer the proxy. Password login always keeps working, so a misconfigured IdP cannot lock you out. LDAP requires `ldaps://` — a plain bind would put the admin password on the wire in clear text — and directory users do not inherit local TOTP, so require MFA at the directory.
+
+**Backups are as sensitive as the database.** An export contains password hashes, TOTP seeds, API-token digests, IdP client secrets, DNS credentials and certificate private keys, none of it encrypted at application level. Store exports the way you would store the data volume. Restore uploads are bounded (200 MiB compressed, 2 GiB expanded) and reject anything but the files a backup produces.
+
+**API tokens are administrator credentials.** They do not expire, carry no scopes, skip interactive 2FA, and can read backups or rewrite routing. Issue them for a purpose, and delete them when that purpose ends.
 **Never expose the admin port.** Port 81 behind an access list, VPN or firewall, always.

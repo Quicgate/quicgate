@@ -90,42 +90,58 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	var claims struct {
 		Email    string `json:"email"`
-		Verified bool   `json:"email_verified"`
+		Verified *bool  `json:"email_verified"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		writeErr(w, http.StatusBadRequest, "cannot read claims")
 		return
 	}
-	allowed := s.store.GetSetting("oidc_allowed_emails", "")
-	if !emailAllowed(claims.Email, allowed) {
+	// An address the provider itself will not vouch for must not become an
+	// admin login: on IdPs where users can set their own, anyone could claim
+	// the address of a real administrator.
+	if claims.Verified != nil && !*claims.Verified {
+		writeErr(w, http.StatusForbidden, "identity provider reports this address as unverified")
+		return
+	}
+	// Who gets in: an existing local admin with the same address, or an
+	// address named explicitly in the allow-list. An empty allow-list used to
+	// mean "anybody this IdP will authenticate", which hands the whole proxy
+	// to every account in someone else's tenant.
+	u, localErr := s.store.GetUserByEmail(claims.Email)
+	allowList := s.store.GetSetting("oidc_allowed_emails", "")
+	if localErr != nil && !emailAllowed(claims.Email, allowList) {
 		writeErr(w, http.StatusForbidden, "email not permitted")
 		return
 	}
-	// Bind to the local admin identity for session bookkeeping.
-	u, err := s.store.GetUserByEmail(claims.Email)
-	email := claims.Email
-	if err != nil {
-		email = "oidc:" + claims.Email
-	} else {
+	// Keep the local identity when there is one, so sessions, the forced
+	// password change and the profile page all resolve to the real account.
+	email := "oidc:" + strings.ToLower(strings.TrimSpace(claims.Email))
+	if localErr == nil {
 		email = u.Email
 	}
 	tok := make([]byte, 32)
-	rand.Read(tok)
+	if _, err := rand.Read(tok); err != nil {
+		writeErr(w, http.StatusInternalServerError, "entropy failure")
+		return
+	}
 	id := hex.EncodeToString(tok)
 	s.mu.Lock()
-	s.sessions[id] = session{email: email, expires: time.Now().Add(sessionTTL)}
+	s.sessions[id] = session{userID: u.ID, email: email, expires: time.Now().Add(sessionTTL)}
 	s.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: "qg_session", Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: int(sessionTTL.Seconds())})
+	http.SetCookie(w, &http.Cookie{
+		Name: "qg_session", Value: id, Path: "/", HttpOnly: true,
+		SameSite: http.SameSiteStrictMode, Secure: isHTTPS(r), MaxAge: int(sessionTTL.Seconds()),
+	})
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
+// emailAllowed reports whether an external address is named in an allow-list.
+// An empty list matches nothing: callers pair it with a local-account check,
+// so "not configured" fails closed instead of admitting the whole directory.
 func emailAllowed(email, allowedCSV string) bool {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
 		return false
-	}
-	if strings.TrimSpace(allowedCSV) == "" {
-		return true // no allow-list configured: any verified email
 	}
 	for _, a := range strings.Split(allowedCSV, ",") {
 		if strings.ToLower(strings.TrimSpace(a)) == email {

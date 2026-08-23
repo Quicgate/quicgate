@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -174,5 +175,90 @@ func TestLoginThrottleLocksOutAfterRepeatedFailures(t *testing.T) {
 	s.Handler().ServeHTTP(rr, r)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("other address: got %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// An empty allow-list must not mean "anyone this IdP will authenticate": that
+// hands the whole proxy to every account in someone else's tenant.
+func TestExternalIdentityNeedsLocalAccountOrAllowList(t *testing.T) {
+	s := newTestServer(t)
+	if err := s.store.CreateUser("admin@example.com", "x", false); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, email, allowList string
+		want                   bool
+	}{
+		{"local account, empty list", "admin@example.com", "", true},
+		{"stranger, empty list", "attacker@evil.test", "", false},
+		{"stranger, listed", "ops@example.com", "ops@example.com", true},
+		{"stranger, different entry listed", "attacker@evil.test", "ops@example.com", false},
+		{"case-insensitive listing", "OPS@Example.com", "ops@example.com", true},
+	}
+	for _, c := range cases {
+		_, localErr := s.store.GetUserByEmail(c.email)
+		got := localErr == nil || emailAllowed(c.email, c.allowList)
+		if got != c.want {
+			t.Errorf("%s: admitted=%v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// The LDAP gate is authorisation, not just authentication: binding proves the
+// password, the allow-list decides who may administer the proxy.
+func TestLDAPIdentityApproval(t *testing.T) {
+	s := newTestServer(t)
+	if err := s.store.CreateUser("alice", "x", false); err != nil {
+		t.Fatal(err)
+	}
+	if !s.ldapIdentityApproved("alice") {
+		t.Error("a directory user with a local account should be approved")
+	}
+	if s.ldapIdentityApproved("mallory") {
+		t.Error("an unknown directory user must not be approved by default")
+	}
+	if err := s.store.SetSetting("ldap_allowed_users", "bob, carol"); err != nil {
+		t.Fatal(err)
+	}
+	if !s.ldapIdentityApproved("bob") {
+		t.Error("an allow-listed directory user should be approved")
+	}
+	if s.ldapIdentityApproved("mallory") {
+		t.Error("a user outside the allow-list must stay rejected")
+	}
+}
+
+// A plaintext LDAP URL must be refused rather than sending the password in the
+// clear, even when everything else is configured.
+func TestLDAPRequiresTLS(t *testing.T) {
+	s := newTestServer(t)
+	for k, v := range map[string]string{
+		"ldap_enabled": "1", "ldap_url": "ldap://ldap.example.test:389",
+		"ldap_bind_dn_template": "uid=%s,ou=people,dc=example,dc=com",
+	} {
+		if err := s.store.SetSetting(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s.ldapAuth("alice", "hunter2") {
+		t.Error("plaintext ldap:// bind should be refused")
+	}
+}
+
+// An allow-listed external identity has no local row; the profile call must
+// still work instead of 500ing.
+func TestExternalIdentityProfile(t *testing.T) {
+	s := newTestServer(t)
+	tok := "ext-session"
+	s.sessions[tok] = session{email: "oidc:ops@example.com", expires: time.Now().Add(time.Hour)}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	req.AddCookie(&http.Cookie{Name: "qg_session", Value: tok})
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("/api/me for an external identity = %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "oidc:ops@example.com") {
+		t.Fatalf("profile did not report the session identity: %s", rr.Body.String())
 	}
 }
