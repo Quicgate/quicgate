@@ -144,17 +144,49 @@ textarea { resize: vertical; }
 .help code { font-family: var(--font-mono); font-size: var(--fs-sm); background: var(--c-surface-2); padding: 1px 5px; border-radius: var(--r-sm); color: var(--c-text); }
 .help a { color: var(--c-accent); }
 
-.skin-picker {
-  background: transparent;
-  color: var(--c-text-muted);
-  border: 1px solid var(--c-border);
-  border-radius: var(--r-sm);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  padding: 3px var(--sp-2);
-  cursor: pointer;
+.set-lead { margin: calc(var(--sp-3) * -1) 0 var(--sp-4); max-width: 70ch; }
+
+/* theme menu: a themed popover, because a native select's dropdown is drawn
+   by the OS and cannot follow the app's palette */
+.skinmenu { position: relative; }
+.skinmenu__btn {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  background: transparent; color: var(--c-text-muted);
+  border: 1px solid var(--c-border); border-radius: var(--r-sm);
+  font-family: var(--font-mono); font-size: var(--fs-xs);
+  padding: 4px var(--sp-2); cursor: pointer;
 }
-.skin-picker:hover { color: var(--c-text); border-color: var(--c-border-strong); }
+.skinmenu__btn:hover { color: var(--c-text); border-color: var(--c-border-strong); }
+.skinmenu__btn:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 2px; }
+.skinmenu__swatch {
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 1px solid var(--c-border-strong); flex: 0 0 auto;
+}
+.skinmenu__caret { font-size: 9px; opacity: .7; }
+.skinmenu__pop {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
+  min-width: 232px; padding: var(--sp-1);
+  background: var(--c-surface); border: 1px solid var(--c-border);
+  border-radius: var(--r-md); box-shadow: var(--sh-lg);
+}
+.skinmenu__item {
+  display: flex; align-items: center; gap: var(--sp-3); width: 100%;
+  background: none; border: 0; border-radius: var(--r-sm);
+  padding: var(--sp-2); cursor: pointer; text-align: left; color: var(--c-text);
+  font: inherit;
+}
+.skinmenu__item:hover { background: var(--c-surface-2); }
+.skinmenu__item:focus-visible { outline: 2px solid var(--c-accent); outline-offset: -2px; }
+.skinmenu__preview {
+  width: 26px; height: 26px; border-radius: var(--r-sm); flex: 0 0 auto;
+  border: 1px solid var(--c-border-strong); display: grid; place-items: center;
+}
+.skinmenu__preview i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+.skinmenu__text { display: flex; flex-direction: column; line-height: 1.25; flex: 1; min-width: 0; }
+.skinmenu__text b { font-size: var(--fs-sm); font-weight: 600; }
+.skinmenu__text span { font-size: var(--fs-xs); color: var(--c-text-muted); }
+.skinmenu__tick { color: var(--c-accent); opacity: 0; flex: 0 0 auto; }
+.skinmenu__item[aria-checked="true"] .skinmenu__tick { opacity: 1; }
 
 /* built-in guides (Help page) */
 .guide-index { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: var(--sp-3); }

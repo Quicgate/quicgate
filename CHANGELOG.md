@@ -4,6 +4,25 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.1] - 2026-08-23
+
+### Changed
+- **The theme picker is a real menu.** It was a native `<select>`, whose
+  dropdown is drawn by the operating system and ignores the app's palette —
+  a bright blue row in the middle of a dark UI. It is now a themed popover
+  where each entry previews the theme it selects (surface colour plus accent),
+  ticks the active one, and closes on Escape or an outside click.
+- **Settings is grouped and only shows what applies.** The eight cards sat in
+  one flat grid with every field for every feature visible, configured or not,
+  which left tall/short cards next to each other and a lot of empty inputs to
+  read past. They are now grouped under *Certificates*, *Who can administer
+  quicgate*, *Traffic handling* and *Data*, and the OIDC, LDAP and auto-ban
+  cards keep their fields hidden until the feature is switched on. Choosing a
+  shared identity provider also hides the inline issuer/client/secret fields
+  it replaces. A default install now shows half the inputs it used to.
+
+[1.8.1]: https://github.com/Quicgate/quicgate/releases/tag/v1.8.1
+
 ## [1.8.0] - 2026-08-23
 
 ### Added
