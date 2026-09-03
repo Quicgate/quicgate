@@ -1,6 +1,6 @@
 module quicgate
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/caddyserver/certmagic v0.25.4
@@ -13,12 +13,12 @@ require (
 	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/pires/go-proxyproto v0.15.0
 	github.com/pquerna/otp v1.5.0
-	github.com/quic-go/quic-go v0.61.0
+	github.com/quic-go/quic-go v0.62.0
 	golang.org/x/crypto v0.55.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/time v0.15.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
-	modernc.org/sqlite v1.56.0
+	modernc.org/sqlite v1.57.0
 )
 
 require (
