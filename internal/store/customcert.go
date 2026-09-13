@@ -166,12 +166,12 @@ func (s *Store) ImportCertFromFile(name, certPath, keyPath string) (*CustomCert,
 }
 
 func (s *Store) DeleteCustomCert(id int64) error {
-	var n int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM hosts WHERE cert_id=?", id).Scan(&n); err != nil {
+	users, err := customCertUsers(s.db, id)
+	if err != nil {
 		return err
 	}
-	if n > 0 {
-		return fmt.Errorf("certificate is used by %d host(s)", n)
+	if len(users) > 0 {
+		return inUse("certificate", users)
 	}
 	res, err := s.db.Exec("DELETE FROM custom_certs WHERE id=?", id)
 	if err != nil {

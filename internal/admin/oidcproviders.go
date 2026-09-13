@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
-	"strconv"
 
 	"quicgate/internal/store"
 )
@@ -87,29 +86,8 @@ func (s *Server) handleDeleteOIDCProvider(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	// Refuse to delete a provider a host still points at; the engine would
-	// fail closed (403 on that host), which is safe but surprising.
-	hosts, err := s.store.ListHosts()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	for _, h := range hosts {
-		if h.Options.OIDC != nil && h.Options.OIDC.ProviderID == id {
-			writeErr(w, http.StatusBadRequest, "provider is in use by host "+h.Domains[0])
-			return
-		}
-		for _, r := range h.Options.AuthRules {
-			if r.OIDC != nil && r.OIDC.ProviderID == id {
-				writeErr(w, http.StatusBadRequest, "provider is in use by "+h.Domains[0]+" path "+r.Path)
-				return
-			}
-		}
-	}
-	if s.store.GetSetting("admin_oidc_provider_id", "") == strconv.FormatInt(id, 10) {
-		writeErr(w, http.StatusBadRequest, "provider is in use by the admin login")
-		return
-	}
+	// The store refuses while a host, a path rule or the admin login still uses
+	// the provider.
 	if err := s.store.DeleteOIDCProvider(id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "provider not found")
@@ -123,20 +101,4 @@ func (s *Server) handleDeleteOIDCProvider(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-}
-
-// oidcProviderExists guards a host's provider reference on write, mirroring
-// aclExists: a dangling id fails closed at the engine but should never be
-// storable in the first place.
-func (s *Server) oidcProviderExists(id int64) error {
-	list, err := s.store.ListOIDCProviders()
-	if err != nil {
-		return err
-	}
-	for _, p := range list {
-		if p.ID == id {
-			return nil
-		}
-	}
-	return errors.New("oidc providerId does not reference an existing provider")
 }

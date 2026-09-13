@@ -48,14 +48,18 @@ func (p *Provider) derive(in containerInspect, address string) derived {
 
 	plan := resolvePlan(in, address)
 
-	// Optional access list, reused by both the host and the streams.
+	// Optional access list, reused by both the host and the streams. A label
+	// that names a list which does not exist means the container is not routed
+	// at all: publishing it without the restriction it asked for would let a
+	// typo or a deleted list expose the service.
 	var aclID *int64
 	if al := lbl("access-list"); al != "" {
-		if id, ok := p.resolveACL(al); ok {
-			aclID = &id
-		} else {
-			d.warnings = append(d.warnings, fmt.Sprintf("access list %q does not exist", al))
+		id, ok := p.resolveACL(al)
+		if !ok {
+			d.warnings = append(d.warnings, fmt.Sprintf("access list %q does not exist, so the container is not routed", al))
+			return d
 		}
+		aclID = &id
 	}
 
 	// Raw L4 streams (quicgate.streams). These claim container ports so the

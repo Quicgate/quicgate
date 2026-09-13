@@ -209,7 +209,10 @@ func TestPathRewriteStripPrefix(t *testing.T) {
 func TestRequestHeaderRule(t *testing.T) {
 	e, st := newTestEngine(t)
 	var seen string
-	up := backend(t, func(w http.ResponseWriter, r *http.Request) { seen = r.Header.Get("X-Injected"); w.WriteHeader(http.StatusOK) })
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("X-Injected")
+		w.WriteHeader(http.StatusOK)
+	})
 	mustCreateHost(t, st, &store.Host{Type: "proxy", Domains: []string{"hdr.test"}, Upstream: up,
 		Options: store.Options{RequestHeaders: []store.HeaderRule{{Op: "set", Name: "X-Injected", Value: "yes"}}}})
 	reload(t, e)
@@ -559,10 +562,11 @@ func TestPathAuthDanglingListFailsClosed(t *testing.T) {
 	id := mustCreateACL(t, st, &store.AccessList{Name: "lan", Satisfy: "all",
 		Rules: []store.AccessRule{{Action: "allow", CIDR: "10.0.0.0/8"}}})
 	missing := id + 999
-	h := &store.Host{Type: "proxy", Domains: []string{"pd.test"}, Upstream: up, AccessListID: &id}
+	// The store refuses a dangling reference, so inject the row past validation
+	// the way a pre-existing broken row would reach the engine.
+	h := store.Host{Type: "proxy", Domains: []string{"pd.test"}, Upstream: up, AccessListID: &id, CertMode: "none", Enabled: true}
 	h.Options.AuthRules = []store.AuthRule{{Path: "/x/", Mode: "accessList", AccessListID: &missing}}
-	mustCreateHost(t, st, h)
-	reload(t, e)
+	e.SetDockerRoutes([]store.Host{h}, nil)
 
 	if rr := req(e, "GET", "pd.test", "/x/y", "203.0.113.9", nil); rr.Code != http.StatusForbidden {
 		t.Fatalf("dangling access list: got %d, want 403", rr.Code)

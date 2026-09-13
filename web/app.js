@@ -1242,7 +1242,15 @@ async function refreshStreams() {
     if (s.sendProxyProtocol) badges.push('proxy-' + s.sendProxyProtocol);
     if (s.terminateTls) badges.push('tls-term');
     if (s.sniRoutes && s.sniRoutes.length) badges.push('sni');
-    if (badges.length) tdListen.innerHTML += ' ' + badges.map((b) => `<span class="badge">${b}</span>`).join(' ');
+    if (badges.length) tdListen.innerHTML += ' ' + badges.map((b) => `<span class="badge">${esc(b)}</span>`).join(' ');
+    const failed = (s.listeners || []).filter((l) => l.state === 'failed');
+    if (failed.length) {
+      const b = document.createElement('span');
+      b.className = 'badge badge--danger';
+      b.textContent = 'not running';
+      b.title = failed.map((l) => `${l.key}: ${l.error}`).join('\n');
+      tdListen.append(' ', b);
+    }
     const tdProto = document.createElement('td');
     tdProto.innerHTML = `<span class="badge">${s.protocol === 'both' ? 'tcp + udp' : s.protocol}</span>`;
     const tdFwd = document.createElement('td');
@@ -1252,7 +1260,7 @@ async function refreshStreams() {
     const nCidrs = (s.allowedCidrs || []).length;
     if (s.accessListId) {
       const acl = accessLists.find((a) => a.id === s.accessListId);
-      tdSources.innerHTML = `<span class="badge badge--success">${acl ? acl.name : 'access list'}</span>`;
+      tdSources.innerHTML = `<span class="badge badge--success">${esc(acl ? acl.name : 'access list')}</span>`;
     } else if (nCidrs) {
       tdSources.innerHTML = `<span class="badge badge--success">${nCidrs} CIDR${nCidrs > 1 ? 's' : ''}</span>`;
     } else {
@@ -1266,7 +1274,8 @@ async function refreshStreams() {
     cb.checked = s.enabled;
     cb.addEventListener('change', async () => {
       try {
-        await api('PUT', `/api/streams/${s.id}`, { ...s, enabled: cb.checked });
+        const { listeners, ...stored } = s;
+        await api('PUT', `/api/streams/${s.id}`, { ...stored, enabled: cb.checked });
         refreshStreams();
       } catch (err) {
         alert(err.message);
@@ -1316,6 +1325,8 @@ function openStreamModal(s) {
   $('s-cidrs-field').hidden = !!src.value;
   $('s-sendproxy').value = s ? (s.sendProxyProtocol || '') : '';
   $('s-acceptproxy').checked = s ? !!s.acceptProxyProtocol : false;
+  $('s-trusted').value = s && s.trustedProxies ? s.trustedProxies.join('\n') : '';
+  $('s-trusted-field').hidden = !$('s-acceptproxy').checked;
   $('s-terminatetls').checked = s ? !!s.terminateTls : false;
   const csel = $('s-certid');
   csel.innerHTML = '';
@@ -1331,6 +1342,7 @@ function openStreamModal(s) {
   $('stream-modal').hidden = false;
 }
 $('s-terminatetls').addEventListener('change', () => { $('s-cert-field').hidden = !$('s-terminatetls').checked; });
+$('s-acceptproxy').addEventListener('change', () => { $('s-trusted-field').hidden = !$('s-acceptproxy').checked; });
 $('s-source').addEventListener('change', () => { $('s-cidrs-field').hidden = !!$('s-source').value; });
 
 $('btn-add-stream').addEventListener('click', () => openStreamModal(null));
@@ -1355,16 +1367,24 @@ $('stream-form').addEventListener('submit', async (e) => {
     accessListId: $('s-source').value ? parseInt($('s-source').value, 10) : null,
     sendProxyProtocol: $('s-sendproxy').value,
     acceptProxyProtocol: $('s-acceptproxy').checked,
+    trustedProxies: $('s-acceptproxy').checked ? $('s-trusted').value.split('\n').map((v) => v.trim()).filter(Boolean) : [],
     terminateTls: $('s-terminatetls').checked,
     certId: $('s-terminatetls').checked && $('s-certid').value ? parseInt($('s-certid').value, 10) : null,
     sniRoutes,
     enabled: $('s-enabled').checked,
   };
   try {
-    if (editingStreamId) await api('PUT', `/api/streams/${editingStreamId}`, s);
-    else await api('POST', '/api/streams', s);
-    $('stream-modal').hidden = true;
+    const saved = editingStreamId ? await api('PUT', `/api/streams/${editingStreamId}`, s) : await api('POST', '/api/streams', s);
+    // Saved is not the same as running: say so, and keep editing the stored
+    // stream (a second Save must update it, not create a duplicate).
+    editingStreamId = saved.id;
     refreshStreams();
+    const failed = (saved.listeners || []).filter((l) => l.state === 'failed');
+    if (failed.length) {
+      setError('stream-error', new Error('Saved, but not running: ' + failed.map((l) => `${l.key}: ${l.error}`).join('; ')));
+      return;
+    }
+    $('stream-modal').hidden = true;
   } catch (err) {
     setError('stream-error', err);
   }

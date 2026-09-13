@@ -10,6 +10,8 @@ An access list is an ordered set of rules plus optional basic-auth users, reusab
 - **Users**: bcrypt basic auth. **Satisfy any** = IP rule *or* login passes; **satisfy all** = both must pass.
 - **Pass Authorization header**: off by default when the list has users (quicgate consumes the header for basic auth). A pure IP list never strips it, so bearer-token APIs behind an IP allowlist keep working.
 - CORS preflights (`OPTIONS` with `Access-Control-Request-Method`) always pass the gate; the real request is still gated.
+- **A failing rule never widens access.** If a hostname rule stops resolving, it keeps its last resolved addresses for up to 24 hours; after that (or with no earlier answer) an unresolved *allow* matches nobody and an unresolved *deny* denies everyone who reaches it. Country rules behave the same way while the GeoIP database is not loaded. Only a list with no IP, hostname or country rule at all is unrestricted by address. Affected routes show a warning in the effective-config view.
+- **In-use lists cannot be deleted.** A list that a host, a path rule or a stream still uses is refused on delete; detach it first. A reference that is missing anyway (an old row, a restored backup) closes the host, path or stream instead of opening it.
 
 ## Built-in OIDC SSO
 
@@ -27,9 +29,9 @@ quicgate can run the OpenID Connect login itself — no Authelia, oauth2-proxy o
 
 What happens at runtime: an anonymous request is redirected to the IdP (auth-code flow with PKCE and a nonce); after login quicgate verifies the ID token against the IdP's keys, applies your policy, and sets a signed session cookie. Sessions are stateless, survive restarts, and are bound to the exact host they were minted for — a session for one host can never be replayed against another. Sign out at `/.qg/oidc/logout`.
 
-**Identity headers.** With *Pass identity upstream* enabled, the upstream receives `Remote-User`, `Remote-Email` and `Remote-Groups` — apps that support proxy auth log the user straight in. Inbound copies of these headers are always stripped on OIDC hosts (public paths included), so a client can never spoof them through quicgate. Make sure the upstream only accepts traffic from quicgate, or header trust is meaningless.
+**Identity headers.** With *Pass identity upstream* enabled, the upstream receives `Remote-User`, `Remote-Email` and `Remote-Groups`, and apps that support proxy auth log the user straight in. Inbound copies of these headers are stripped on every host that has SSO on the host or on any path rule (public paths included), so a client can never spoof them through quicgate. Make sure the upstream only accepts traffic from quicgate, or header trust is meaningless.
 
-If the provider referenced by a host is deleted, the host fails closed (403) rather than turning public.
+A provider that a host, a path rule or the admin login still uses cannot be deleted. If a reference is missing anyway, the host fails closed (403) rather than turning public.
 
 ## Forward authentication
 
@@ -39,10 +41,12 @@ Prefer an existing Authelia / Authentik / Keycloak-gatekeeper setup? Point the h
 
 Security tab → **Path authentication** takes ordered rules of path + match (**prefix**/**exact**) + mode:
 
-- **Public** — no auth for this path.
-- **Access list** — a specific list, possibly different from the host's.
-- **Forward auth** — the host's forward-auth endpoint.
-- **OIDC SSO** — an OpenID Connect login. By default the host's provider; a rule can name a *different* provider (and its own allowed groups), so one host can send `/staff` to the company IdP and `/partner` to another, or use a separate app registration per URL on the same IdP.
+- **Public**: no auth for this path.
+- **Access list**: a specific list, possibly different from the host's.
+- **Forward auth**: the host's forward-auth endpoint.
+- **OIDC SSO**: an OpenID Connect login. By default the host's provider; a rule can name a *different* provider (and its own allowed groups), so one host can send `/staff` to the company IdP and `/partner` to another, or use a separate app registration per URL on the same IdP. Every rule's policy is enforced on its own, even on the same provider as the host: a `/admin/` rule that admits only admins is never widened by a host policy that admits all employees, and the login is finished by the rule that started it.
+
+A rule whose gate cannot be built refuses every request on its path: an access list that no longer exists, *Forward auth* on a host without a forward-auth endpoint, or *OIDC SSO* with no provider on the rule or the host. It never falls back to the host's gate, which may be public.
 
 The longest matching path wins (exact beats prefix at equal length); a path matching no rule keeps the host's own gate. Rules can be scoped to HTTP verbs. Typical use: an SSO-gated app whose licensing callback, webhook receiver or health probe must answer without credentials:
 
@@ -65,7 +69,11 @@ What quicgate guarantees, and what it expects from you.
 
 **Path handling.** Any request whose path contains a `.` or `..` segment is rejected with 400 before it reaches a gate, a path rule or an upstream. Otherwise `/public/../admin` would match a public rule here while an upstream that resolves dot segments served `/admin` — a bypass of every gate on the host. Dot-prefixed names such as `/.well-known/acme-challenge/...` are unaffected: only whole `.`/`..` segments are refused.
 
-**Identity headers cannot be spoofed.** On a host with OIDC SSO, `Remote-User`, `Remote-Email` and `Remote-Groups` are stripped from every inbound request, including public path carve-outs, before any gate runs. On a forward-auth host, whatever headers you list under *Copy response headers upstream* are stripped from the inbound request too, so a 2xx from the auth server that omits one cannot let the client's own value through.
+**Identity headers cannot be spoofed.** On a host with OIDC SSO on the host or on any path rule, `Remote-User`, `Remote-Email` and `Remote-Groups` are stripped from every inbound request, including public path carve-outs, before any gate runs. On a forward-auth host, whatever headers you list under *Copy response headers upstream* are stripped from every inbound request as well, on every path, so neither a public carve-out nor a 2xx from the auth server that omits one can let the client's own value through.
+
+**Client certificates (mTLS) are bound to the host.** A host with *Client certificate* set to *require* or *request* checks the certificate on every request, not only in the TLS handshake. A request whose TLS server name (SNI) selects a different host is answered `421 Misdirected Request` whenever either host takes client certificates, which also covers HTTP/2 and HTTP/3 connections reused for another name; clients retry on a fresh connection. The certificate is verified again against the host's current CA bundle, so replacing the bundle applies to connections that are already open. Such a host is HTTPS only: plain HTTP is redirected whatever its force-SSL setting. A CA bundle must contain at least one parsable certificate, and client certificates need a TLS host (not certMode *none*).
+
+**The response cache only holds anonymous responses.** A host with *cache* enabled never answers from, or stores into, the shared cache for a request that carries a cookie, arrived with an `Authorization` header (even one an access list consumed), or was admitted by a basic-auth user, an SSO session or forward auth. Cached entries vary on the client's `Accept-Encoding`; responses with `Set-Cookie`, `private`, `no-store`, `no-cache`, `max-age=0` or a `Vary` other than `Accept-Encoding` are not stored, and a request `Cache-Control: no-cache` or `no-store` bypasses the cache.
 
 **Still, restrict your backends.** Header-based identity is only as good as the network path. If an upstream is reachable directly, anyone who can reach it can set `Remote-User` themselves and quicgate never sees the request. Bind backends to the quicgate host, or firewall them to it.
 

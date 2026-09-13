@@ -43,10 +43,10 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		base := idp.srv.URL
 		json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                 base,
-			"authorization_endpoint": base + "/auth",
-			"token_endpoint":         base + "/token",
-			"jwks_uri":               base + "/keys",
+			"issuer":                                base,
+			"authorization_endpoint":                base + "/auth",
+			"token_endpoint":                        base + "/token",
+			"jwks_uri":                              base + "/keys",
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 		})
 	})
@@ -274,12 +274,12 @@ func TestOIDCWithPublicPathRule(t *testing.T) {
 
 // A dangling provider reference fails closed instead of proxying.
 func TestOIDCMissingProviderFailsClosed(t *testing.T) {
-	e, st := newTestEngine(t)
+	e, _ := newTestEngine(t)
 	up := backend(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	h := &store.Host{Type: "proxy", Domains: []string{"mp.test"}, Upstream: up}
+	// The store refuses a dangling provider, so inject the row past validation.
+	h := store.Host{Type: "proxy", Domains: []string{"mp.test"}, Upstream: up, CertMode: "none", Enabled: true}
 	h.Options.OIDC = &store.OIDCAuth{ProviderID: 4242}
-	mustCreateHost(t, st, h)
-	reload(t, e)
+	e.SetDockerRoutes([]store.Host{h}, nil)
 
 	if rr := req(e, "GET", "mp.test", "/", "203.0.113.9", nil); rr.Code != http.StatusForbidden {
 		t.Fatalf("missing provider: got %d, want 403", rr.Code)

@@ -14,7 +14,7 @@ import (
 type OIDCProvider struct {
 	ID            int64    `json:"id"`
 	Name          string   `json:"name"`
-	Issuer        string   `json:"issuer"`   // discovery base URL, e.g. https://idp/realms/main
+	Issuer        string   `json:"issuer"` // discovery base URL, e.g. https://idp/realms/main
 	ClientID      string   `json:"clientId"`
 	ClientSecret  string   `json:"clientSecret"`
 	Scopes        []string `json:"scopes,omitempty"`        // default: openid email profile
@@ -128,6 +128,13 @@ func (s *Store) UpdateOIDCProvider(p *OIDCProvider) error {
 }
 
 func (s *Store) DeleteOIDCProvider(id int64) error {
+	users, err := oidcProviderUsers(s.db, id)
+	if err != nil {
+		return err
+	}
+	if len(users) > 0 {
+		return inUse("identity provider", users)
+	}
 	res, err := s.db.Exec("DELETE FROM oidc_providers WHERE id = ?", id)
 	if err != nil {
 		return err

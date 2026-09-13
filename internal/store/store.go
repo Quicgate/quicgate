@@ -220,11 +220,15 @@ type Stream struct {
 	AccessListID *int64 `json:"accessListId,omitempty"`
 
 	// Round-2 options (all TCP-only).
-	SendProxyProtocol   string     `json:"sendProxyProtocol,omitempty"`   // "" | v1 | v2 (prepend PROXY header to backend)
-	AcceptProxyProtocol bool       `json:"acceptProxyProtocol,omitempty"` // parse inbound PROXY header for real client IP
-	TerminateTLS        bool       `json:"terminateTls,omitempty"`        // terminate TLS with CertID, forward plaintext
-	CertID              *int64     `json:"certId,omitempty"`
-	SNIRoutes           []SNIRoute `json:"sniRoutes,omitempty"` // TLS passthrough by SNI
+	SendProxyProtocol   string `json:"sendProxyProtocol,omitempty"`   // "" | v1 | v2 (prepend PROXY header to backend)
+	AcceptProxyProtocol bool   `json:"acceptProxyProtocol,omitempty"` // parse inbound PROXY header for real client IP
+	// TrustedProxies lists the peers (CIDRs) whose PROXY header is believed and
+	// required. Any other peer is treated as a direct client: its own socket
+	// address is its identity and nothing it sends is parsed as a header.
+	TrustedProxies []string   `json:"trustedProxies,omitempty"`
+	TerminateTLS   bool       `json:"terminateTls,omitempty"` // terminate TLS with CertID, forward plaintext
+	CertID         *int64     `json:"certId,omitempty"`
+	SNIRoutes      []SNIRoute `json:"sniRoutes,omitempty"` // TLS passthrough by SNI
 
 	Enabled   bool   `json:"enabled"`
 	CreatedAt string `json:"createdAt,omitempty"`
@@ -629,8 +633,10 @@ func scanHost(row interface{ Scan(...any) error }) (Host, error) {
 
 const hostCols = "id, type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at, access_list_id, redirect, cert_id, upstreams, static_root, locations"
 
-func (s *Store) ListHosts() ([]Host, error) {
-	rows, err := s.db.Query("SELECT " + hostCols + " FROM hosts ORDER BY id")
+func (s *Store) ListHosts() ([]Host, error) { return listHosts(s.db) }
+
+func listHosts(q dbtx) ([]Host, error) {
+	rows, err := q.Query("SELECT " + hostCols + " FROM hosts ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -657,8 +663,13 @@ func b2i(b bool) int {
 	return 0
 }
 
-func (s *Store) CreateHost(h *Host) error {
+func (s *Store) CreateHost(h *Host) error { return createHost(s.db, h) }
+
+func createHost(q dbtx, h *Host) error {
 	if err := h.Validate(); err != nil {
+		return err
+	}
+	if err := checkHostRefs(q, h); err != nil {
 		return err
 	}
 	domains, _ := json.Marshal(h.Domains)
@@ -668,7 +679,7 @@ func (s *Store) CreateHost(h *Host) error {
 	upstreams, _ := json.Marshal(h.Upstreams)
 	locations, _ := json.Marshal(h.Locations)
 	h.CreatedAt, h.UpdatedAt = now(), now()
-	res, err := s.db.Exec(
+	res, err := q.Exec(
 		"INSERT INTO hosts (type, domains, upstream, cert_mode, force_ssl, enabled, options, created_at, updated_at, access_list_id, redirect, cert_id, upstreams, static_root, locations) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.CreatedAt, h.UpdatedAt, h.AccessListID, string(redirect), h.CertID, string(upstreams), h.StaticRoot, string(locations))
 	if err != nil {
@@ -678,8 +689,13 @@ func (s *Store) CreateHost(h *Host) error {
 	return err
 }
 
-func (s *Store) UpdateHost(h *Host) error {
+func (s *Store) UpdateHost(h *Host) error { return updateHost(s.db, h) }
+
+func updateHost(q dbtx, h *Host) error {
 	if err := h.Validate(); err != nil {
+		return err
+	}
+	if err := checkHostRefs(q, h); err != nil {
 		return err
 	}
 	domains, _ := json.Marshal(h.Domains)
@@ -689,7 +705,7 @@ func (s *Store) UpdateHost(h *Host) error {
 	upstreams, _ := json.Marshal(h.Upstreams)
 	locations, _ := json.Marshal(h.Locations)
 	h.UpdatedAt = now()
-	res, err := s.db.Exec(
+	res, err := q.Exec(
 		"UPDATE hosts SET type=?, domains=?, upstream=?, cert_mode=?, force_ssl=?, enabled=?, options=?, updated_at=?, access_list_id=?, redirect=?, cert_id=?, upstreams=?, static_root=?, locations=? WHERE id=?",
 		h.Type, string(domains), string(upstream), h.CertMode, b2i(h.ForceSSL), b2i(h.Enabled), string(options), h.UpdatedAt, h.AccessListID, string(redirect), h.CertID, string(upstreams), h.StaticRoot, string(locations), h.ID)
 	if err != nil {

@@ -486,44 +486,42 @@ func (s *Server) handleDeleteAccessList(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+// streamView is a stored stream plus the state of its listeners, so saving a
+// stream never reads as "running" when the engine could not start it (a port
+// another process holds, a missing certificate, no trusted PROXY peer).
+type streamView struct {
+	store.Stream
+	Listeners []engine.StreamStatus `json:"listeners"`
+}
+
+func (s *Server) streamViews(streams []store.Stream) []streamView {
+	byID := map[int64][]engine.StreamStatus{}
+	for _, st := range s.engine.StreamStatuses() {
+		byID[st.StreamID] = append(byID[st.StreamID], st)
+	}
+	out := make([]streamView, 0, len(streams))
+	for _, st := range streams {
+		ls := byID[st.ID]
+		if ls == nil {
+			ls = []engine.StreamStatus{}
+		}
+		out = append(out, streamView{Stream: st, Listeners: ls})
+	}
+	return out
+}
+
 func (s *Server) handleListStreams(w http.ResponseWriter, r *http.Request) {
 	streams, err := s.store.ListStreams()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if streams == nil {
-		streams = []store.Stream{}
-	}
-	writeJSON(w, http.StatusOK, streams)
-}
-
-// aclExists guards an optional access-list reference: a dangling id would
-// silently drop to "no restriction" on a stream, or send a path-scoped auth
-// rule back to the host's own gate, so reject it at write time instead.
-func (s *Server) aclExists(id *int64) error {
-	if id == nil {
-		return nil
-	}
-	lists, err := s.store.ListAccessLists()
-	if err != nil {
-		return err
-	}
-	for _, a := range lists {
-		if a.ID == *id {
-			return nil
-		}
-	}
-	return errors.New("accessListId does not reference an existing access list")
+	writeJSON(w, http.StatusOK, s.streamViews(streams))
 }
 
 func (s *Server) handleCreateStream(w http.ResponseWriter, r *http.Request) {
 	var st store.Stream
 	if err := decodeStrict(r, &st); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := s.aclExists(st.AccessListID); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -535,7 +533,7 @@ func (s *Server) handleCreateStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, st)
+	writeJSON(w, http.StatusCreated, s.streamViews([]store.Stream{st})[0])
 }
 
 func (s *Server) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
@@ -550,10 +548,6 @@ func (s *Server) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st.ID = id
-	if err := s.aclExists(st.AccessListID); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	if err := s.store.UpdateStream(&st, s.engine.ReservedPorts()); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "stream not found")
@@ -566,7 +560,7 @@ func (s *Server) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, st)
+	writeJSON(w, http.StatusOK, s.streamViews([]store.Stream{st})[0])
 }
 
 func (s *Server) handleDeleteStream(w http.ResponseWriter, r *http.Request) {
@@ -909,39 +903,9 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, hosts)
 }
 
-// hostACLRefs checks every reference a host makes to another object: its
-// access lists (host-level and per path rule) and its OIDC provider.
-func (s *Server) hostACLRefs(h store.Host) error {
-	if err := s.aclExists(h.AccessListID); err != nil {
-		return err
-	}
-	for _, r := range h.Options.AuthRules {
-		if err := s.aclExists(r.AccessListID); err != nil {
-			return err
-		}
-	}
-	if h.Options.OIDC != nil {
-		if err := s.oidcProviderExists(h.Options.OIDC.ProviderID); err != nil {
-			return err
-		}
-	}
-	for _, r := range h.Options.AuthRules {
-		if r.OIDC != nil {
-			if err := s.oidcProviderExists(r.OIDC.ProviderID); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
 	var h store.Host
 	if err := decodeStrict(r, &h); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := s.hostACLRefs(h); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -968,10 +932,6 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.ID = id
-	if err := s.hostACLRefs(h); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	if err := s.store.UpdateHost(&h); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "host not found")

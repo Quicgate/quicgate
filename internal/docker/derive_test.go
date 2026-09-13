@@ -230,15 +230,18 @@ func TestDeriveAccessList(t *testing.T) {
 	}
 }
 
-func TestDeriveAccessListMissingWarns(t *testing.T) {
+// A container that asks for an access list that does not exist must not be
+// routed at all: publishing it without the restriction it asked for would make
+// a label typo expose the service.
+func TestDeriveAccessListMissingIsNotRouted(t *testing.T) {
 	p := testProvider(Options{}, nil)
 	d := p.derive(makeContainer(ctSpec{
 		name: "app", running: true,
-		labels:    labels("enable", "true", "host", "app.example.com", "access-list", "nope"),
-		published: map[int]int{8080: 8080},
+		labels:    labels("enable", "true", "host", "app.example.com", "access-list", "nope", "streams", "5432"),
+		published: map[int]int{8080: 8080, 5432: 5432},
 	}), "127.0.0.1")
-	if d.host == nil || d.host.AccessListID != nil {
-		t.Fatalf("expected host with no acl, got %v", d.host)
+	if d.host != nil || len(d.streams) != 0 {
+		t.Fatalf("container with a missing access list was routed: host=%v streams=%v", d.host, d.streams)
 	}
 	if !hasWarning(d, "does not exist") {
 		t.Fatalf("warnings=%v want does-not-exist", d.warnings)
