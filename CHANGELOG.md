@@ -4,11 +4,11 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.9.0] - 2026-09-13
 
 Security remediation from an independent review of v1.8.1 (findings Q01 to
-Q16), plus the defects a second, independent check of that remediation found.
-Every fix ships with a regression test that fails when the fix is removed.
+Q16), plus the defects that two further independent checks of that remediation
+found. Every fix ships with a regression test that fails when the fix is removed.
 
 ### Security
 - **Client certificates are bound to the requested host (Q01).** The TLS
@@ -240,6 +240,8 @@ Every fix ships with a regression test that fails when the fix is removed.
   field, CORS preflights from addresses an access list does not admit get
   `403`, users of SSO-protected hosts sign in once more after the upgrade, and
   editing a stream reconnects its clients.
+
+[1.9.0]: https://github.com/Quicgate/quicgate/releases/tag/v1.9.0
 
 ## [1.8.1] - 2026-08-23
 
