@@ -35,7 +35,7 @@ services:
 | `quicgate.scheme` | upstream scheme `http` / `https` | `http` |
 | `quicgate.tls-skip-verify` | trust a self-signed upstream | `false` |
 | `quicgate.tls` | obtain a Let's Encrypt cert (public side) | `on` |
-| `quicgate.access-list` | attach an existing access list by name | none |
+| `quicgate.access-list` | attach an existing access list by name; if no list has that name the container is **not routed** (a typo never publishes it unprotected) | none |
 | `quicgate.streams` | raw L4 forwards, comma-separated `[listen:]container[/proto]` | none |
 
 `quicgate.streams` exposes non-HTTP ports as TCP/UDP streams, e.g. `quicgate.streams=25565, 2222:22/tcp, 53/udp` (proto `tcp`/`udp`/`both`, default `tcp`; `listen:` remaps the public port). Stream ports are automatically excluded from HTTP port auto-detection, so a container with a web port and a game port needs no `exclude-ports`. A container can be HTTP-only, streams-only (no hostname needed), or both.

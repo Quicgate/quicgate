@@ -182,6 +182,39 @@ func compileAccess(a store.AccessList, geo *geoDB, ban *banManager, dns *dnsCach
 // the method differs. Only an access list with no network rules at all imposes
 // no address restriction.
 func (c *compiledAccess) ipAllowed(remoteAddr, method string) bool {
+	return c.evaluate(remoteAddr, method, false)
+}
+
+// l4Allowed evaluates the list for a raw TCP or UDP connection, which has no
+// HTTP method and cannot present credentials. The ordered address, hostname and
+// country rules apply exactly as for HTTP. A rule scoped to HTTP methods can
+// only narrow access here: its allow never matches and its deny always does. A
+// list that needs basic-auth credentials (satisfy all with users, or users and
+// no address rules) cannot be satisfied at this layer and admits nobody.
+func (c *compiledAccess) l4Allowed(remoteAddr string) bool {
+	if len(c.users) > 0 && (c.satisfy != "any" || !c.restricted) {
+		return false
+	}
+	return c.evaluate(remoteAddr, "", true)
+}
+
+// l4Warnings explains, for the stream status, why a list may admit fewer
+// connections at L4 than the same list admits HTTP requests.
+func (c *compiledAccess) l4Warnings() []string {
+	out := append([]string(nil), c.warnings...)
+	if len(c.users) > 0 && (c.satisfy != "any" || !c.restricted) {
+		out = append(out, fmt.Sprintf("access list %q requires basic-auth credentials, which a stream cannot check, so it admits no connection", c.name))
+	}
+	for _, r := range c.rules {
+		if r.methods != nil && r.allow {
+			out = append(out, fmt.Sprintf("access list %q has allow rules limited to HTTP methods; streams ignore those allows", c.name))
+			break
+		}
+	}
+	return out
+}
+
+func (c *compiledAccess) evaluate(remoteAddr, method string, l4 bool) bool {
 	if c.denyAll {
 		return false
 	}
@@ -199,8 +232,16 @@ func (c *compiledAccess) ipAllowed(remoteAddr, method string) bool {
 	var country string
 	looked := false
 	for _, r := range c.rules {
-		if r.methods != nil && !r.methods[method] {
-			continue
+		if r.methods != nil {
+			if l4 {
+				// No method to match: a scoped allow cannot open a connection,
+				// a scoped deny still closes it.
+				if r.allow {
+					continue
+				}
+			} else if !r.methods[method] {
+				continue
+			}
 		}
 		if r.unresolved {
 			if r.allow {

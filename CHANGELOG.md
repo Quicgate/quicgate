@@ -54,6 +54,35 @@ removed.
   a deleted access list, forward auth the host does not configure, SSO without
   a provider, or an unknown mode fell back to the host's own gate, which may be
   public. All of these now refuse every request on the affected host or path.
+- **References are checked in one place, and in-use objects cannot be
+  deleted (Q05).** Deleting an access list only checked host-level use, so a
+  list still used by a path rule or a stream could be removed. The store now
+  refuses to delete an access list, certificate or identity provider while any
+  host, path rule, stream or the admin login uses it, and refuses to store a
+  host or stream that names one that does not exist. The checks run in the
+  store itself, so import, Docker adoption and every other writer get them, not
+  only the admin API. A Docker container whose `quicgate.access-list` label
+  names a list that does not exist is no longer routed without it; it is not
+  routed at all.
+- **Streams fail closed (Q07).** A TLS-terminating stream whose certificate
+  was missing became a plaintext forwarder, and an access list reused as a
+  stream filter kept only its allow CIDRs, dropping deny rules and leaving the
+  stream open when nothing usable remained. Streams now evaluate the whole
+  ordered list (an allow limited to HTTP methods never opens a connection, a
+  deny limited to methods still closes it, a list that needs basic-auth
+  credentials admits no connection), a configured filter that yields nothing
+  keeps the stream closed, and a stream that cannot run safely is not started.
+  Replacing a stream's certificate restarts its listener with the new one.
+- **PROXY protocol is only believed from trusted peers (Q08).** Any client
+  could claim an allowed source address by sending a PROXY header. Accepting
+  PROXY protocol now requires a list of trusted proxies: a trusted peer must
+  send a valid v1 or v2 header within 5 seconds, and any other peer connects as
+  itself, with its own address checked and nothing it sends parsed as a header.
+  **Action needed:** a stream with *Accept inbound PROXY header* enabled and no
+  trusted proxies does not start until you add them.
+- **Stream resource limits (Q14, streams).** Each UDP listener keeps at most
+  1024 client sessions, each TCP listener at most 4096 concurrent connections,
+  and TLS-terminating streams allow 10 seconds for the handshake.
 - **Spoofed identity headers are stripped on every path (Q06).** Inbound
   `Remote-User`, `Remote-Email` and `Remote-Groups` were only removed on hosts
   with host-level SSO. They are now removed on any host with an SSO gate on
@@ -63,6 +92,14 @@ removed.
 ### Changed
 - A Host header or SNI with a trailing dot (`example.com.`) now routes to the
   same host as `example.com` instead of being an unknown name.
+- **Stream listeners report whether they run (Q09).** A saved stream could fail
+  to start (a port another process holds) with only a log line to show for it.
+  `GET /api/streams` and the stream create and update responses now include a
+  `listeners` array with `state` (`running` or `failed`) and the error, the
+  stream list shows *not running*, and the stream dialog stays open with the
+  reason when a saved stream cannot run.
+- The stream guide no longer claims managed ACME certificates work for TLS
+  termination on streams; only custom certificates do.
 
 ## [1.8.1] - 2026-08-23
 

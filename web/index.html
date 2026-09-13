@@ -565,6 +565,8 @@
         <label class="field field--sm"><span>Send PROXY protocol</span>
           <select id="s-sendproxy"><option value="">Off</option><option value="v1">v1</option><option value="v2">v2</option></select></label>
         <label class="check"><input type="checkbox" id="s-acceptproxy"><span>Accept inbound PROXY header <em>(real client IP from upstream proxy)</em></span></label>
+        <label class="field" id="s-trusted-field" hidden><span>Trusted proxies <em>(one IP or CIDR per line; only these peers may state a client address, and they must send the header. Anyone else connects as themselves.)</em></span>
+          <textarea id="s-trusted" rows="2" class="mono" placeholder="10.0.0.5&#10;192.168.1.0/24"></textarea></label>
         <label class="check"><input type="checkbox" id="s-terminatetls"><span>Terminate TLS <em>(forward plaintext to backend)</em></span></label>
         <label class="field" id="s-cert-field" hidden><span>TLS certificate</span><select id="s-certid"></select></label>
         <label class="field"><span>SNI routes <em>(TLS passthrough; one "sni.host = backend:port" per line)</em></span>

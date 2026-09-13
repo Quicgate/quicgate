@@ -367,19 +367,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 		}
 	}
 
-	e.streams.Sync(streams, e.loadStreamCert, func(id int64) []*net.IPNet {
-		a := access[id]
-		if a == nil {
-			return nil
-		}
-		var nets []*net.IPNet
-		for _, r := range a.rules {
-			if r.allow && r.net != nil {
-				nets = append(nets, r.net)
-			}
-		}
-		return nets
-	})
+	e.streams.Sync(streams, e.loadStreamCert, func(id int64) *compiledAccess { return access[id] })
 	if e.upnp != nil {
 		var mappings []PortMapping
 		if p := portOf(e.cfg.HTTPAddr); p > 0 {
@@ -1211,6 +1199,10 @@ func portOf(addr string) int {
 	}
 	return 0
 }
+
+// StreamStatuses reports, per stream listener, whether it is running or why it
+// failed to start.
+func (e *Engine) StreamStatuses() []StreamStatus { return e.streams.Statuses() }
 
 // ReservedPorts lists the ports the proxy engine itself occupies, so stream
 // validation can refuse them.
