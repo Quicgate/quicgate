@@ -1190,6 +1190,7 @@ func (e *Engine) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		log.Printf("engine: shutting down (draining connections for up to 5s)")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = httpSrv.Shutdown(shutdownCtx)
@@ -1203,6 +1204,8 @@ func (e *Engine) Run(ctx context.Context) error {
 		if e.upnp != nil {
 			e.upnp.Close()
 		}
+		_ = e.accessLog.Close()
+		log.Printf("engine: shutdown complete")
 		return nil
 	case err := <-errCh:
 		return err

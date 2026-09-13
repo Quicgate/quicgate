@@ -2,9 +2,9 @@
 
 Sourced 2026-07-23 from the Nginx Proxy Manager issue tracker (reaction counts verified via the GitHub API). Each item: what, evidence, value for a homelab-focused NPM successor.
 
-## STATUS: fully implemented (2026-07-23)
+## STATUS: the roadmap items are built (2026-07-23)
 
-Every item below is now built and deployed (stack 350 on docker01), across five phases:
+The items below were built and deployed across five phases. Built is not the same as proven against every real environment, and a September 2026 security review found and fixed defects in several of them; [FEATURES.md](FEATURES.md) is the current status matrix (built, tested locally, qualified live, deferred, non-goal).
 - **Phase 1** — dark/light theme (U1), host search (U2), noindex (S9), ACME staging (C9).
 - **Phase 2** — backup/restore (A1), renewal visibility (C6), failure webhooks (A4), JSON access logs (L3).
 - **Phase 3** — redirect/dead hosts (P4), default site (A5), rate limit (S8), block-exploits (S7), gzip, DNS-01 wildcards (C2), custom cert upload (C3), custom locations via path rewrite groundwork (P3).

@@ -9,6 +9,8 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write     # keyless signing of the build provenance
+  attestations: write # publish the provenance attestation
 
 jobs:
   test:
@@ -18,11 +20,29 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      - name: Verify the pinned toolchain
+        run: |
+          want="$(awk '/^toolchain /{print $2}' go.mod)"
+          got="$(go env GOVERSION)"
+          echo "go.mod toolchain: $want, runner: $got"
+          test -n "$want" && test "$got" = "$want"
       - run: go vet ./...
       - run: go test -race ./...
 
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # Symbol-level scan against the same toolchain the release is built
+      # with: fails on any vulnerability the code can actually reach.
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+      - run: govulncheck ./...
+
   build:
-    needs: test
+    needs: [test, vulncheck]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -61,6 +81,7 @@ jobs:
             org.opencontainers.image.licenses=MIT
 
       - name: Build and push (amd64 + arm64)
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -72,3 +93,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Signed build provenance for the pushed image digest, verifiable with
+      # `gh attestation verify oci://ghcr.io/quicgate/quicgate:<tag> --owner Quicgate`.
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/quicgate/quicgate
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

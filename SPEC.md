@@ -11,7 +11,7 @@ A single-binary reverse proxy manager in Go. The feature set and UI flow of Ngin
 
 ## Non-goals (explicitly out)
 
-- Kubernetes ingress, docker label auto-discovery, clustering. This fronts a homelab.
+- Kubernetes ingress, clustering. This fronts a homelab. (Docker label discovery was a non-goal here and was built anyway, in v1.2.0.)
 - WAF beyond NPM's "block common exploits" level.
 - Response body rewriting (nginx sub_filter). Revisit only if a real need appears.
 
@@ -80,7 +80,7 @@ What unmatched hostnames get: 404 page / congratulations page / redirect / custo
 |---|---|---|
 | Let's Encrypt via HTTP challenge | certmagic HTTP-01 | M1 |
 | DNS challenge (wildcards) | certmagic DNS-01 via libdns; TransIP provider wired in | M2 |
-| Upload custom certificate | PEM upload, stored encrypted at rest | M2 |
+| Upload custom certificate | PEM upload, stored in the database (not encrypted at application level; protect the data volume and backups) | M2 |
 | Renewal, expiry overview | certmagic auto-renew; UI lists cert status/expiry | M1 |
 
 ### Access Lists
@@ -96,14 +96,14 @@ What unmatched hostnames get: 404 page / congratulations page / redirect / custo
 
 | NPM feature | quicgate | Milestone |
 |---|---|---|
-| Multi-user + roles/visibility | Admin + limited users | M3 |
-| Audit log of all changes | Append-only audit table, UI viewer | M3 |
+| Multi-user + roles/visibility | Admin + limited users | M3, **not implemented** (single admin; see FEATURES.md) |
+| Audit log of all changes | Append-only audit table, UI viewer | M3, **not implemented** |
 
 M1 ships with single admin login (bcrypt + session cookie).
 
 ## Structured "advanced" options
 
-This is the replacement for NPM's raw nginx textarea. Grouped, typed, validated server-side, JSON in one `options` column. Every option exists at host level and can be overridden per custom location.
+This is the replacement for NPM's raw nginx textarea. Grouped, typed, validated server-side, JSON in one `options` column. As built, options apply to the whole host; a custom location overrides only its upstream and path rewrite. Not every option listed below was built: [FEATURES.md](FEATURES.md) is the source of truth for what exists.
 
 **Upstream**
 - Preserve incoming Host header / override with fixed value

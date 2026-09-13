@@ -44,8 +44,8 @@ loopback, no TLS:
 
 How to read them:
 
-- **Routing is free.** A host lookup is ~9 ns and one allocation; the router is
-  never the bottleneck no matter how many hosts you configure.
+- **Routing is cheap.** A host lookup is ~9 ns and one allocation, and it is a
+  map lookup, so it does not grow with the number of hosts you configure.
 - **Access lists are free.** Adding an IP access list moves throughput by less
   than run-to-run noise.
 - **~45,000 requests/sec proxied** end-to-end with the load generator, quicgate

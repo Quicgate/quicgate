@@ -151,7 +151,8 @@ access control and SSO — on a modern engine.
 
 On a Ryzen 7 9800X3D: **~45,000 proxied requests/sec** to a local backend, **~180,000/sec** for cache
 hits, ~9 ns routing lookups, and ~8,900 TLS-proxied req/s on a single core. Access lists add no
-measurable overhead. In short, the proxy is never the bottleneck at self-hosting scale. Reproduce
+measurable overhead. Those are microbenchmarks on one machine, not a sustained-load qualification, and
+authentication, TLS and your backends change the picture, so measure your own workload. Reproduce
 with `go test -bench=. ./internal/engine`; methodology in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Documentation
@@ -164,6 +165,9 @@ bar) and pick one. They work offline, air-gapped installs included.
 - [Access control & SSO](web/docs/sso.md) — access lists, OIDC login, forward auth, per-path rules, security model
 - [Docker labels](web/docs/docker.md) — hosts and streams from container labels, multi-host
 - [Streams & port forwards](web/docs/streams.md) — TCP/UDP forwarding, PROXY protocol, SNI routing, UPnP
+
+What is built, tested and qualified against real infrastructure, and what is deliberately deferred, is
+tracked in [FEATURES.md](FEATURES.md).
 
 ## API
 
