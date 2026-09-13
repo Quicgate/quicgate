@@ -167,6 +167,12 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		if hdr.Typeflag == tar.TypeDir {
 			continue
 		}
+		// A file must be named inside certs/, never certs/ itself: written as a
+		// file, that name would replace the certificate directory.
+		if strings.HasSuffix(name, "/") {
+			writeErr(w, http.StatusBadRequest, "unsupported archive entry: "+name)
+			return
+		}
 		if seen[name] {
 			writeErr(w, http.StatusBadRequest, "duplicate entry in archive: "+name)
 			return
@@ -216,7 +222,12 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	live := filepath.Join(s.dataDir, "certs")
 	var rollback, commit func() error
 	if sawCerts {
-		rollback, commit, err = swapDir(live, filepath.Join(tmp, "certs"))
+		staged := filepath.Join(tmp, "certs")
+		if info, err := os.Lstat(staged); err != nil || !info.IsDir() {
+			writeErr(w, http.StatusBadRequest, "restore failed, nothing was changed: the archive's certificates are not a directory")
+			return
+		}
+		rollback, commit, err = swapDir(live, staged)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "restore failed, nothing was changed: certificates: "+err.Error())
 			return

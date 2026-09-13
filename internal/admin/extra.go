@@ -2,6 +2,7 @@ package admin
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -179,13 +180,16 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	// Ring buffer of the last n matching JSON lines.
 	ring := make([]json.RawMessage, 0, n)
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		if !matches(sc.Bytes()) {
+	br := bufio.NewReaderSize(f, 64*1024)
+	for {
+		raw, ok, err := nextLogLine(br, 1024*1024)
+		if err != nil {
+			break
+		}
+		if !ok || !matches(raw) {
 			continue
 		}
-		line := append([]byte(nil), sc.Bytes()...)
+		line := append([]byte(nil), raw...)
 		if len(ring) < n {
 			ring = append(ring, line)
 		} else {
@@ -199,6 +203,31 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		out = append(out, ring[i])
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// nextLogLine returns the next line of r without its line ending. A line
+// longer than max is skipped whole (ok is false) rather than ending the read,
+// so one oversized entry, which a client can cause with a long request path,
+// cannot hide the entries after it. err is io.EOF at the end.
+func nextLogLine(r *bufio.Reader, max int) (line []byte, ok bool, err error) {
+	tooLong := false
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if !tooLong {
+			if len(line)+len(chunk) > max {
+				tooLong, line = true, nil
+			} else {
+				line = append(line, chunk...)
+			}
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if err != nil && (err != io.EOF || (len(line) == 0 && !tooLong)) {
+			return nil, false, err
+		}
+		return bytes.TrimRight(line, "\r\n"), !tooLong, nil
+	}
 }
 
 // ---- effective config ----

@@ -94,12 +94,22 @@ func (e *Engine) oidcDiscover(r *http.Request, p store.OIDCProvider) (*oidc.Prov
 // (discovery, token exchange, key set): always bounded by a timeout, and
 // skipping certificate verification only when the provider is configured to.
 func idpContext(ctx context.Context, p store.OIDCProvider) context.Context {
-	client := &http.Client{Timeout: 15 * time.Second}
 	if p.SkipTLSVerify {
-		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+		return oidc.ClientContext(ctx, idpInsecureClient)
 	}
-	return oidc.ClientContext(ctx, client)
+	return oidc.ClientContext(ctx, idpClient)
 }
+
+// The IdP clients are shared, so their connections are pooled and reused
+// instead of a new transport (and its idle connections) per login.
+var (
+	idpClient         = &http.Client{Timeout: 15 * time.Second}
+	idpInsecureClient = func() *http.Client {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		return &http.Client{Timeout: 15 * time.Second, Transport: t}
+	}()
+)
 
 func boolKey(b bool) string {
 	if b {
@@ -493,14 +503,32 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, dest, http.StatusFound)
 }
 
+// normalizeHeaderName folds a header name the way many application servers do
+// when they turn headers into variables: case-insensitive, with "_" and "-"
+// equivalent.
+func normalizeHeaderName(name string) string {
+	return strings.ReplaceAll(strings.ToLower(name), "_", "-")
+}
+
 // stripHeaders removes the named headers from every inbound request before any
 // gate runs, public paths included, so an upstream that trusts identity
 // headers can never be fed a spoofed value through quicgate. Only a gate that
 // has just authenticated the request puts them back.
 func stripHeaders(names []string, next http.Handler) http.Handler {
+	if len(names) == 0 {
+		return next
+	}
+	strip := make(map[string]bool, len(names))
+	for _, h := range names {
+		strip[normalizeHeaderName(h)] = true
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for _, h := range names {
-			r.Header.Del(h)
+		// Match every spelling, not just the canonical one: Remote_User reaches
+		// the same variable as Remote-User in many application servers.
+		for k := range r.Header {
+			if strip[normalizeHeaderName(k)] {
+				delete(r.Header, k)
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

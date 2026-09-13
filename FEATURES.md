@@ -39,7 +39,7 @@ columns mean:
 | Forward authentication | yes | no | |
 | Path authentication (per-URL overrides) | yes | no | A rule whose gate cannot be built closes its path. |
 | Rate limiting, bad-bot and exploit filters | yes | partly (filters) | Run before authentication. The exploit filter is a coarse tripwire, not a WAF. |
-| Auto-ban | yes | no | |
+| Auto-ban | yes | no | Ban notifications are sent in the background. |
 | Trusted proxies and real client IP | yes | no | |
 
 ## Streams and ports
@@ -47,7 +47,7 @@ columns mean:
 | Feature | Tested locally | Qualified live | Notes |
 |---|---|---|---|
 | TCP streams, port ranges | yes | yes (TCP) | |
-| UDP streams | yes | no | At most 1024 client sessions per listener. |
+| UDP streams | yes | no | At most 1024 client sessions per listener, 64 per source address. |
 | Access lists on streams (L4 semantics) | yes | no | Method-scoped allows never open a connection; lists that need credentials admit none. Changing a stream closes the connections it admitted. |
 | PROXY protocol send | yes | no | |
 | PROXY protocol accept | yes | no | Requires trusted proxies; other peers are never parsed. |
@@ -62,11 +62,11 @@ columns mean:
 |---|---|---|---|
 | Admin UI and API, CSRF and CSP | yes | yes | |
 | Single admin account, 2FA (TOTP) | yes | account only | 2FA changes require the current password. |
-| Admin login through OIDC or LDAP | yes, synthetic IdP | no | PKCE, nonce and one-use sign-in for OIDC; LDAP requires `ldaps://`. |
+| Admin login through OIDC or LDAP | yes, synthetic IdP | no | PKCE, nonce and one-use sign-in for OIDC; LDAP requires `ldaps://`. Neither asks for the local TOTP code: require MFA at the IdP or directory. |
 | Session revocation (password change, sign out others, SSO key rotation) | yes | no | |
 | API tokens | yes | yes | Full administrator credentials: no scopes, no expiry. |
 | Backup and restore | yes | no | Restores every table and the certificate tree as a unit, or changes nothing. Refuses files that are not quicgate backups or would leave no admin able to sign in. Archives are not encrypted. |
-| Declarative import | yes | no | One transaction, idempotent by natural key. (The earlier, non-transactional import was used for a live migration.) |
+| Declarative import | yes | no | One transaction, idempotent by natural key; never silently removes protection. (The earlier, non-transactional import was used for a live migration.) |
 | Prometheus metrics | yes | no | Needs an API token to scrape. Per-host labels are bounded by configuration. |
 | JSON access logs and viewer | yes | yes | |
 | Docker label discovery (multi-host) | yes | no | Dormant unless enabled. |

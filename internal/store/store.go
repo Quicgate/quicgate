@@ -888,6 +888,11 @@ func (s *Store) RestoreFrom(dbPath string) ([]string, error) {
 	if admins == 0 {
 		return nil, fmt.Errorf("the backup has no admin account that can sign in")
 	}
+	// Every row the engine loads must decode, or the restored instance cannot
+	// reload. Hosts and streams are decoded by danglingReferences below.
+	if _, err := listAccessLists(tx); err != nil {
+		return nil, fmt.Errorf("the backup's access lists cannot be read: %w", err)
+	}
 	warnings, err := danglingReferences(tx)
 	if err != nil {
 		return nil, err
