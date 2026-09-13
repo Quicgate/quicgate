@@ -63,3 +63,18 @@ func TestDNSFailureKeepsHostClosed(t *testing.T) {
 		t.Fatalf("outsider after an unresolvable reload: code=%d body=%q, want 403", rr.Code, rr.Body.String())
 	}
 }
+
+// A preflight is not a way around a hostname rule that cannot be resolved.
+func TestCORSPreflightDoesNotBypassUnresolvedAllowlist(t *testing.T) {
+	e, st := newTestEngine(t)
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("private-options")) })
+	acl := mustCreateACL(t, st, &store.AccessList{Name: "ddns",
+		Rules: []store.AccessRule{{Action: "allow", Host: unresolvableHost}}})
+	mustCreateHost(t, st, &store.Host{Type: "proxy", Domains: []string{"preflight.test"}, Upstream: up, AccessListID: &acl})
+	reload(t, e)
+	rr := req(e, "OPTIONS", "preflight.test", "/private", "203.0.113.9",
+		map[string]string{"Access-Control-Request-Method": "GET"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("preflight against an unresolved allowlist: got %d %q, want 403", rr.Code, rr.Body.String())
+	}
+}

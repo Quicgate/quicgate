@@ -251,6 +251,16 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The admin sign-in provider is a reference like any other: it must resolve.
+	if id, ok := body["admin_oidc_provider_id"]; ok && id != "" {
+		if _, found, err := s.adminOIDCProvider(id); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		} else if !found {
+			writeErr(w, http.StatusBadRequest, "identity provider "+id+" does not exist")
+			return
+		}
+	}
 	for k, v := range body {
 		if err := s.store.SetSetting(k, v); err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
@@ -775,6 +785,10 @@ func (s *Server) passwordChangeRequired(sess session, r *http.Request) bool {
 	return err == nil && u.MustChange
 }
 
+// testHookLoginVerified, when a test sets it, runs after a login's credentials
+// are verified and before its session is created.
+var testHookLoginVerified func()
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := requestIP(r)
 	if !s.logins.allow(ip) {
@@ -815,7 +829,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.startSession(w, r, u.ID, u.Email); err != nil {
+	if testHookLoginVerified != nil {
+		testHookLoginVerified()
+	}
+	start := s.startSession
+	if localOK {
+		start = s.startSessionIfUnchanged(u)
+	}
+	if err := start(w, r, u.ID, u.Email); errors.Is(err, errCredentialsChanged) {
+		writeErr(w, http.StatusUnauthorized, "the account's credentials changed while signing in, sign in again")
+		return
+	} else if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

@@ -188,13 +188,23 @@ func (e *Engine) newOIDCGate(auth store.OIDCAuth, providers map[int64]store.OIDC
 	return g
 }
 
-func (g *oidcGate) sign(payload []byte) string {
-	mac := hmac.New(sha256.New, g.engine.secret())
-	mac.Write(payload)
-	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+// sign MACs payload for one purpose (the cookie name). The login state and the
+// session are signed with the same key and their JSON shares field names, so
+// without the purpose a state cookie, which every anonymous visitor receives,
+// verified as a session.
+func (g *oidcGate) sign(purpose string, payload []byte) string {
+	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(g.mac(purpose, payload))
 }
 
-func (g *oidcGate) verify(value string, out any) bool {
+func (g *oidcGate) mac(purpose string, payload []byte) []byte {
+	mac := hmac.New(sha256.New, g.engine.secret())
+	mac.Write([]byte(purpose))
+	mac.Write([]byte{0})
+	mac.Write(payload)
+	return mac.Sum(nil)
+}
+
+func (g *oidcGate) verify(purpose, value string, out any) bool {
 	dot := strings.IndexByte(value, '.')
 	if dot < 0 {
 		return false
@@ -207,9 +217,7 @@ func (g *oidcGate) verify(value string, out any) bool {
 	if err != nil {
 		return false
 	}
-	mac := hmac.New(sha256.New, g.engine.secret())
-	mac.Write(payload)
-	if !hmac.Equal(sig, mac.Sum(nil)) {
+	if !hmac.Equal(sig, g.mac(purpose, payload)) {
 		return false
 	}
 	return json.Unmarshal(payload, out) == nil
@@ -268,7 +276,7 @@ func (g *oidcGate) session(r *http.Request) *oidcSession {
 		return nil
 	}
 	var s oidcSession
-	if !g.verify(c.Value, &s) {
+	if !g.verify(oidcSessionName, c.Value, &s) {
 		return nil
 	}
 	// Bound to the host it was minted for AND to the provider that issued it.
@@ -371,7 +379,7 @@ func (g *oidcGate) startLogin(w http.ResponseWriter, r *http.Request) {
 		Gate:     g.key,
 	}
 	payload, _ := json.Marshal(st)
-	signed := g.sign(payload)
+	signed := g.sign(oidcStateName, payload)
 	g.setCookie(w, r, oidcStateName, signed, 300)
 	cfg := g.oauthConfig(r, provider)
 	// The state parameter only needs to tie the callback to this cookie; the
@@ -387,7 +395,7 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var st oidcState
-	if !g.verify(c.Value, &st) || st.Host != requestHostname(r) ||
+	if !g.verify(oidcStateName, c.Value, &st) || st.Host != requestHostname(r) ||
 		time.Now().Unix() > st.Expiry || r.URL.Query().Get("state") != st.Nonce {
 		http.Error(w, "state mismatch", http.StatusBadRequest)
 		return
@@ -472,7 +480,7 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 	sess := oidcSession{Email: strings.ToLower(email), Groups: groups,
 		Host: requestHostname(r), Prov: g.provider.ID, Expiry: time.Now().Add(ttl).Unix()}
 	payload, _ := json.Marshal(sess)
-	g.setCookie(w, r, oidcSessionName, g.sign(payload), int(ttl.Seconds()))
+	g.setCookie(w, r, oidcSessionName, g.sign(oidcSessionName, payload), int(ttl.Seconds()))
 	// Only ever return to a same-host relative path: the value came back
 	// through a signed cookie, but defence in depth costs one check.
 	dest := st.Return
