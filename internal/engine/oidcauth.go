@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +60,9 @@ type oidcState struct {
 	Host     string `json:"h"`
 	Expiry   int64  `json:"x"`
 	Prov     int64  `json:"p"` // provider whose login is in flight
+	// Gate identifies the policy that started the login (see oidcGateKey), so
+	// the callback is finished, and authorised, by that gate and no other.
+	Gate string `json:"k"`
 }
 
 // discoveredProvider caches the (network-fetched) OIDC discovery result per
@@ -122,15 +126,28 @@ func (e *Engine) oidcSecret() []byte {
 	return key
 }
 
-// oidcGate is one host's compiled OIDC configuration.
+// oidcGate is one compiled OIDC policy: a provider plus who it admits. A host
+// has one per distinct policy (its own, and each path rule that names one), and
+// gates on the same provider share discovery and token verification but never
+// their policy.
 type oidcGate struct {
 	engine   *engineOIDC
 	provider store.OIDCProvider
 	auth     store.OIDCAuth
+	key      string // oidcGateKey(auth)
 	// siblings lets whichever gate receives the shared callback path hand the
-	// request to the gate whose login is actually in flight. Keyed by provider
-	// id, wired once per host at reload.
-	siblings map[int64]*oidcGate
+	// request to the gate whose login is actually in flight. Keyed by gate key,
+	// wired once per host at reload.
+	siblings map[string]*oidcGate
+}
+
+// oidcGateKey identifies a policy: the provider and every policy field. Two
+// rules with the same key are the same gate; any difference (another allowed
+// group, passIdentity) makes a separate one.
+func oidcGateKey(auth store.OIDCAuth) string {
+	b, _ := json.Marshal(auth)
+	sum := sha256.Sum256(b)
+	return strconv.FormatInt(auth.ProviderID, 10) + ":" + hex.EncodeToString(sum[:8])
 }
 
 // engineOIDC is the tiny slice of Engine the gate needs; a separate type keeps
@@ -143,7 +160,7 @@ type engineOIDC struct {
 // newOIDCGate resolves the host's provider reference. A missing provider
 // fails closed: the gate still exists and answers 403 instead of proxying.
 func (e *Engine) newOIDCGate(auth store.OIDCAuth, providers map[int64]store.OIDCProvider) *oidcGate {
-	g := &oidcGate{engine: &engineOIDC{secret: e.oidcSecret, discover: e.oidcDiscover}, auth: auth}
+	g := &oidcGate{engine: &engineOIDC{secret: e.oidcSecret, discover: e.oidcDiscover}, auth: auth, key: oidcGateKey(auth)}
 	if p, ok := providers[auth.ProviderID]; ok {
 		g.provider = p
 	}
@@ -269,6 +286,7 @@ func (g *oidcGate) wrap(next http.Handler) http.Handler {
 				http.Error(w, "forbidden: "+s.Email+" is not permitted here", http.StatusForbidden)
 				return
 			}
+			markIdentified(r)
 			if g.auth.PassIdentity {
 				r.Header.Set("Remote-User", s.Email)
 				r.Header.Set("Remote-Email", s.Email)
@@ -329,6 +347,7 @@ func (g *oidcGate) startLogin(w http.ResponseWriter, r *http.Request) {
 		Host:     requestHostname(r),
 		Expiry:   time.Now().Add(5 * time.Minute).Unix(),
 		Prov:     g.provider.ID,
+		Gate:     g.key,
 	}
 	payload, _ := json.Marshal(st)
 	signed := g.sign(payload)
@@ -352,16 +371,16 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "state mismatch", http.StatusBadRequest)
 		return
 	}
-	// A different provider may have started this login: a path rule can name
-	// its own IdP, and every one of them redirects back to the same callback
-	// path. The state cookie is signed, so its provider id decides who
-	// finishes the flow.
-	if st.Prov != 0 && st.Prov != g.provider.ID {
-		if other := g.siblings[st.Prov]; other != nil {
+	// Another gate may have started this login: a path rule can name its own
+	// IdP, or its own policy on the same IdP, and every one of them redirects
+	// back to the same callback path. The state cookie is signed, so its gate
+	// key decides who finishes the flow and whose policy is applied.
+	if st.Gate != g.key {
+		if other := g.siblings[st.Gate]; other != nil && other != g {
 			other.handleCallback(w, r)
 			return
 		}
-		http.Error(w, "login is for an identity provider this path no longer uses", http.StatusBadRequest)
+		http.Error(w, "this login was started for a policy this host no longer uses, retry", http.StatusBadRequest)
 		return
 	}
 	g.setCookie(w, r, oidcStateName, "", -1)
@@ -451,14 +470,39 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, dest, http.StatusFound)
 }
 
-// stripIdentityHeaders removes the identity headers from every inbound request
-// on hosts with OIDC configured, public paths included, so upstreams that
-// trust Remote-User can never be fed a spoofed value through quicgate.
-func stripIdentityHeaders(next http.Handler) http.Handler {
+// stripHeaders removes the named headers from every inbound request before any
+// gate runs, public paths included, so an upstream that trusts identity
+// headers can never be fed a spoofed value through quicgate. Only a gate that
+// has just authenticated the request puts them back.
+func stripHeaders(names []string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for _, h := range identityHeaders {
+		for _, h := range names {
 			r.Header.Del(h)
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// trustedIdentityHeaders lists every header name a gate on this host may inject
+// upstream: the Remote-* set when any SSO gate exists (host-level or on any
+// path rule) and the forward-auth response headers when forward auth is set.
+func trustedIdentityHeaders(o store.Options) []string {
+	var names []string
+	sso := o.OIDC != nil
+	for _, r := range o.AuthRules {
+		if r.Mode == "oidc" {
+			sso = true
+		}
+	}
+	if sso {
+		names = append(names, identityHeaders...)
+	}
+	if o.ForwardAuth != nil && o.ForwardAuth.URL != "" {
+		for _, h := range o.ForwardAuth.ResponseHeaders {
+			if h = strings.TrimSpace(h); h != "" {
+				names = append(names, h)
+			}
+		}
+	}
+	return names
 }
