@@ -4,6 +4,21 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.9.1] - 2026-09-13
+
+### Changed
+- Built with Go 1.27.1: the digest-pinned build image and the toolchain pin in
+  `go.mod` move together, and building from source now needs Go 1.26 or newer.
+- Dependency updates: quic-go 0.62.0 (HTTP/3), go-oidc 3.21.0,
+  klauspost/compress 1.20.0, golang.org/x/crypto 0.57.0, golang.org/x/oauth2
+  0.37.0, golang.org/x/time 0.16.0 and modernc.org/sqlite 1.58.0.
+- CI refuses a build image whose Go version differs from the toolchain pinned
+  in `go.mod`, so a release is always built with the Go that was tested and
+  scanned, and the provenance attestation now also records where the image is
+  stored.
+
+[1.9.1]: https://github.com/Quicgate/quicgate/releases/tag/v1.9.1
+
 ## [1.9.0] - 2026-09-13
 
 Security remediation from an independent review of v1.8.1 (findings Q01 to
