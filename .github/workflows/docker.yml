@@ -9,8 +9,9 @@ on:
 permissions:
   contents: read
   packages: write
-  id-token: write     # keyless signing of the build provenance
-  attestations: write # publish the provenance attestation
+  id-token: write          # keyless signing of the build provenance
+  attestations: write      # publish the provenance attestation
+  artifact-metadata: write # record where the attested image is stored
 
 jobs:
   test:
@@ -20,12 +21,16 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      # The release image must be built with the Go that is tested and scanned
+      # here: the runner and the Dockerfile's build image both have to match the
+      # toolchain pinned in go.mod, so a version bump changes all of them at once.
       - name: Verify the pinned toolchain
         run: |
           want="$(awk '/^toolchain /{print $2}' go.mod)"
           got="$(go env GOVERSION)"
-          echo "go.mod toolchain: $want, runner: $got"
-          test -n "$want" && test "$got" = "$want"
+          image="go$(sed -nE 's/^FROM golang:([0-9.]+)-alpine.*/\1/p' Dockerfile)"
+          echo "go.mod toolchain: $want, runner: $got, build image: $image"
+          test -n "$want" && test "$got" = "$want" && test "$image" = "$want"
       - run: go vet ./...
       - run: go test -race ./...
 
