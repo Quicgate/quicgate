@@ -8,7 +8,7 @@ Two schemes; either works on every `/api/*` route except the public ones (`/api/
 
 **Session cookie** — `POST /api/login`, then send the `qg_session` cookie. Used by the web UI.
 
-**API token (Bearer)** — for automation. Create one in the UI (Profile → API tokens) or via `POST /api/tokens`, then:
+**API token (Bearer)** — for automation. Create one in the UI (account menu → API tokens) or via `POST /api/tokens`, then:
 
 ```bash
 curl -H "Authorization: Bearer qg_xxxxxxxx" https://quicgate.example.com/api/hosts

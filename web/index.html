@@ -49,53 +49,80 @@
         <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><rect x="2" y="2" width="60" height="60" rx="14" fill="#161a23"/><g fill="none" stroke="#a3e635" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="17" x2="18" y2="47"/><polyline points="28,16 41,32 28,48"/><polyline points="39,16 52,32 39,48"/></g></svg>
         <span class="brand-name">quic<span class="brand-accent">gate</span></span>
       </span>
-      <nav class="pagenav" id="pagenav">
+      <nav class="pagenav" id="pagenav" aria-label="Main">
         <button class="pagelink is-active" data-page="overview">Overview</button>
-        <button class="pagelink" data-page="hosts">Proxy Hosts</button>
-        <button class="pagelink" data-page="access">Access Lists</button>
+        <button class="pagelink" data-page="hosts">Proxy hosts</button>
         <button class="pagelink" data-page="streams">Streams</button>
-        <button class="pagelink" data-page="docker">Docker</button>
+        <button class="pagelink" data-page="access">Access control</button>
         <button class="pagelink" data-page="certs">Certificates</button>
-        <button class="pagelink" data-page="system">System</button>
+        <button class="pagelink" data-page="docker">Docker</button>
+        <button class="pagelink" data-page="logs">Logs</button>
         <button class="pagelink" data-page="settings">Settings</button>
-        <button class="pagelink" data-page="profile">Profile</button>
       </nav>
     </div>
     <div class="topbar__actions">
-      <a id="qg-version" class="hs-muted mono" href="https://github.com/Quicgate/quicgate/releases" target="_blank" rel="noopener" style="font-size:var(--fs-xs);text-decoration:none" title="quicgate version — view releases"></a>
-      <button id="me-email" class="hs-muted mono" data-page="profile" style="background:none;border:none;cursor:pointer;font:inherit" title="Profile"></button>
-      <button id="btn-help" class="btn btn--ghost btn--sm" title="Help &amp; FAQ" aria-label="Help">?</button>
-      <div class="skinmenu" id="skinmenu">
-        <button type="button" id="skin-btn" class="skinmenu__btn" aria-haspopup="menu" aria-expanded="false" title="Theme">
-          <span class="skinmenu__swatch" id="skin-swatch"></span><span id="skin-label">Console</span><span class="skinmenu__caret" aria-hidden="true">▾</span>
+      <button id="btn-help" class="iconbtn" title="Help and guides" aria-label="Help and guides">?</button>
+      <div class="usermenu" id="usermenu">
+        <button type="button" id="usermenu-btn" class="usermenu__btn" aria-haspopup="menu" aria-expanded="false">
+          <span class="avatar" id="me-avatar" aria-hidden="true"></span>
+          <span class="usermenu__name mono" id="me-email"></span>
+          <svg class="usermenu__caret" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
-        <div class="skinmenu__pop" id="skin-pop" role="menu" hidden></div>
+        <div class="usermenu__pop" id="usermenu-pop" role="menu" hidden>
+          <div class="usermenu__who">
+            <span class="usermenu__label">Signed in as</span>
+            <span class="usermenu__email mono" id="me-email-full"></span>
+          </div>
+          <div class="usermenu__sep"></div>
+          <button type="button" class="usermenu__item" role="menuitem" data-account="security">Account &amp; security</button>
+          <button type="button" class="usermenu__item" role="menuitem" data-account="sessions">Sessions</button>
+          <button type="button" class="usermenu__item" role="menuitem" data-account="tokens">API tokens</button>
+          <a class="usermenu__item" role="menuitem" href="docs.html" target="_blank" rel="noopener">API reference</a>
+          <div class="usermenu__sep"></div>
+          <div class="usermenu__label usermenu__label--pad">Appearance</div>
+          <div id="usermenu-skins"></div>
+          <label class="usermenu__item usermenu__toggle" role="menuitemcheckbox">
+            <span>Light mode</span>
+            <span class="switch switch--sm"><input type="checkbox" id="theme-light"><span class="switch__slot"></span><span class="switch__knob"></span></span>
+          </label>
+          <div class="usermenu__sep"></div>
+          <button type="button" class="usermenu__item usermenu__item--danger" role="menuitem" id="btn-logout">Sign out</button>
+          <div class="usermenu__foot"><a id="qg-version" class="mono" href="https://github.com/Quicgate/quicgate/releases" target="_blank" rel="noopener" title="Release notes"></a></div>
+        </div>
       </div>
-      <button id="btn-theme" class="btn btn--ghost btn--sm" title="Toggle light/dark">◐</button>
-      <button id="btn-logout" class="btn btn--ghost btn--sm">Sign out</button>
-      <button id="btn-add" class="btn btn--primary">Add host</button>
-      <button id="btn-add-acl" class="btn btn--primary" hidden>Add access list</button>
-      <button id="btn-add-stream" class="btn btn--primary" hidden>Add stream</button>
-      <button id="btn-add-cert" class="btn btn--primary" hidden>Upload certificate</button>
     </div>
   </header>
 
   <main class="page">
     <div id="page-overview">
-      <div id="ov-listeners" class="ov-cards"></div>
-      <h3 class="ov-h">At a glance</h3>
-      <div id="ov-stats" class="ov-cards"></div>
-      <h3 class="ov-h">Health</h3>
-      <div id="ov-donuts" class="ov-donuts"></div>
-      <h3 class="ov-h">Features</h3>
-      <div id="ov-features" class="ov-features"></div>
-      <h3 class="ov-h">Providers</h3>
-      <div id="ov-providers" class="ov-cards"></div>
+      <div class="pagehead">
+        <div><h1 class="pagehead__title">Overview</h1><p class="pagehead__sub mono" id="ov-sub"></p></div>
+        <div class="pagehead__actions"><button id="btn-ov-refresh" class="btn btn--secondary">Refresh</button></div>
+      </div>
+      <div class="statstrip" id="ov-stats"></div>
+      <div class="ovgrid">
+        <div class="panel">
+          <div class="panel__head"><h2>Attention</h2><p>Problems quicgate can see right now.</p></div>
+          <div id="ov-attention"></div>
+        </div>
+        <div class="panel">
+          <div class="panel__head"><h2>Listeners</h2><p>Where the engine accepts traffic.</p></div>
+          <div id="ov-listeners"></div>
+        </div>
+        <div class="panel">
+          <div class="panel__head"><h2>Features</h2><p>Optional capabilities and whether they are on.</p></div>
+          <div id="ov-features"></div>
+        </div>
+      </div>
     </div>
 
     <div id="page-hosts" hidden>
-      <div class="card">
-        <input id="host-search" class="search" type="search" placeholder="Filter by domain, upstream or access list...">
+      <div class="pagehead">
+        <div><h1 class="pagehead__title">Proxy hosts</h1><p class="pagehead__sub" id="hosts-sub">HTTP and HTTPS services behind quicgate.</p></div>
+        <div class="pagehead__actions"><button id="btn-add" class="btn btn--primary">Add host</button></div>
+      </div>
+      <div class="card card--flush">
+        <div class="toolbar"><input id="host-search" class="search" type="search" placeholder="Filter by domain, upstream or access list"></div>
         <table class="table" id="hosts-table">
           <thead><tr>
             <th>Domains</th><th>Upstream</th><th>TLS</th><th>Access</th><th>Certificate</th><th>Enabled</th><th></th>
@@ -107,48 +134,58 @@
     </div>
 
     <div id="page-access" hidden>
-      <div class="card">
+      <div class="pagehead">
+        <div><h1 class="pagehead__title">Access control</h1><p class="pagehead__sub">Access lists and the identity providers used for single sign-on.</p></div>
+        <div class="pagehead__actions"><button id="btn-add-acl" class="btn btn--primary">Add access list</button></div>
+      </div>
+      <div class="card card--flush">
+        <div class="sectionhead"><h2>Access lists</h2></div>
         <table class="table" id="acl-table">
           <thead><tr><th>Name</th><th>Satisfy</th><th>IP rules</th><th>Users</th><th></th></tr></thead>
           <tbody id="acl-body"></tbody>
         </table>
         <div id="acl-empty" class="empty" hidden>No access lists. Add one, then assign it to a proxy host.</div>
       </div>
-      <div class="card" style="margin-top:var(--sp-4)">
-        <div class="card-head">
-          <h2>Identity providers <em class="hs-muted" style="font-size:var(--fs-xs)">(OpenID Connect, for built-in host SSO)</em></h2>
+      <div class="card card--flush" style="margin-top:var(--sp-5)">
+        <div class="sectionhead">
+          <h2>Identity providers <span class="sectionhead__hint">OpenID Connect, for built-in single sign-on</span></h2>
           <button id="btn-add-idp" class="btn btn--secondary btn--sm">Add provider</button>
         </div>
         <table class="table" id="idp-table">
           <thead><tr><th>Name</th><th>Issuer</th><th>Client ID</th><th>Session</th><th></th></tr></thead>
           <tbody id="idp-body"></tbody>
         </table>
-        <div id="idp-empty" class="empty" hidden>No identity providers. Add your Keycloak / Entra ID / Authentik here, then enable OIDC SSO on a proxy host.</div>
-        <p class="hs-muted" style="font-size:var(--fs-xs);padding:0 var(--sp-4) var(--sp-4)">Register each protected host's redirect URI at the IdP: <code>https://&lt;host&gt;/.qg/oidc/callback</code> (Keycloak accepts wildcards like <code>https://*.example.com/.qg/oidc/callback</code>).</p>
+        <div id="idp-empty" class="empty" hidden>No identity providers. Add your Keycloak, Entra ID or Authentik here, then enable OIDC SSO on a proxy host.</div>
+        <p class="tablenote">Register each protected host's redirect URI at the IdP: <code>https://&lt;host&gt;/.qg/oidc/callback</code> (Keycloak accepts wildcards like <code>https://*.example.com/.qg/oidc/callback</code>).</p>
       </div>
     </div>
 
     <div id="page-streams" hidden>
-      <div class="card">
+      <div class="pagehead">
+        <div><h1 class="pagehead__title">Streams</h1><p class="pagehead__sub">Raw TCP and UDP forwarding for services that do not speak HTTP.</p></div>
+        <div class="pagehead__actions"><button id="btn-add-stream" class="btn btn--primary">Add stream</button></div>
+      </div>
+      <div class="card card--flush">
         <table class="table" id="streams-table">
           <thead><tr><th>Listen</th><th>Protocol</th><th>Forward to</th><th>Sources</th><th>Enabled</th><th></th></tr></thead>
           <tbody id="streams-body"></tbody>
         </table>
-        <div id="streams-empty" class="empty" hidden>No streams. Add a TCP/UDP port forward.</div>
+        <div id="streams-empty" class="empty" hidden>No streams. Add a TCP or UDP port forward.</div>
       </div>
     </div>
 
     <div id="page-docker" hidden>
+      <div class="pagehead">
+        <div><h1 class="pagehead__title">Docker</h1><p class="pagehead__sub">Hosts and streams derived from container labels.</p></div>
+        <div class="pagehead__actions"><button id="btn-docker-refresh" class="btn btn--secondary">Refresh</button></div>
+      </div>
       <div class="card">
-        <div class="card-head">
-          <h2>Docker integration <em class="hs-muted" style="font-size:var(--fs-xs)">(hosts &amp; streams from container labels)</em></h2>
-          <button id="btn-docker-refresh" class="btn btn--ghost btn--sm">Refresh</button>
-        </div>
+        <div class="sectionhead sectionhead--plain"><h2>Connection</h2></div>
         <div id="docker-status" class="hs-muted">Loading...</div>
       </div>
 
-      <div class="card" id="docker-settings-card" style="margin-top:var(--sp-6)" hidden>
-        <div class="card-head"><h2>Settings</h2></div>
+      <div class="card" id="docker-settings-card" style="margin-top:var(--sp-5)" hidden>
+        <div class="sectionhead sectionhead--plain"><h2>Settings</h2></div>
         <div class="field-row">
           <label class="field"><span>Default domain <em class="hs-muted">(optional; a container without quicgate.host becomes name.default-domain)</em></span><input id="dk-domain" placeholder="apps.example.com"></label>
           <button id="dk-domain-save" class="btn btn--primary" style="align-self:flex-end">Save</button>
@@ -162,8 +199,8 @@
         </div>
       </div>
 
-      <div class="card" id="docker-containers-card" style="margin-top:var(--sp-6)" hidden>
-        <div class="card-head"><h2>Containers <em class="hs-muted" style="font-size:var(--fs-xs)">(labelled with quicgate.enable=true)</em></h2></div>
+      <div class="card card--flush" id="docker-containers-card" style="margin-top:var(--sp-5)" hidden>
+        <div class="sectionhead"><h2>Containers <span class="sectionhead__hint">labelled with quicgate.enable=true</span></h2></div>
         <table class="table" id="docker-table">
           <thead><tr><th>Container</th><th>Host</th><th>Routing</th><th>Detail</th><th>Notes</th><th></th></tr></thead>
           <tbody id="docker-body"></tbody>
@@ -173,8 +210,15 @@
     </div>
 
     <div id="page-certs" hidden>
-      <div class="card">
-        <div class="card-head"><h2>Managed certificates <em class="hs-muted" style="font-size:var(--fs-xs)">(auto-issued via ACME)</em></h2><button id="btn-certs-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
+      <div class="pagehead">
+        <div><h1 class="pagehead__title">Certificates</h1><p class="pagehead__sub">Automatically issued ACME certificates and certificates you upload.</p></div>
+        <div class="pagehead__actions">
+          <button id="btn-certs-refresh" class="btn btn--secondary">Refresh</button>
+          <button id="btn-add-cert" class="btn btn--primary">Upload certificate</button>
+        </div>
+      </div>
+      <div class="card card--flush">
+        <div class="sectionhead"><h2>Managed certificates <span class="sectionhead__hint">issued through ACME</span></h2></div>
         <table class="table" id="certs-table">
           <thead><tr><th>Domain</th><th>Status</th><th>Expires</th></tr></thead>
           <tbody id="certs-body"></tbody>
@@ -182,238 +226,369 @@
         <div id="certs-empty" class="empty" hidden>No managed certificates.</div>
       </div>
 
-      <div class="card" style="margin-top:var(--sp-6)">
-        <div class="card-head"><h2>Uploaded certificates</h2></div>
+      <div class="card card--flush" style="margin-top:var(--sp-5)">
+        <div class="sectionhead"><h2>Uploaded certificates</h2></div>
         <table class="table" id="ccerts-table">
           <thead><tr><th>Name</th><th>Domains</th><th>Expires</th><th></th></tr></thead>
           <tbody id="ccerts-body"></tbody>
         </table>
-        <div id="ccerts-empty" class="empty" hidden>No uploaded certificates. Upload one to use certMode "custom" on a host.</div>
+        <div id="ccerts-empty" class="empty" hidden>No uploaded certificates. Upload one to use a custom certificate on a host.</div>
       </div>
     </div>
 
-    <div id="page-system" hidden>
-      <div class="card">
-        <div class="card-head"><h2>System log <em class="hs-muted" style="font-size:var(--fs-xs)">(traffic not matching any host; per-host logs are on each proxy host)</em></h2><button id="btn-logs-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
-        <input id="logs-filter" class="search" type="search" placeholder="Filter by host, client IP, path or status...">
-        <table class="table" id="logs-table">
-          <thead><tr><th>Time</th><th>Client</th><th>Host</th><th>Request</th><th>Status</th><th>ms</th></tr></thead>
-          <tbody id="logs-body"></tbody>
-        </table>
-        <div id="logs-empty" class="empty" hidden>No log entries yet.</div>
+    <div id="page-logs" hidden>
+      <div class="pagehead">
+        <div><h1 class="pagehead__title">Logs</h1><p class="pagehead__sub">The engine's access log, newest first.</p></div>
+        <div class="pagehead__actions"><button id="btn-logs-refresh" class="btn btn--secondary">Refresh</button></div>
       </div>
-
-      <div class="card" style="margin-top:var(--sp-6)">
-        <div class="card-head"><h2>Effective configuration <em class="hs-muted" style="font-size:var(--fs-xs)">(what the engine is serving right now)</em></h2><button id="btn-config-refresh" class="btn btn--ghost btn--sm">Refresh</button></div>
-        <table class="table" id="effconfig-table">
-          <thead><tr><th>Domain</th><th>Type</th><th>Target</th></tr></thead>
-          <tbody id="effconfig-body"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <div id="page-profile" hidden>
-      <div class="card-grid">
-        <div class="card">
-          <div class="card-head"><h2>Change password</h2></div>
-          <form id="profile-pw-form">
-            <label class="field"><span>Current password</span><input type="password" id="pp-current" autocomplete="current-password" required></label>
-            <label class="field"><span>New password</span><input type="password" id="pp-new" minlength="8" autocomplete="new-password" required></label>
-            <div id="pp-error" class="form-error" hidden></div>
-            <div class="modal-actions"><button type="submit" class="btn btn--primary">Update password</button></div>
-          </form>
+      <div class="card card--flush logview">
+        <div class="toolbar">
+          <select id="logs-scope" class="toolbar__scope" aria-label="Log scope"></select>
+          <input id="logs-filter" class="search" type="search" placeholder="Search client, host, path or status">
+          <div class="segmented" id="logs-status" role="group" aria-label="Status">
+            <button type="button" class="is-active" data-status="">All</button>
+            <button type="button" data-status="2">2xx</button>
+            <button type="button" data-status="3">3xx</button>
+            <button type="button" data-status="4">4xx</button>
+            <button type="button" data-status="5">5xx</button>
+          </div>
+          <span class="toolbar__count mono" id="logs-count"></span>
         </div>
-
-        <div class="card">
-          <div class="card-head"><h2>Two-factor authentication</h2></div>
-          <div id="twofa-status"></div>
-          <div id="twofa-setup" hidden>
-            <p class="hs-muted">Scan this secret into your authenticator, then enter a code and your current password to confirm.</p>
-            <p class="mono" id="twofa-secret" style="word-break:break-all"></p>
-            <div class="field-row">
-              <label class="field field--sm"><span>Code</span><input id="twofa-code" class="mono" placeholder="123456"></label>
-              <label class="field field--sm"><span>Current password</span><input id="twofa-password" type="password" autocomplete="current-password"></label>
-              <button id="twofa-confirm" class="btn btn--primary" style="align-self:flex-end">Enable</button>
-            </div>
-          </div>
-          <div id="twofa-disable" hidden>
-            <div class="field-row">
-              <label class="field field--sm"><span>Current password</span><input id="twofa-disable-password" type="password" autocomplete="current-password"></label>
-              <button id="twofa-disable-confirm" class="btn btn--danger" style="align-self:flex-end">Disable 2FA</button>
-            </div>
-          </div>
-          <div id="twofa-error" class="form-error" hidden></div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><h2>Sessions</h2></div>
-          <p class="hs-muted">Changing your password already signs out your other sessions. Use these after a lost device or a suspected leak.</p>
-          <div class="field-row">
-            <button id="btn-revoke-admin-sessions" class="btn btn--secondary btn--sm">Sign out all other admin sessions</button>
-            <button id="btn-revoke-sso-sessions" class="btn btn--secondary btn--sm">Sign everyone out of SSO-protected hosts</button>
-          </div>
-          <p id="sessions-status" class="hs-muted" hidden></p>
-        </div>
-
-        <div class="card col-span-2">
-          <div class="card-head"><h2>API tokens</h2>
-            <div>
-              <a class="btn btn--ghost btn--sm" href="docs.html" target="_blank">API docs</a>
-              <button id="btn-add-token" class="btn btn--primary btn--sm">New token</button>
-            </div>
-          </div>
-          <p class="hs-muted">Long-lived bearer tokens for the API (<span class="mono">Authorization: Bearer &lt;token&gt;</span>). Shown once on creation. Interactive reference at <a href="docs.html" target="_blank" class="mono">/docs.html</a> (needs internet for Swagger UI); the raw spec is at <a href="openapi.yaml" target="_blank" class="mono">/openapi.yaml</a>.</p>
-          <div id="new-token" class="form-error" hidden style="color:var(--c-accent);background:var(--c-accent-bg)"></div>
-          <table class="table" id="tokens-table">
-            <thead><tr><th>Name</th><th>Created</th><th></th></tr></thead>
-            <tbody id="tokens-body"></tbody>
+        <div class="logview__scroll">
+          <table class="table table--compact" id="logs-table">
+            <thead><tr><th>Time</th><th>Client</th><th id="logs-host-col">Host</th><th>Method</th><th>Path</th><th>Status</th><th class="num">ms</th></tr></thead>
+            <tbody id="logs-body"></tbody>
           </table>
+          <div id="logs-empty" class="empty" hidden>No log entries.</div>
+        </div>
+        <div class="pager">
+          <label class="pager__size">Rows <select id="logs-pagesize"><option>50</option><option>100</option><option>250</option></select></label>
+          <div class="pager__nav">
+            <button type="button" class="btn btn--ghost btn--sm" id="logs-prev">Previous</button>
+            <span class="mono" id="logs-page"></span>
+            <button type="button" class="btn btn--ghost btn--sm" id="logs-next">Next</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="page-account" hidden>
+      <div class="pagehead">
+        <div><h1 class="pagehead__title">Account</h1><p class="pagehead__sub mono" id="account-sub"></p></div>
+      </div>
+      <div class="settings">
+        <nav class="setnav" id="account-nav" aria-label="Account sections">
+          <button type="button" class="setnav__item is-active" data-section="security">Password &amp; 2FA</button>
+          <button type="button" class="setnav__item" data-section="sessions">Sessions</button>
+          <button type="button" class="setnav__item" data-section="tokens">API tokens</button>
+        </nav>
+        <div class="setbody">
+          <section class="setsec" data-section="security">
+            <div class="panel">
+              <div class="panel__head"><h2>Password</h2><p>Changing it signs out every other session of this account.</p></div>
+              <form id="profile-pw-form">
+                <div class="frow">
+                  <div class="frow__label"><label for="pp-current">Current password</label></div>
+                  <div class="frow__control"><input type="password" id="pp-current" autocomplete="current-password" required></div>
+                </div>
+                <div class="frow">
+                  <div class="frow__label"><label for="pp-new">New password</label><p>At least 8 characters.</p></div>
+                  <div class="frow__control"><input type="password" id="pp-new" minlength="8" autocomplete="new-password" required></div>
+                </div>
+                <div class="panel__foot"><span id="pp-error" class="panel__status" hidden></span><button type="submit" class="btn btn--primary">Update password</button></div>
+              </form>
+            </div>
+
+            <div class="panel">
+              <div class="panel__head"><h2>Two-factor authentication</h2><p>A time-based one-time code from an authenticator app, asked for at every password sign-in.</p></div>
+              <div class="frow">
+                <div class="frow__label"><span class="frow__title">Status</span></div>
+                <div class="frow__control"><div id="twofa-status" class="hs-row"></div></div>
+              </div>
+              <div id="twofa-setup" hidden>
+                <div class="frow">
+                  <div class="frow__label"><span class="frow__title">Secret</span><p>Add it to your authenticator app.</p></div>
+                  <div class="frow__control"><p class="mono secretbox" id="twofa-secret"></p></div>
+                </div>
+                <div class="frow">
+                  <div class="frow__label"><label for="twofa-code">Code</label></div>
+                  <div class="frow__control"><input id="twofa-code" class="mono" placeholder="123456" autocomplete="one-time-code"></div>
+                </div>
+                <div class="frow">
+                  <div class="frow__label"><label for="twofa-password">Current password</label></div>
+                  <div class="frow__control"><input id="twofa-password" type="password" autocomplete="current-password"></div>
+                </div>
+                <div class="panel__foot"><button id="twofa-confirm" class="btn btn--primary">Enable 2FA</button></div>
+              </div>
+              <div id="twofa-disable" hidden>
+                <div class="frow">
+                  <div class="frow__label"><label for="twofa-disable-password">Current password</label><p>Needed to switch the second factor off.</p></div>
+                  <div class="frow__control"><input id="twofa-disable-password" type="password" autocomplete="current-password"></div>
+                </div>
+                <div class="panel__foot"><button id="twofa-disable-confirm" class="btn btn--danger">Disable 2FA</button></div>
+              </div>
+              <div id="twofa-error" class="form-error" hidden></div>
+            </div>
+          </section>
+
+          <section class="setsec" data-section="sessions" hidden>
+            <div class="panel">
+              <div class="panel__head"><h2>Sessions</h2><p>Changing your password already signs out your other sessions. Use these after a lost device or a suspected leak.</p></div>
+              <div class="frow">
+                <div class="frow__label"><span class="frow__title">Admin sessions</span><p>Every other signed-in browser. This session stays signed in.</p></div>
+                <div class="frow__control"><button id="btn-revoke-admin-sessions" class="btn btn--secondary">Sign out other sessions</button></div>
+              </div>
+              <div class="frow">
+                <div class="frow__label"><span class="frow__title">Single sign-on</span><p>Replaces the signing key, so every user of an SSO-protected host signs in again.</p></div>
+                <div class="frow__control"><button id="btn-revoke-sso-sessions" class="btn btn--secondary">Sign everyone out of SSO</button></div>
+              </div>
+              <p id="sessions-status" class="panel__note" hidden></p>
+            </div>
+          </section>
+
+          <section class="setsec" data-section="tokens" hidden>
+            <div class="panel">
+              <div class="panel__head panel__head--row">
+                <div><h2>API tokens</h2><p>Long-lived bearer tokens for the API (<span class="mono">Authorization: Bearer &lt;token&gt;</span>). A token is shown once, when it is created.</p></div>
+                <button id="btn-add-token" class="btn btn--primary btn--sm">New token</button>
+              </div>
+              <div id="new-token" class="tokenbox mono" hidden></div>
+              <table class="table" id="tokens-table">
+                <thead><tr><th>Name</th><th>Created</th><th></th></tr></thead>
+                <tbody id="tokens-body"></tbody>
+              </table>
+              <div id="tokens-empty" class="empty" hidden>No API tokens yet.</div>
+              <p class="panel__note">Reference: <a href="docs.html" target="_blank" rel="noopener">interactive API docs</a> and the raw <a href="openapi.yaml" target="_blank" rel="noopener" class="mono">openapi.yaml</a>.</p>
+            </div>
+          </section>
         </div>
       </div>
     </div>
 
     <div id="page-settings" hidden>
-      <h3 class="ov-h">Certificates</h3>
-      <div class="card-grid">
-      <div class="card">
-        <div class="card-head"><h2>ACME / Let's Encrypt</h2></div>
-        <form id="settings-form">
-          <label class="field"><span>Account email</span><input id="set-acme-email" type="email" class="mono"></label>
-          <label class="check"><input type="checkbox" id="set-acme-staging"><span>Use the staging CA <em>(test certs, no rate limits; browsers will warn)</em></span></label>
-          <label class="field"><span>Custom ACME directory URL <em>(blank = Let's Encrypt; e.g. ZeroSSL, step-ca)</em></span>
-            <input id="set-acme-ca-url" type="url" class="mono" placeholder="https://acme.zerossl.com/v2/DV90"></label>
-          <label class="field field--sm"><span>DNS provider <em>(for wildcard certs)</em></span>
-            <select id="set-dns-provider"><option value="">None (HTTP-01)</option><option value="transip">TransIP (DNS-01)</option></select></label>
-          <label class="field" id="dns-config-field" hidden><span>TransIP credentials <em>(JSON: {"login":"...","private_key":"..."})</em></span>
-            <textarea id="set-dns-config" rows="3" class="mono" placeholder='{"login":"maferick","private_key":"-----BEGIN PRIVATE KEY-----\n..."}'></textarea></label>
-          <label class="field"><span>Alert webhook URL <em>(ntfy/Gotify style; POSTed on certificate failures)</em></span>
-            <input id="set-notify-url" type="url" class="mono" placeholder="https://ntfy.sh/your-topic"></label>
-          <div id="settings-error" class="form-error" hidden></div>
-          <div class="modal-actions">
-            <button type="button" id="btn-notify-test" class="btn btn--secondary">Send test alert</button>
-            <button type="submit" class="btn btn--primary">Save</button>
-          </div>
-        </form>
+      <div class="pagehead">
+        <div><h1 class="pagehead__title">Settings</h1><p class="pagehead__sub">Instance-wide behaviour. Changes apply immediately, without a restart.</p></div>
       </div>
+      <div class="settings">
+        <nav class="setnav" id="settings-nav" aria-label="Settings sections">
+          <button type="button" class="setnav__item is-active" data-section="general">General</button>
+          <button type="button" class="setnav__item" data-section="certificates">Certificates</button>
+          <button type="button" class="setnav__item" data-section="network">Client IP &amp; GeoIP</button>
+          <button type="button" class="setnav__item" data-section="protection">Auto-ban</button>
+          <button type="button" class="setnav__item" data-section="notifications">Notifications</button>
+          <button type="button" class="setnav__item" data-section="signin">Admin sign-in</button>
+          <button type="button" class="setnav__item" data-section="backup">Backup &amp; restore</button>
+        </nav>
+        <div class="setbody">
+          <section class="setsec" data-section="general">
+            <form class="panel" id="defaultsite-form">
+              <div class="panel__head"><h2>Default site</h2><p>What quicgate answers for a hostname that matches no configured host.</p></div>
+              <div class="frow">
+                <div class="frow__label"><label for="set-default-site">Behaviour</label></div>
+                <div class="frow__control">
+                  <select id="set-default-site">
+                    <option value="404">404 page</option>
+                    <option value="html">Custom HTML</option>
+                    <option value="redirect">Redirect</option>
+                  </select>
+                </div>
+              </div>
+              <div class="frow" id="default-site-value-field" hidden>
+                <div class="frow__label"><label for="set-default-site-value" id="default-site-value-label">Value</label></div>
+                <div class="frow__control"><textarea id="set-default-site-value" rows="4" class="mono"></textarea></div>
+              </div>
+              <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
+            </form>
+          </section>
 
-      </div>
+          <section class="setsec" data-section="certificates" hidden>
+            <form class="panel" id="settings-form">
+              <div class="panel__head"><h2>ACME</h2><p>The certificate authority account used for automatically issued certificates.</p></div>
+              <div class="frow">
+                <div class="frow__label"><label for="set-acme-email">Account email</label><p>The CA sends expiry and policy notices here.</p></div>
+                <div class="frow__control"><input id="set-acme-email" type="email" class="mono"></div>
+              </div>
+              <div class="frow">
+                <div class="frow__label"><label for="set-acme-staging">Staging CA</label><p>Test certificates without rate limits. Browsers will not trust them.</p></div>
+                <div class="frow__control"><span class="switch"><input type="checkbox" id="set-acme-staging"><span class="switch__slot"></span><span class="switch__knob"></span></span></div>
+              </div>
+              <div class="frow">
+                <div class="frow__label"><label for="set-acme-ca-url">Directory URL</label><p>Leave blank for Let's Encrypt. Use it for ZeroSSL or a private step-ca.</p></div>
+                <div class="frow__control"><input id="set-acme-ca-url" type="url" class="mono" placeholder="https://acme.zerossl.com/v2/DV90"></div>
+              </div>
+              <div class="frow">
+                <div class="frow__label"><label for="set-dns-provider">DNS provider</label><p>Needed for wildcard certificates (DNS-01).</p></div>
+                <div class="frow__control"><select id="set-dns-provider"><option value="">None (HTTP-01)</option><option value="transip">TransIP (DNS-01)</option></select></div>
+              </div>
+              <div class="frow" id="dns-config-field" hidden>
+                <div class="frow__label"><label for="set-dns-config">Provider credentials</label><p>JSON with <span class="mono">login</span> and <span class="mono">private_key</span>. Stored secrets are shown masked.</p></div>
+                <div class="frow__control"><textarea id="set-dns-config" rows="4" class="mono" placeholder='{"login":"account","private_key":"-----BEGIN PRIVATE KEY-----..."}'></textarea></div>
+              </div>
+              <div class="panel__foot"><span id="settings-error" class="panel__status" hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
+            </form>
+          </section>
 
-      <h3 class="ov-h">Who can administer quicgate</h3>
-      <p class="hs-muted set-lead">Both are additive: the local password login always keeps working, so a misconfigured directory or IdP can never lock you out.</p>
-      <div class="card-grid">
-      <div class="card">
-        <div class="card-head"><h2>Admin SSO (OIDC)</h2></div>
-        <p class="hs-muted">Additive: password login always keeps working, so a misconfigured IdP cannot lock you out.</p>
-        <form id="oidc-form">
-          <label class="check"><input type="checkbox" id="set-oidc-enabled"><span>Enable OIDC login</span></label>
-          <div id="oidc-config" hidden>
-            <label class="field"><span>Identity provider <em>(reuse one from Access Lists, or fill the fields below)</em></span>
-              <select id="set-oidc-provider"></select></label>
-            <div id="oidc-inline-fields">
-              <label class="field"><span>Issuer URL</span><input id="set-oidc-issuer" type="url" class="mono" placeholder="https://auth.example.com/application/o/quicgate/"></label>
-              <div class="field-row">
-                <label class="field"><span>Client ID</span><input id="set-oidc-client-id" class="mono"></label>
-                <label class="field"><span>Client secret</span><input id="set-oidc-client-secret" type="password" class="mono"></label>
+          <section class="setsec" data-section="network" hidden>
+            <div class="panel" id="trustedproxies-panel">
+              <div class="panel__head"><h2>Real client IP</h2><p>Behind Cloudflare or another proxy, read the client address from a header, but only on connections from trusted sources. Access lists, GeoIP, rate limits and logs then see the real client.</p></div>
+              <div class="frow">
+                <div class="frow__label"><label for="set-realip-header">Header</label><p>Leave blank to use the connection address.</p></div>
+                <div class="frow__control">
+                  <input id="set-realip-header" class="mono" placeholder="X-Forwarded-For" list="realip-headers">
+                  <datalist id="realip-headers"><option value="X-Forwarded-For"></option><option value="CF-Connecting-IP"></option><option value="X-Real-IP"></option></datalist>
+                </div>
+              </div>
+              <div class="frow">
+                <div class="frow__label"><label for="set-trustedproxies">Trusted proxies</label><p>CIDRs, one per line or comma-separated.</p></div>
+                <div class="frow__control"><textarea id="set-trustedproxies" rows="4" class="mono" placeholder="173.245.48.0/20&#10;103.21.244.0/22"></textarea></div>
+              </div>
+              <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="button" id="set-trustedproxies-save" class="btn btn--primary">Save</button></div>
+            </div>
+
+            <div class="panel">
+              <div class="panel__head panel__head--row">
+                <div><h2>GeoIP database</h2><p>Country access rules need a MaxMind <span class="mono">GeoLite2-Country.mmdb</span> in the data directory (<span class="mono">/data</span> in the container). Drop the file in and recheck, no restart needed.</p></div>
+                <button id="geoip-reload" class="btn btn--secondary btn--sm">Recheck</button>
+              </div>
+              <div class="frow">
+                <div class="frow__label"><span class="frow__title">Status</span></div>
+                <div class="frow__control"><div id="geoip-status" class="hs-muted">Loading...</div></div>
+              </div>
+              <div class="frow">
+                <div class="frow__label"><label for="geoip-test-ip">Look up an address</label></div>
+                <div class="frow__control">
+                  <div class="inputgroup"><input id="geoip-test-ip" class="mono" placeholder="8.8.8.8"><button type="button" id="geoip-test-btn" class="btn btn--secondary">Look up</button></div>
+                  <div id="geoip-test-result" class="mono frow__result"></div>
+                </div>
               </div>
             </div>
-            <label class="field"><span>Redirect URL</span><input id="set-oidc-redirect" type="url" class="mono" placeholder="https://proxy.example.com/api/oidc/callback"></label>
-            <label class="field"><span>Allowed emails <em>(who may administer; a matching local account also admits)</em></span><input id="set-oidc-emails" class="mono"></label>
-          </div>
-          <div class="modal-actions"><button type="submit" class="btn btn--primary">Save</button></div>
-        </form>
-      </div>
+          </section>
 
-      <div class="card">
-        <div class="card-head"><h2>Admin LDAP</h2></div>
-        <p class="hs-muted">Additive fallback checked only when local password auth fails.</p>
-        <form id="ldap-form">
-          <label class="check"><input type="checkbox" id="set-ldap-enabled"><span>Enable LDAP login</span></label>
-          <div id="ldap-config" hidden>
-            <label class="field"><span>Server URL</span><input id="set-ldap-url" class="mono" placeholder="ldaps://ldap.example.com:636"></label>
-            <label class="field"><span>Bind DN template <em>(%s = username)</em></span><input id="set-ldap-dn" class="mono" placeholder="uid=%s,ou=people,dc=example,dc=com"></label>
-            <label class="field"><span>Allowed directory users <em>(comma-separated; a binding user also needs a local account or an entry here)</em></span><input id="set-ldap-allowed" class="mono" placeholder="alice, bob"></label>
-            <p class="hs-muted" style="font-size:var(--fs-xs)">Requires <code>ldaps://</code>: a plain <code>ldap://</code> bind would put the password on the wire in clear text.</p>
-          </div>
-          <div class="modal-actions"><button type="submit" class="btn btn--primary">Save</button></div>
-        </form>
-      </div>
+          <section class="setsec" data-section="protection" hidden>
+            <form class="panel" id="ban-form">
+              <div class="panel__head"><h2>Auto-ban</h2><p>Block a client address after repeated access-list authentication failures, like fail2ban.</p></div>
+              <div class="frow">
+                <div class="frow__label"><label for="set-ban-enabled">Enabled</label></div>
+                <div class="frow__control"><span class="switch"><input type="checkbox" id="set-ban-enabled"><span class="switch__slot"></span><span class="switch__knob"></span></span></div>
+              </div>
+              <div id="ban-config" hidden>
+                <div class="frow">
+                  <div class="frow__label"><label for="set-ban-threshold">Failures</label><p>How many failures trigger a ban.</p></div>
+                  <div class="frow__control"><input id="set-ban-threshold" type="number" min="1" placeholder="5" class="input--narrow"></div>
+                </div>
+                <div class="frow">
+                  <div class="frow__label"><label for="set-ban-window">Window</label><p>Seconds in which the failures must happen.</p></div>
+                  <div class="frow__control"><input id="set-ban-window" type="number" min="1" placeholder="300" class="input--narrow"></div>
+                </div>
+                <div class="frow">
+                  <div class="frow__label"><label for="set-ban-duration">Ban duration</label><p>Seconds a banned address stays blocked.</p></div>
+                  <div class="frow__control"><input id="set-ban-duration" type="number" min="1" placeholder="3600" class="input--narrow"></div>
+                </div>
+              </div>
+              <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
+            </form>
+          </section>
 
-      </div>
+          <section class="setsec" data-section="notifications" hidden>
+            <form class="panel" id="notify-form">
+              <div class="panel__head"><h2>Alert webhook</h2><p>quicgate POSTs a plain-text message when a certificate fails to renew and when an address is banned. Works with ntfy, Gotify and similar services.</p></div>
+              <div class="frow">
+                <div class="frow__label"><label for="set-notify-url">Webhook URL</label></div>
+                <div class="frow__control"><input id="set-notify-url" type="url" class="mono" placeholder="https://ntfy.sh/your-topic"></div>
+              </div>
+              <div class="panel__foot"><span id="notify-status" class="panel__status" hidden></span><button type="button" id="btn-notify-test" class="btn btn--secondary">Send test alert</button><button type="submit" class="btn btn--primary">Save</button></div>
+            </form>
+          </section>
 
-      <h3 class="ov-h">Traffic handling</h3>
-      <div class="card-grid">
-      <div class="card">
-        <div class="card-head"><h2>Auto-ban (fail2ban-style)</h2></div>
-        <p class="hs-muted">Ban a client IP after repeated access-list auth failures.</p>
-        <form id="ban-form">
-          <label class="check"><input type="checkbox" id="set-ban-enabled"><span>Enable auto-ban</span></label>
-          <div class="field-row" id="ban-config" hidden>
-            <label class="field field--sm"><span>Failures</span><input id="set-ban-threshold" type="number" min="1" placeholder="5"></label>
-            <label class="field field--sm"><span>Within (s)</span><input id="set-ban-window" type="number" min="1" placeholder="300"></label>
-            <label class="field field--sm"><span>Ban for (s)</span><input id="set-ban-duration" type="number" min="1" placeholder="3600"></label>
-          </div>
-          <div class="modal-actions"><button type="submit" class="btn btn--primary">Save</button></div>
-        </form>
-      </div>
+          <section class="setsec" data-section="signin" hidden>
+            <p class="setsec__lead">Both are additional to the local password, which always keeps working, so a misconfigured identity provider or directory cannot lock you out.</p>
+            <form class="panel" id="oidc-form">
+              <div class="panel__head"><h2>OpenID Connect</h2><p>Sign in to the admin interface through your identity provider.</p></div>
+              <div class="frow">
+                <div class="frow__label"><label for="set-oidc-enabled">Enabled</label></div>
+                <div class="frow__control"><span class="switch"><input type="checkbox" id="set-oidc-enabled"><span class="switch__slot"></span><span class="switch__knob"></span></span></div>
+              </div>
+              <div id="oidc-config" hidden>
+                <div class="frow">
+                  <div class="frow__label"><label for="set-oidc-provider">Identity provider</label><p>Reuse a provider from Access control, or configure one here.</p></div>
+                  <div class="frow__control"><select id="set-oidc-provider"></select></div>
+                </div>
+                <div id="oidc-inline-fields">
+                  <div class="frow">
+                    <div class="frow__label"><label for="set-oidc-issuer">Issuer URL</label></div>
+                    <div class="frow__control"><input id="set-oidc-issuer" type="url" class="mono" placeholder="https://auth.example.com/application/o/quicgate/"></div>
+                  </div>
+                  <div class="frow">
+                    <div class="frow__label"><label for="set-oidc-client-id">Client ID</label></div>
+                    <div class="frow__control"><input id="set-oidc-client-id" class="mono"></div>
+                  </div>
+                  <div class="frow">
+                    <div class="frow__label"><label for="set-oidc-client-secret">Client secret</label></div>
+                    <div class="frow__control"><input id="set-oidc-client-secret" type="password" class="mono"></div>
+                  </div>
+                </div>
+                <div class="frow">
+                  <div class="frow__label"><label for="set-oidc-redirect">Redirect URL</label><p>Register this at the identity provider.</p></div>
+                  <div class="frow__control"><input id="set-oidc-redirect" type="url" class="mono" placeholder="https://proxy.example.com/api/oidc/callback"></div>
+                </div>
+                <div class="frow">
+                  <div class="frow__label"><label for="set-oidc-emails">Allowed emails</label><p>Who may administer quicgate. A matching local account also admits. The identity provider is trusted for the second factor.</p></div>
+                  <div class="frow__control"><input id="set-oidc-emails" class="mono" placeholder="alice@example.com, bob@example.com"></div>
+                </div>
+              </div>
+              <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
+            </form>
 
-      <div class="card">
-        <div class="card-head"><h2>Default site</h2></div>
-        <p class="hs-muted">What to serve for hostnames that match no configured host.</p>
-        <form id="defaultsite-form">
-          <label class="field field--sm"><span>Behaviour</span>
-            <select id="set-default-site">
-              <option value="404">404 page</option>
-              <option value="html">Custom HTML</option>
-              <option value="redirect">Redirect</option>
-            </select></label>
-          <label class="field" id="default-site-value-field" hidden><span id="default-site-value-label">Value</span>
-            <textarea id="set-default-site-value" rows="3" class="mono"></textarea></label>
-          <div class="modal-actions"><button type="submit" class="btn btn--primary">Save</button></div>
-        </form>
-      </div>
+            <form class="panel" id="ldap-form">
+              <div class="panel__head"><h2>LDAP</h2><p>Checked only when the local password does not match.</p></div>
+              <div class="frow">
+                <div class="frow__label"><label for="set-ldap-enabled">Enabled</label></div>
+                <div class="frow__control"><span class="switch"><input type="checkbox" id="set-ldap-enabled"><span class="switch__slot"></span><span class="switch__knob"></span></span></div>
+              </div>
+              <div id="ldap-config" hidden>
+                <div class="frow">
+                  <div class="frow__label"><label for="set-ldap-url">Server URL</label><p>Must use <span class="mono">ldaps://</span>, so the password never crosses the network in clear text.</p></div>
+                  <div class="frow__control"><input id="set-ldap-url" class="mono" placeholder="ldaps://ldap.example.com:636"></div>
+                </div>
+                <div class="frow">
+                  <div class="frow__label"><label for="set-ldap-dn">Bind DN template</label><p><span class="mono">%s</span> is replaced by the username.</p></div>
+                  <div class="frow__control"><input id="set-ldap-dn" class="mono" placeholder="uid=%s,ou=people,dc=example,dc=com"></div>
+                </div>
+                <div class="frow">
+                  <div class="frow__label"><label for="set-ldap-allowed">Allowed users</label><p>Directory users who may administer quicgate, comma-separated. A matching local account also admits.</p></div>
+                  <div class="frow__control"><input id="set-ldap-allowed" class="mono" placeholder="alice, bob"></div>
+                </div>
+              </div>
+              <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
+            </form>
+          </section>
 
-      <div class="card">
-        <div class="card-head"><h2>GeoIP database <em class="hs-muted" style="font-size:var(--fs-xs)">(for country access rules)</em></h2><button id="geoip-reload" class="btn btn--ghost btn--sm">Recheck</button></div>
-        <div id="geoip-status" class="hs-muted">Loading...</div>
-        <div class="field-row" style="margin-top:var(--sp-3);align-items:flex-end">
-          <label class="field field--sm"><span>Test an IP</span><input id="geoip-test-ip" class="mono" placeholder="8.8.8.8"></label>
-          <button type="button" id="geoip-test-btn" class="btn btn--secondary btn--sm">Look up country</button>
-          <span id="geoip-test-result" class="mono" style="padding-bottom:8px"></span>
+          <section class="setsec" data-section="backup" hidden>
+            <div class="panel">
+              <div class="panel__head"><h2>Backup &amp; restore</h2><p>A backup holds every host, access list, stream, setting and user (including password hashes and 2FA secrets) and all certificates with their private keys. Store it like the data volume itself.</p></div>
+              <div class="frow">
+                <div class="frow__label"><span class="frow__title">Download</span><p>A complete archive of the current configuration.</p></div>
+                <div class="frow__control"><a class="btn btn--secondary" href="/api/backup" download>Download backup</a></div>
+              </div>
+              <div class="frow">
+                <div class="frow__label"><span class="frow__title">Restore</span><p>Replaces everything with the archive's contents and signs out every admin session.</p></div>
+                <div class="frow__control"><label class="btn btn--danger" style="cursor:pointer">Restore from file<input id="restore-file" type="file" accept=".gz,.tgz,application/gzip" hidden></label></div>
+              </div>
+              <div class="frow">
+                <div class="frow__label"><span class="frow__title">Import</span><p>Applies a JSON document of access lists, hosts and streams in one transaction. Matching entries are updated in place.</p></div>
+                <div class="frow__control"><label class="btn btn--secondary" style="cursor:pointer">Import JSON<input id="import-file" type="file" accept=".json,application/json" hidden></label></div>
+              </div>
+              <div id="restore-status" class="panel__note" hidden></div>
+            </div>
+          </section>
         </div>
-        <p class="hs-muted" style="font-size:var(--fs-xs);margin-top:var(--sp-3)">Country rules need a MaxMind <span class="mono">GeoLite2-Country.mmdb</span> in the data directory (<span class="mono">/data</span> in the container). Drop the file in, then <b>Recheck</b> &mdash; no restart needed.</p>
-      </div>
-
-      <div class="card">
-        <div class="card-head"><h2>Trusted proxies <em class="hs-muted" style="font-size:var(--fs-xs)">(real client IP behind a CDN/LB)</em></h2></div>
-        <p class="hs-muted" style="font-size:var(--fs-xs)">When quicgate sits behind Cloudflare or another proxy, read the real client IP from a header instead of the connection, but only when the connection comes from one of these trusted sources. Applies to access lists, GeoIP, rate limits and logs.</p>
-        <div class="field-row" style="align-items:flex-end">
-          <label class="field field--sm"><span>Real-IP header <em class="hs-muted">(blank = off)</em></span>
-            <input id="set-realip-header" class="mono" placeholder="X-Forwarded-For" list="realip-headers">
-            <datalist id="realip-headers"><option value="X-Forwarded-For"></option><option value="CF-Connecting-IP"></option><option value="X-Real-IP"></option></datalist></label>
-          <button type="button" id="set-trustedproxies-save" class="btn btn--primary">Save</button>
-        </div>
-        <label class="field"><span>Trusted proxy CIDRs <em class="hs-muted">(one per line or comma-separated)</em></span>
-          <textarea id="set-trustedproxies" rows="3" class="mono" placeholder="173.245.48.0/20&#10;103.21.244.0/22"></textarea></label>
-      </div>
-
-      </div>
-
-      <h3 class="ov-h">Data</h3>
-      <div class="card-grid">
-      <div class="card col-span-2">
-        <div class="card-head"><h2>Backup &amp; import</h2></div>
-        <p class="hs-muted">The backup contains all hosts, access lists, streams, settings, users (incl. the admin password) and issued certificates. Restoring replaces everything.</p>
-        <div class="modal-actions" style="justify-content:flex-start">
-          <a class="btn btn--primary" href="/api/backup" download>Download backup</a>
-          <label class="btn btn--secondary" style="cursor:pointer">Restore from file<input id="restore-file" type="file" accept=".gz,.tgz,application/gzip" hidden></label>
-          <label class="btn btn--secondary" style="cursor:pointer">Import config (JSON)<input id="import-file" type="file" accept=".json,application/json" hidden></label>
-        </div>
-        <div id="restore-status" class="form-error" hidden></div>
-      </div>
       </div>
     </div>
 
     <div id="page-help" hidden>
+      <div class="pagehead">
+        <div><h1 class="pagehead__title">Help &amp; guides</h1><p class="pagehead__sub">Built-in guides and answers to common questions, available offline.</p></div>
+      </div>
       <div class="card help" id="help-guides-card">
         <div class="card-head"><h2 id="guides-title">Guides</h2><span>
           <button class="btn btn--ghost btn--sm" id="btn-guide-back" hidden>&larr; All guides</button>
@@ -433,7 +608,7 @@
         <details><summary>What do the method chips do?</summary>
           <p>They scope a rule to specific HTTP verbs. None selected = the rule applies to every method. Lit chips = only those verbs. Combine with <code>Satisfy: any</code> + a basic-auth user to get "reads public, writes require login": <code>allow 0.0.0.0/0</code> with <b>GET, HEAD</b> lit.</p></details>
         <details><summary>Country / dynamic-DNS rules?</summary>
-          <p>A rule's type can be <b>Country</b> (pick from the list; needs a <code>GeoLite2-Country.mmdb</code> in the data dir, whose load status and an IP test live on Settings &rarr; GeoIP database) or <b>Hostname</b> (a dynamic-DNS name, re-resolved periodically) instead of a CIDR.</p></details>
+          <p>A rule's type can be <b>Country</b> (pick from the list; needs a <code>GeoLite2-Country.mmdb</code> in the data dir, whose load status and an IP test live on Settings &rarr; Client IP &amp; GeoIP) or <b>Hostname</b> (a dynamic-DNS name, re-resolved periodically) instead of a CIDR.</p></details>
 
         <h3>Proxy hosts vs streams</h3>
         <details><summary>When do I use a proxy host vs a stream?</summary>
@@ -461,39 +636,20 @@
 
         <h3>Security &amp; ops</h3>
         <details><summary>Is it safe to expose the admin UI?</summary>
-          <p><b>No.</b> Never expose the admin port (81) to the internet. Put it behind quicgate itself with an access list, a VPN, or a firewall rule — treat it like any other private service. Change the default <code>admin@example.com</code>/<code>changeme</code> on first run and enable 2FA (Profile).</p></details>
+          <p><b>No.</b> Never expose the admin port (81) to the internet. Put it behind quicgate itself with an access list, a VPN, or a firewall rule — treat it like any other private service. Change the default <code>admin@example.com</code>/<code>changeme</code> on first run and enable 2FA (account menu &rarr; Account &amp; security).</p></details>
         <details><summary>How do I script quicgate / use the API?</summary>
-          <p>Create a bearer token in <b>Profile → API tokens</b> and send <code>Authorization: Bearer &lt;token&gt;</code>. Everything the UI does is a REST call — see the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>. <code>POST /api/import</code> does idempotent bulk config-as-code.</p></details>
+          <p>Create a bearer token under <b>your account menu → API tokens</b> and send <code>Authorization: Bearer &lt;token&gt;</code>. Everything the UI does is a REST call — see the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>. <code>POST /api/import</code> does idempotent bulk config-as-code.</p></details>
         <details><summary>SSO in front of a host?</summary>
-          <p>Two ways. <b>Built-in OIDC</b> (no extra service): add your IdP under <b>Access Lists &rarr; Identity providers</b>, then enable <b>OIDC SSO</b> on the host's Security tab. quicgate runs the OpenID Connect login itself, keeps a signed per-host session, checks the allowed emails/domains/groups you set, and can pass the identity upstream as <code>Remote-User</code> / <code>Remote-Email</code> / <code>Remote-Groups</code> (spoofed inbound copies are always stripped). Register the redirect URI <code>https://&lt;host&gt;/.qg/oidc/callback</code> at the IdP; sign out at <code>/.qg/oidc/logout</code>. Or use <b>Forward authentication</b> against an Authelia / Authentik verify endpoint if you already run one.</p></details>
+          <p>Two ways. <b>Built-in OIDC</b> (no extra service): add your IdP under <b>Access control &rarr; Identity providers</b>, then enable <b>OIDC SSO</b> on the host's Security tab. quicgate runs the OpenID Connect login itself, keeps a signed per-host session, checks the allowed emails/domains/groups you set, and can pass the identity upstream as <code>Remote-User</code> / <code>Remote-Email</code> / <code>Remote-Groups</code> (spoofed inbound copies are always stripped). Register the redirect URI <code>https://&lt;host&gt;/.qg/oidc/callback</code> at the IdP; sign out at <code>/.qg/oidc/logout</code>. Or use <b>Forward authentication</b> against an Authelia / Authentik verify endpoint if you already run one.</p></details>
         <details><summary>Can one path be public while the rest of the host needs auth?</summary>
           <p>Yes. On a proxy host, <b>Security → Path authentication</b> takes ordered per-URL rules: a path, <em>prefix</em> or <em>exact</em> match, and what gates it (<b>Public</b>, a specific <b>access list</b>, the host's <b>forward auth</b>, or the host's <b>OIDC SSO</b>). The longest matching path wins, and any path matching no rule keeps the host's own access list and forward auth. Use it for a licensing callback, a webhook receiver or a health probe that cannot log in. Optionally scope a rule to certain verbs, e.g. public <code>GET</code> but gated <code>POST</code>. Rate limits, bad-bot and exploit filters stay host-wide and still apply to public paths.</p></details>
         <details><summary>Backup, metrics, logs?</summary>
-          <p><b>System</b> page has the JSON access-log viewer (per-host logs are on each host's <em>Logs</em> button). <b>Settings</b> has one-click backup/restore. Prometheus scrape at <code>/metrics</code> (needs a bearer token).</p></details>
+          <p>The <b>Logs</b> page is the access-log viewer (unmatched traffic, all traffic or one host; a host's <em>Logs</em> button opens it for that host). <b>Settings &rarr; Backup &amp; restore</b> has one-click backup and restore. Prometheus scrape at <code>/metrics</code> (needs a bearer token).</p></details>
 
         <p class="hs-muted" style="margin-top:var(--sp-4)">Found a bug or have an idea? <a href="https://github.com/Quicgate/quicgate/issues" target="_blank" rel="noopener">Open an issue</a>. Security problems: see the repo's <a href="https://github.com/Quicgate/quicgate/security/policy" target="_blank" rel="noopener">security policy</a> (don't use public issues).</p>
       </div>
     </div>
   </main>
-</div>
-
-<!-- per-host access log modal -->
-<div id="hostlog-modal" class="modal-backdrop" hidden>
-  <div class="modal card" style="width:min(1100px,100%)">
-    <div class="card-head">
-      <h2 id="hostlog-title">Logs</h2>
-      <div style="display:flex;gap:var(--sp-2)">
-        <button id="hostlog-refresh" class="btn btn--ghost btn--sm">Refresh</button>
-        <button id="hostlog-close" class="btn btn--ghost btn--sm">&times;</button>
-      </div>
-    </div>
-    <input id="hostlog-filter" class="search" type="search" placeholder="Filter by client IP, path or status...">
-    <table class="table" id="hostlog-table">
-      <thead><tr><th>Time</th><th>Client</th><th>Request</th><th>Status</th><th>ms</th></tr></thead>
-      <tbody id="hostlog-body"></tbody>
-    </table>
-    <div id="hostlog-empty" class="empty" hidden>No log entries for this host yet.</div>
-  </div>
 </div>
 
 <!-- access list modal -->
@@ -513,7 +669,7 @@
       <fieldset class="group">
         <legend>IP rules (ordered, first match wins, no match denies) — the methods box scopes a rule to specific verbs (e.g. gate POST/PUT, leave GET public)</legend>
         <div id="acl-rules" class="hdr-rules"></div>
-        <div id="acl-geo-warn" class="form-error" hidden>Country rules need a GeoIP database, which is not currently loaded, so they will never match. See Settings &rarr; GeoIP database.</div>
+        <div id="acl-geo-warn" class="form-error" hidden>Country rules need a GeoIP database, which is not currently loaded, so they will never match. See Settings &rarr; Client IP &amp; GeoIP.</div>
         <button type="button" class="btn btn--ghost btn--sm" id="btn-add-aclrule">+ Add rule</button>
       </fieldset>
       <fieldset class="group">
