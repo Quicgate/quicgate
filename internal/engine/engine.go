@@ -147,6 +147,7 @@ type Engine struct {
 	health        *healthChecker
 	geo           *geoDB
 	ban           *banManager
+	banCfg        atomic.Pointer[banConfig] // compiled at reload; nil (auto-ban off) before the first
 	caPoolCache   sync.Map
 	reloadMu      sync.Mutex                     // serializes concurrent Reload callers
 	dockerHosts   atomic.Pointer[[]store.Host]   // in-memory hosts from the Docker label provider
@@ -183,7 +184,12 @@ func New(cfg Config, st *store.Store) *Engine {
 	e.accessLog = newAccessLogger(cfg.DataDir)
 	e.accessLog.hostLabel = func(host string) string { return e.table.Load().metricLabel(host) }
 	e.geo = openGeoDB(cfg.DataDir + "/GeoLite2-Country.mmdb")
-	e.ban = newBanManager(func() banConfig { return e.banConfig() }, e.certs.send)
+	e.ban = newBanManager(func() banConfig {
+		if c := e.banCfg.Load(); c != nil {
+			return *c
+		}
+		return banConfig{}
+	}, e.certs.send)
 	if cfg.UPnP {
 		e.upnp = NewUPnPManager(3600)
 	}
@@ -274,6 +280,8 @@ func (e *Engine) Reload(ctx context.Context) error {
 	defer e.reloadMu.Unlock()
 	e.applyACMESettings()
 	e.buildRealIP()
+	banCfg := e.banConfig()
+	e.banCfg.Store(&banCfg)
 	e.syncOIDCSecret()
 	hosts, err := e.store.ListHosts()
 	if err != nil {
@@ -1179,7 +1187,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	}()
 
 	httpHandler := e.acme.HTTPChallengeHandler(e.wrapRealIP(e.ban.wrap(e.accessLog.wrap(e.serveHTTP))))
-	httpSrv := &http.Server{Addr: e.cfg.HTTPAddr, Handler: httpHandler, ReadHeaderTimeout: 10 * time.Second}
+	httpSrv := newPublicServer(e.cfg.HTTPAddr, httpHandler, nil)
 	errCh := make(chan error, 3)
 	go func() { errCh <- fmt.Errorf("http listener: %w", httpSrv.ListenAndServe()) }()
 	log.Printf("engine: http listening on %s", e.cfg.HTTPAddr)
@@ -1188,12 +1196,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	if !e.cfg.DisableTLS {
 		tlsCfg := e.tlsConfig()
 		httpsHandler := e.wrapRealIP(e.ban.wrap(e.accessLog.wrap(e.serveHTTPS)))
-		httpsSrv = &http.Server{
-			Addr:              e.cfg.HTTPSAddr,
-			Handler:           httpsHandler,
-			TLSConfig:         tlsCfg,
-			ReadHeaderTimeout: 10 * time.Second,
-		}
+		httpsSrv = newPublicServer(e.cfg.HTTPSAddr, httpsHandler, tlsCfg)
 		go func() { errCh <- fmt.Errorf("https listener: %w", httpsSrv.ListenAndServeTLS("", "")) }()
 
 		// HTTP/3 is opt-out: when disabled we never create e.h3, which also
@@ -1325,7 +1328,7 @@ func (e *Engine) EffectiveConfig() []EffectiveRoute {
 	return out
 }
 
-// banConfig reads the auto-ban settings live from the store.
+// banConfig reads the auto-ban settings from the store (at reload).
 func (e *Engine) banConfig() banConfig {
 	atoi := func(key string, def int) int {
 		var n int
@@ -1340,6 +1343,19 @@ func (e *Engine) banConfig() banConfig {
 		window:    time.Duration(atoi("ban_window_sec", 300)) * time.Second,
 		banFor:    time.Duration(atoi("ban_duration_sec", 3600)) * time.Second,
 	}
+}
+
+// publicIdleTimeout is how long the public listeners keep an idle keep-alive
+// connection open. A variable so tests can shorten it.
+var publicIdleTimeout = 2 * time.Minute
+
+// newPublicServer builds an internet-facing HTTP server. Idle keep-alive
+// connections are closed after publicIdleTimeout. There is deliberately no
+// read or write timeout for whole requests: uploads and downloads through the
+// proxy (container images, backups) can legitimately take a long time.
+func newPublicServer(addr string, h http.Handler, tlsCfg *tls.Config) *http.Server {
+	return &http.Server{Addr: addr, Handler: h, TLSConfig: tlsCfg, ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout: publicIdleTimeout}
 }
 
 // CertStatuses inspects certmagic storage for every auto-TLS domain.

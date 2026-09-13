@@ -156,10 +156,40 @@ Every fix ships with a regression test that fails when the fix is removed.
   accepted before a source restriction was added kept its access until it
   closed by itself. When a stream's settings change, or it is disabled or
   removed, its open connections are now closed with the old listener.
+- **An auto-ban notification can no longer freeze the proxy.** The webhook was
+  called while holding the lock every request takes, so with auto-ban and a
+  notification URL set, each ban stalled all traffic on all hosts for as long
+  as the webhook took (up to 10 seconds), repeatable by anyone who can fail a
+  login. Notifications are now sent in the background, and the auto-ban
+  settings are applied at reload instead of being read from the database on
+  every request.
+- **Identity headers are stripped under every spelling.** `Remote_User` (or
+  any case of it) passed the strip and reached the upstream, and many
+  application servers read it as the same variable as `Remote-User`. The same
+  applies to forward-auth response headers.
+- **UDP streams cap sessions per source address** (64), so one sender cannot
+  fill a listener's 1024 sessions and lock every other client out.
+- **Idle keep-alive connections on the public listeners close after 2
+  minutes** instead of being held open indefinitely.
+- **Restore checks the certificate entries and every row it restores.** A
+  regular file named `certs/` in an archive replaced the certificate directory
+  with a file while reporting success, and a backup whose access-list rules do
+  not decode was committed and broke every reload. Both are refused.
+- **Import never silently removes protection, and binds the document's own
+  access lists.** An entry matching an existing host, stream or access list
+  replaced it whole, so a document that left out a host's access list, SSO or
+  path gate made it public. Such an import is now refused with the reason. An
+  access list `id` in the document now refers to the list that document
+  defines; before, a host was bound to whatever list had that id in the
+  database.
 
 ### Changed
 - A Host header or SNI with a trailing dot (`example.com.`) now routes to the
   same host as `example.com` instead of being an unknown name.
+- The access-log viewer skips an entry longer than 1 MiB instead of stopping
+  at it; a single request with a huge path used to hide every later entry.
+- Requests to an identity provider reuse pooled connections; with
+  certificate verification skipped, every login leaked a transport.
 - **A replaced or restored custom certificate is served right away.** The
   certificate cache kept every certificate it had loaded, so after replacing a
   custom certificate's PEM (or restoring a backup) the TLS listener could go on

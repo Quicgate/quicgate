@@ -209,3 +209,21 @@ func TestRestoreFromRejectsSnapshotWithoutAdmin(t *testing.T) {
 		t.Fatalf("refused restore changed live users: %d", users)
 	}
 }
+
+// A backup whose rows cannot be decoded is refused inside the transaction.
+// Committing it left an instance whose every reload failed.
+func TestRestoreFromRejectsUnreadableRows(t *testing.T) {
+	st := restoreTestStore(t)
+	refTestACL(t, st, "lan")
+	snap := snapshotOf(t, st, func(db *sql.DB) {
+		if _, err := db.Exec(`UPDATE access_lists SET rules = '{"not":"a list"}'`); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if _, err := st.RestoreFrom(snap); err == nil {
+		t.Fatal("a backup with unreadable access list rules was restored")
+	}
+	if lists, err := st.ListAccessLists(); err != nil || len(lists) != 1 {
+		t.Fatalf("refused restore changed live access lists: %v %v", lists, err)
+	}
+}

@@ -1,10 +1,17 @@
 package admin
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,5 +99,115 @@ func TestLoginRacingPasswordChangeGetsNoSession(t *testing.T) {
 	})
 	if c := sessionFrom(stale); c != "" && call(t, s, http.MethodGet, "/api/hosts", c, nil).Code == http.StatusOK {
 		t.Fatal("a login verified against the old password got a working session after the password change")
+	}
+}
+
+// ---- restore archives: a certs/ entry must be a file under the directory ----
+
+// rawTarEntry builds one ustar member by hand, so a test can produce entries
+// archive/tar refuses to write (a regular file whose name ends in a slash).
+func rawTarEntry(name string, typeflag byte, data []byte) []byte {
+	hdr := make([]byte, 512)
+	copy(hdr[0:100], name)
+	copy(hdr[100:108], "0000600\x00")
+	copy(hdr[108:116], "0000000\x00")
+	copy(hdr[116:124], "0000000\x00")
+	copy(hdr[124:136], fmt.Sprintf("%011o\x00", len(data)))
+	copy(hdr[136:148], fmt.Sprintf("%011o\x00", time.Now().Unix()))
+	hdr[156] = typeflag
+	copy(hdr[257:263], "ustar\x00")
+	copy(hdr[263:265], "00")
+	for i := 148; i < 156; i++ {
+		hdr[i] = ' '
+	}
+	sum := 0
+	for _, b := range hdr {
+		sum += int(b)
+	}
+	copy(hdr[148:156], fmt.Sprintf("%06o\x00 ", sum))
+	body := append([]byte(nil), data...)
+	if pad := len(body) % 512; pad != 0 {
+		body = append(body, make([]byte, 512-pad)...)
+	}
+	return append(hdr, body...)
+}
+
+func TestRestoreRejectsCertsEntryThatIsNotUnderTheDirectory(t *testing.T) {
+	s := newTestServer(t)
+	mustUser(t, s, "admin@example.com", "password-123")
+	sess := login(t, s, "admin@example.com", "password-123")
+
+	// The database from a real backup of this instance.
+	var db []byte
+	zr, err := gzip.NewReader(bytes.NewReader(backupArchive(t, s, sess)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(zr)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			break
+		}
+		if hdr.Name == "quicgate.db" {
+			db, _ = io.ReadAll(tr)
+		}
+	}
+	if len(db) == 0 {
+		t.Fatal("backup has no database")
+	}
+	live := filepath.Join(s.dataDir, "certs")
+	if err := os.MkdirAll(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "keep.pem"), []byte("live certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var raw []byte
+	raw = append(raw, rawTarEntry("quicgate.db", '0', db)...)
+	raw = append(raw, rawTarEntry("certs/", '0', []byte("not a directory"))...)
+	raw = append(raw, make([]byte, 1024)...)
+	var archive bytes.Buffer
+	zw := gzip.NewWriter(&archive)
+	_, _ = zw.Write(raw)
+	_ = zw.Close()
+
+	rr := call(t, s, http.MethodPost, "/api/restore", sess, archive.Bytes())
+	if rr.Code == http.StatusOK {
+		t.Fatalf("restore accepted a certs/ entry that is a file: %s", rr.Body.String())
+	}
+	if info, err := os.Stat(live); err != nil || !info.IsDir() {
+		t.Fatalf("the live certificate directory was replaced: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(live, "keep.pem")); err != nil || string(got) != "live certificate" {
+		t.Fatalf("the live certificates changed: %q %v", got, err)
+	}
+}
+
+// ---- the log viewer survives an oversized entry ----
+
+func TestLogsSkipOversizedLines(t *testing.T) {
+	s := newTestServer(t)
+	mustUser(t, s, "admin@example.com", "password-123")
+	sess := login(t, s, "admin@example.com", "password-123")
+	dir := filepath.Join(s.dataDir, "logs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("a", 1100000) // a path over the 1 MiB line buffer
+	content := `{"host":"a.test","path":"/before"}` + "\n" +
+		`{"host":"a.test","path":"` + long + `"}` + "\n" +
+		`{"host":"a.test","path":"/after-attack"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "access.log"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rr := call(t, s, http.MethodGet, "/api/logs?n=50", sess, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("logs: %d %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "/before") || !strings.Contains(body, "/after-attack") {
+		t.Fatalf("an oversized entry hid the entries around it: %.200s", body)
 	}
 }

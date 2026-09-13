@@ -28,6 +28,9 @@ var (
 	// udpMaxSessions caps concurrent client addresses per UDP listener. Each
 	// session holds an upstream socket, a goroutine and a receive buffer.
 	udpMaxSessions = 1024
+	// udpMaxSessionsPerIP caps the sessions one source address may hold on a
+	// listener, so a single sender cannot fill the table for everyone.
+	udpMaxSessionsPerIP = 64
 	// tcpMaxConns caps concurrent connections per TCP listener.
 	tcpMaxConns = 4096
 	// streamHandshakeTimeout bounds TLS termination handshakes.
@@ -578,8 +581,16 @@ func startUDP(key, addr string, spec *streamSpec) (*forwarder, error) {
 	done := make(chan struct{})
 	var mu sync.Mutex
 	sessions := map[string]*udpSession{}
-	maxSessions := udpMaxSessions
+	perIP := map[string]int{} // open sessions per source address
+	maxSessions, maxPerIP := udpMaxSessions, udpMaxSessionsPerIP
 	var limited throttledLog
+	// forget removes a session; mu must be held.
+	forget := func(k string, s *udpSession) {
+		delete(sessions, k)
+		if perIP[s.ip]--; perIP[s.ip] <= 0 {
+			delete(perIP, s.ip)
+		}
+	}
 
 	go func() {
 		t := time.NewTicker(30 * time.Second)
@@ -593,7 +604,7 @@ func startUDP(key, addr string, spec *streamSpec) (*forwarder, error) {
 				for k, s := range sessions {
 					if time.Since(s.lastSeen) > udpSessionIdle {
 						s.conn.Close()
-						delete(sessions, k)
+						forget(k, s)
 					}
 				}
 				mu.Unlock()
@@ -625,14 +636,21 @@ func startUDP(key, addr string, spec *streamSpec) (*forwarder, error) {
 					limited.printf("stream %s: %d concurrent UDP sessions reached, dropping packets from new sources", key, maxSessions)
 					continue
 				}
+				srcIP := clientIP(ck)
+				if perIP[srcIP] >= maxPerIP {
+					mu.Unlock()
+					limited.printf("stream %s: %s holds %d UDP sessions, dropping packets from its new ports", key, srcIP, maxPerIP)
+					continue
+				}
 				up, err := net.DialTimeout("udp", target, 5*time.Second)
 				if err != nil {
 					mu.Unlock()
 					log.Printf("stream %s: dial %s: %v", key, target, err)
 					continue
 				}
-				sess = &udpSession{conn: up, lastSeen: time.Now()}
+				sess = &udpSession{conn: up, ip: srcIP, lastSeen: time.Now()}
 				sessions[ck] = sess
+				perIP[srcIP]++
 				go func(up net.Conn, clientAddr net.Addr, ck string) {
 					rbuf := make([]byte, 65535)
 					for {
@@ -641,7 +659,7 @@ func startUDP(key, addr string, spec *streamSpec) (*forwarder, error) {
 						if err != nil {
 							mu.Lock()
 							if s, ok := sessions[ck]; ok && s.conn == up {
-								delete(sessions, ck)
+								forget(ck, s)
 							}
 							mu.Unlock()
 							up.Close()
@@ -662,7 +680,7 @@ func startUDP(key, addr string, spec *streamSpec) (*forwarder, error) {
 		mu.Lock()
 		for k, s := range sessions {
 			s.conn.Close()
-			delete(sessions, k)
+			forget(k, s)
 		}
 		mu.Unlock()
 	}}, nil
@@ -670,6 +688,7 @@ func startUDP(key, addr string, spec *streamSpec) (*forwarder, error) {
 
 type udpSession struct {
 	conn     net.Conn
+	ip       string // source address, for the per-address cap
 	lastSeen time.Time
 }
 

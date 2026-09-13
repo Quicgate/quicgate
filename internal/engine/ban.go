@@ -9,8 +9,9 @@ import (
 )
 
 // banManager implements fail2ban-style auto-banning: after N auth failures
-// within a window, an IP is blocked for a duration. Config is read live from
-// a getter so settings changes apply without restart.
+// within a window, an IP is blocked for a duration. Config comes from a getter
+// that returns the configuration the last reload compiled, so settings changes
+// apply without a restart and no request reads the database.
 // banMaxTracked caps the addresses the ban manager tracks, per map. At the cap
 // an arbitrary entry is dropped. A variable so tests can use a small cap.
 var banMaxTracked = 65536
@@ -118,7 +119,9 @@ func (b *banManager) recordFailure(remoteAddr string) {
 		delete(b.failures, ip)
 		log.Printf("ban: %s banned for %s (%d failures)", ip, cfg.banFor, cfg.threshold)
 		if b.notify != nil {
-			b.notify("quicgate: banned " + ip + " after " + itoa(cfg.threshold) + " auth failures")
+			// The webhook can be slow or unreachable, and every request takes
+			// b.mu: never wait for it here.
+			go b.notify("quicgate: banned " + ip + " after " + itoa(cfg.threshold) + " auth failures")
 		}
 	}
 }
