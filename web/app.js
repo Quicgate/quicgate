@@ -1,7 +1,10 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// Every value that did not come from this file (API data, and above all
+// request data such as log paths and Host headers) goes through esc before it
+// reaches innerHTML.
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const views = ['view-login', 'view-password', 'view-app'];
 let hosts = [];
 let accessLists = [];
@@ -396,20 +399,20 @@ function renderHosts() {
     const tdUpstream = document.createElement('td');
     tdUpstream.className = 'domain';
     if (h.type === 'redirect' && h.redirect) {
-      tdUpstream.innerHTML = `<span class="badge">${h.redirect.httpCode} redirect</span> ${h.redirect.targetHost}`;
+      tdUpstream.innerHTML = `<span class="badge">${esc(h.redirect.httpCode)} redirect</span> ${esc(h.redirect.targetHost)}`;
     } else if (h.type === 'dead') {
       tdUpstream.innerHTML = '<span class="badge badge--danger">404 host</span>';
     } else if (h.type === 'static') {
-      tdUpstream.innerHTML = `<span class="badge">static</span> ${h.staticRoot}`;
+      tdUpstream.innerHTML = `<span class="badge">static</span> ${esc(h.staticRoot)}`;
     } else {
       const pool = [h.upstream, ...(h.upstreams || [])];
       const primary = `${h.upstream.scheme}://${h.upstream.host}:${h.upstream.port}`;
       const up = pool.filter((u) => healthMap[`${u.scheme}://${u.host}:${u.port}`] !== false).length;
       if (up < pool.length) tr.classList.add('row--down');
       if (pool.length > 1) {
-        tdUpstream.innerHTML = `${primary} <span class="badge ${up === pool.length ? 'badge--success' : 'badge--danger'}">${up}/${pool.length} up</span>`;
+        tdUpstream.innerHTML = `${esc(primary)} <span class="badge ${up === pool.length ? 'badge--success' : 'badge--danger'}">${up}/${pool.length} up</span>`;
       } else if (up === 0) {
-        tdUpstream.innerHTML = `${primary} <span class="badge badge--danger">down</span>`;
+        tdUpstream.innerHTML = `${esc(primary)} <span class="badge badge--danger">down</span>`;
       } else {
         tdUpstream.textContent = primary;
       }
@@ -426,7 +429,7 @@ function renderHosts() {
     const tdAccess = document.createElement('td');
     const acl = accessLists.find((a) => a.id === h.accessListId);
     tdAccess.innerHTML = acl
-      ? `<span class="badge badge--success">${acl.name}</span>`
+      ? `<span class="badge badge--success">${esc(acl.name)}</span>`
       : '<span class="badge">public</span>';
 
     const tdCert = document.createElement('td');
@@ -436,7 +439,7 @@ function renderHosts() {
       if (c) {
         const cls = c.status === 'issued' ? 'badge--success' : c.status === 'failed' ? 'badge--danger' : '';
         const exp = c.notAfter ? ' ' + new Date(c.notAfter).toLocaleDateString() : '';
-        tdCert.innerHTML = `<span class="badge ${cls}">${c.status}</span>${exp}`;
+        tdCert.innerHTML = `<span class="badge ${cls}">${esc(c.status)}</span>${esc(exp)}`;
       } else {
         tdCert.innerHTML = '<span class="badge">pending</span>';
       }
@@ -507,11 +510,11 @@ async function refreshCerts() {
     const badgeClass = c.status === 'issued' ? 'badge badge--success'
       : c.status === 'failed' ? 'badge badge--danger' : 'badge';
     const detail = c.lastError
-      ? `<div class="hs-muted" style="font-size:var(--fs-xs)" title="${c.lastError.replace(/"/g, '&quot;')}">last error: ${c.lastError.slice(0, 90)}</div>`
+      ? `<div class="hs-muted" style="font-size:var(--fs-xs)" title="${esc(c.lastError)}">last error: ${esc(c.lastError.slice(0, 90))}</div>`
       : '';
-    tr.innerHTML = `<td class="domain">${c.domain}</td>` +
-      `<td><span class="${badgeClass}">${c.status}</span>${detail}</td>` +
-      `<td class="domain">${c.notAfter ? new Date(c.notAfter).toLocaleString() : '-'}</td>`;
+    tr.innerHTML = `<td class="domain">${esc(c.domain)}</td>` +
+      `<td><span class="${badgeClass}">${esc(c.status)}</span>${detail}</td>` +
+      `<td class="domain">${esc(c.notAfter ? new Date(c.notAfter).toLocaleString() : '-')}</td>`;
     body.appendChild(tr);
   }
 }
@@ -955,7 +958,7 @@ async function refreshAcls() {
     const tdName = document.createElement('td');
     tdName.textContent = a.name;
     const tdSatisfy = document.createElement('td');
-    tdSatisfy.innerHTML = `<span class="badge">${a.satisfy}</span>`;
+    tdSatisfy.innerHTML = `<span class="badge">${esc(a.satisfy)}</span>`;
     const tdRules = document.createElement('td');
     tdRules.className = 'domain';
     tdRules.textContent = (a.rules || []).map((r) => `${r.action} ${r.cidr || r.host || ('country:' + r.country)}`).join('\n') || '-';
@@ -1157,7 +1160,7 @@ function renderIdps() {
     tdClient.className = 'domain';
     tdClient.textContent = p.clientId;
     const tdSession = document.createElement('td');
-    tdSession.innerHTML = `<span class="badge">${p.sessionHours || 12}h</span>`;
+    tdSession.innerHTML = `<span class="badge">${esc(p.sessionHours || 12)}h</span>`;
     const tdActions = document.createElement('td');
     tdActions.style.textAlign = 'right';
     const btnEdit = document.createElement('button');
@@ -1252,7 +1255,7 @@ async function refreshStreams() {
       tdListen.append(' ', b);
     }
     const tdProto = document.createElement('td');
-    tdProto.innerHTML = `<span class="badge">${s.protocol === 'both' ? 'tcp + udp' : s.protocol}</span>`;
+    tdProto.innerHTML = `<span class="badge">${esc(s.protocol === 'both' ? 'tcp + udp' : s.protocol)}</span>`;
     const tdFwd = document.createElement('td');
     tdFwd.className = 'domain';
     tdFwd.textContent = `${s.forwardHost}:${s.forwardPort}`;
@@ -1400,9 +1403,9 @@ async function refreshCustomCerts() {
     const tr = document.createElement('tr');
     const expired = c.notAfter && new Date(c.notAfter) < new Date();
     tr.innerHTML =
-      `<td>${c.name}</td>` +
-      `<td class="domain">${(c.domains || []).join(', ')}</td>` +
-      `<td class="domain"><span class="badge ${expired ? 'badge--danger' : 'badge--success'}">${c.notAfter ? new Date(c.notAfter).toLocaleDateString() : '-'}</span></td>`;
+      `<td>${esc(c.name)}</td>` +
+      `<td class="domain">${esc((c.domains || []).join(', '))}</td>` +
+      `<td class="domain"><span class="badge ${expired ? 'badge--danger' : 'badge--success'}">${esc(c.notAfter ? new Date(c.notAfter).toLocaleDateString() : '-')}</span></td>`;
     const tdActions = document.createElement('td');
     tdActions.style.textAlign = 'right';
     const btnEdit = document.createElement('button');
@@ -1475,7 +1478,8 @@ $('import-file').addEventListener('change', async () => {
     const res = await fetch('/api/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || res.statusText);
-    el.textContent = `Imported ${data.hosts || 0} hosts, ${data.accessLists || 0} access lists, ${data.streams || 0} streams.`;
+    const up = data.updated || {};
+    el.textContent = `Imported: created ${data.hosts || 0} hosts, ${data.accessLists || 0} access lists, ${data.streams || 0} streams; updated ${up.hosts || 0} hosts, ${up.accessLists || 0} access lists, ${up.streams || 0} streams.`;
   } catch (err) {
     el.textContent = 'Import failed: ' + err.message;
   }
@@ -1532,13 +1536,14 @@ $('logs-filter').addEventListener('input', renderLogs);
 function logRow(e, withHost) {
   const tr = document.createElement('tr');
   const cls = e.status >= 400 ? 'badge--danger' : 'badge--success';
+  // Host, method and path are whatever a remote client sent: never markup.
   tr.innerHTML =
-    `<td class="domain">${e.ts ? new Date(e.ts).toLocaleTimeString() : ''}</td>` +
-    `<td class="domain">${e.client_ip || ''}</td>` +
-    (withHost ? `<td class="domain">${e.host || ''}</td>` : '') +
-    `<td class="domain">${e.method || ''} ${e.path || ''}</td>` +
-    `<td><span class="badge ${cls}">${e.status || ''}</span></td>` +
-    `<td class="domain">${e.dur_ms ?? ''}</td>`;
+    `<td class="domain">${esc(e.ts ? new Date(e.ts).toLocaleTimeString() : '')}</td>` +
+    `<td class="domain">${esc(e.client_ip)}</td>` +
+    (withHost ? `<td class="domain">${esc(e.host)}</td>` : '') +
+    `<td class="domain">${esc(e.method)} ${esc(e.path)}</td>` +
+    `<td><span class="badge ${cls}">${esc(e.status)}</span></td>` +
+    `<td class="domain">${esc(e.dur_ms)}</td>`;
   return tr;
 }
 
@@ -1591,7 +1596,10 @@ async function refreshEffConfig() {
   body.innerHTML = '';
   for (const r of routes.sort((a, b) => a.domain.localeCompare(b.domain))) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td class="domain">${r.domain}</td><td><span class="badge">${r.type}</span></td><td class="domain">${r.target || ''}</td>`;
+    const warn = (r.warnings || []).length
+      ? `<div>${r.warnings.map((w) => `<span class="badge badge--danger">closed</span> <span class="hs-muted">${esc(w)}</span>`).join('<br>')}</div>`
+      : '';
+    tr.innerHTML = `<td class="domain">${esc(r.domain)}</td><td><span class="badge">${esc(r.type)}</span></td><td class="domain">${esc(r.target)}${warn}</td>`;
     body.appendChild(tr);
   }
 }
@@ -1633,11 +1641,13 @@ async function refresh2FA() {
   el.innerHTML = '';
   setError('twofa-error', null);
   $('twofa-setup').hidden = true;
+  $('twofa-disable').hidden = true;
   if (me.totpEnabled) {
     el.innerHTML = '<span class="badge badge--success">2FA enabled</span> ';
     const btn = document.createElement('button');
     btn.className = 'btn btn--danger btn--sm'; btn.textContent = 'Disable';
-    btn.addEventListener('click', async () => { await api('POST', '/api/2fa/disable'); refresh2FA(); });
+    // Switching the second factor off needs the password again.
+    btn.addEventListener('click', () => { $('twofa-disable').hidden = false; $('twofa-disable-password').focus(); });
     el.appendChild(btn);
   } else {
     const btn = document.createElement('button');
@@ -1654,10 +1664,39 @@ async function refresh2FA() {
 $('twofa-confirm').addEventListener('click', async () => {
   setError('twofa-error', null);
   try {
-    await api('POST', '/api/2fa/enable', { secret: pending2FASecret, code: $('twofa-code').value.trim() });
+    await api('POST', '/api/2fa/enable', { secret: pending2FASecret, code: $('twofa-code').value.trim(), password: $('twofa-password').value });
     $('twofa-code').value = '';
+    $('twofa-password').value = '';
     refresh2FA();
   } catch (err) { setError('twofa-error', err); }
+});
+$('twofa-disable-confirm').addEventListener('click', async () => {
+  setError('twofa-error', null);
+  try {
+    await api('POST', '/api/2fa/disable', { password: $('twofa-disable-password').value });
+    $('twofa-disable-password').value = '';
+    refresh2FA();
+  } catch (err) { setError('twofa-error', err); }
+});
+
+function sessionsNote(text) {
+  const el = $('sessions-status');
+  el.hidden = false;
+  el.textContent = text;
+}
+$('btn-revoke-admin-sessions').addEventListener('click', async () => {
+  if (!confirm('Sign out every other admin session? This session stays signed in.')) return;
+  try {
+    const r = await api('POST', '/api/sessions/revoke');
+    sessionsNote(`Signed out ${r.revoked} other session${r.revoked === 1 ? '' : 's'}.`);
+  } catch (err) { sessionsNote('Failed: ' + err.message); }
+});
+$('btn-revoke-sso-sessions').addEventListener('click', async () => {
+  if (!confirm('Sign every user out of every SSO-protected host? They will have to log in at the identity provider again.')) return;
+  try {
+    await api('POST', '/api/sso/revoke-sessions');
+    sessionsNote('The SSO signing key was replaced; every SSO session has ended.');
+  } catch (err) { sessionsNote('Failed: ' + err.message); }
 });
 
 /* ---- settings page ---- */
@@ -1997,7 +2036,10 @@ $('restore-file').addEventListener('change', async () => {
     const res = await fetch('/api/restore', { method: 'POST', body: file });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || res.statusText);
-    el.textContent = 'Restored. The restored admin credentials now apply; you may need to sign in again.';
+    const warn = (data.warnings || []).length ? ` Warnings: ${data.warnings.join('; ')}.` : '';
+    el.textContent = `Restored (certificates ${data.certificates || 'replaced'}).${warn} Every admin session was signed out; sign in again with the restored credentials.`;
+    // The session that ran the restore was revoked with the others.
+    setTimeout(() => window.location.reload(), 4000);
   } catch (err) {
     el.textContent = 'Restore failed: ' + err.message;
   }

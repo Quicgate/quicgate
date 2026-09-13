@@ -33,7 +33,11 @@ func newTestEngine(t *testing.T) (*Engine, *store.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return New(Config{DisableTLS: true, DataDir: dir}, st), st
+	e := New(Config{DisableTLS: true, DataDir: dir}, st)
+	// Close the access log before the temp dir is removed (Windows will not
+	// delete an open file).
+	t.Cleanup(func() { _ = e.accessLog.Close() })
+	return e, st
 }
 
 // backend starts a fake upstream and returns its Upstream descriptor.

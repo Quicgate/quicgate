@@ -228,14 +228,31 @@
           <div class="card-head"><h2>Two-factor authentication</h2></div>
           <div id="twofa-status"></div>
           <div id="twofa-setup" hidden>
-            <p class="hs-muted">Scan this secret into your authenticator, then enter a code to confirm.</p>
+            <p class="hs-muted">Scan this secret into your authenticator, then enter a code and your current password to confirm.</p>
             <p class="mono" id="twofa-secret" style="word-break:break-all"></p>
             <div class="field-row">
               <label class="field field--sm"><span>Code</span><input id="twofa-code" class="mono" placeholder="123456"></label>
+              <label class="field field--sm"><span>Current password</span><input id="twofa-password" type="password" autocomplete="current-password"></label>
               <button id="twofa-confirm" class="btn btn--primary" style="align-self:flex-end">Enable</button>
             </div>
           </div>
+          <div id="twofa-disable" hidden>
+            <div class="field-row">
+              <label class="field field--sm"><span>Current password</span><input id="twofa-disable-password" type="password" autocomplete="current-password"></label>
+              <button id="twofa-disable-confirm" class="btn btn--danger" style="align-self:flex-end">Disable 2FA</button>
+            </div>
+          </div>
           <div id="twofa-error" class="form-error" hidden></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Sessions</h2></div>
+          <p class="hs-muted">Changing your password already signs out your other sessions. Use these after a lost device or a suspected leak.</p>
+          <div class="field-row">
+            <button id="btn-revoke-admin-sessions" class="btn btn--secondary btn--sm">Sign out all other admin sessions</button>
+            <button id="btn-revoke-sso-sessions" class="btn btn--secondary btn--sm">Sign everyone out of SSO-protected hosts</button>
+          </div>
+          <p id="sessions-status" class="hs-muted" hidden></p>
         </div>
 
         <div class="card col-span-2">

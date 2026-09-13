@@ -2,9 +2,7 @@ package admin
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -43,10 +41,13 @@ type Server struct {
 	dataDir  string
 	mu       sync.Mutex
 	sessions map[string]session
+	// oidcLogins holds in-flight admin OIDC logins by state, each usable once.
+	oidcLogins map[string]adminOIDCLogin
 }
 
 func New(st *store.Store, eng *engine.Engine, webFS fs.FS, dataDir string) *Server {
-	return &Server{store: st, engine: eng, webFS: webFS, dataDir: dataDir, sessions: map[string]session{}, logins: newLoginThrottle()}
+	return &Server{store: st, engine: eng, webFS: webFS, dataDir: dataDir, sessions: map[string]session{},
+		oidcLogins: map[string]adminOIDCLogin{}, logins: newLoginThrottle()}
 }
 
 // SetDocker attaches the Docker label provider so the API can report its status
@@ -89,6 +90,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/logout", s.auth(s.handleLogout))
 	mux.HandleFunc("GET /api/me", s.auth(s.handleMe))
 	mux.HandleFunc("POST /api/password", s.auth(s.handlePassword))
+	mux.HandleFunc("POST /api/sessions/revoke", s.auth(s.handleRevokeSessions))
+	mux.HandleFunc("POST /api/sso/revoke-sessions", s.auth(s.handleRevokeSSOSessions))
 	mux.HandleFunc("GET /api/hosts", s.auth(s.handleListHosts))
 	mux.HandleFunc("POST /api/hosts", s.auth(s.handleCreateHost))
 	mux.HandleFunc("PUT /api/hosts/{id}", s.auth(s.handleUpdateHost))
@@ -812,20 +815,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	tok := make([]byte, 32)
-	if _, err := rand.Read(tok); err != nil {
-		writeErr(w, http.StatusInternalServerError, "entropy failure")
+	if err := s.startSession(w, r, u.ID, u.Email); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	id := hex.EncodeToString(tok)
 	s.logins.succeed(ip)
-	s.mu.Lock()
-	s.sessions[id] = session{userID: u.ID, email: u.Email, expires: time.Now().Add(sessionTTL)}
-	s.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{
-		Name: "qg_session", Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
-		Secure: isHTTPS(r), MaxAge: int(sessionTTL.Seconds()),
-	})
 	writeJSON(w, http.StatusOK, map[string]any{"email": u.Email, "mustChange": u.MustChange, "version": s.engine.Version()})
 }
 
@@ -885,6 +879,13 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.SetPassword(u.ID, string(hash)); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Whoever held the old password may hold a session too: end every session
+	// of this account, and give the caller a fresh one.
+	s.revokeSessions(sameIdentity(sess), "")
+	if err := s.startSession(w, r, sess.userID, sess.email); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

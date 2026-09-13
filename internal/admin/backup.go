@@ -3,6 +3,9 @@ package admin
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,38 +23,77 @@ const maxRestoreBytes = 200 << 20
 // the archive was validated.
 const maxRestoreExpandedBytes = 2 << 30
 
-// handleBackup streams a tar.gz of everything: a consistent SQLite snapshot
-// plus the certmagic storage tree.
+// handleBackup sends a tar.gz of everything: a consistent SQLite snapshot plus
+// the certificate storage tree. The archive is built in full before anything
+// is sent, so a file that cannot be read fails the request with an error
+// instead of producing a truncated archive behind a 200.
 func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
+	archive, err := os.CreateTemp(s.dataDir, ".backup-*.tar.gz")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer os.Remove(archive.Name())
+	defer archive.Close()
+
+	if err := s.writeBackup(archive); err != nil {
+		writeErr(w, http.StatusInternalServerError, "backup failed: "+err.Error())
+		return
+	}
+	size, err := archive.Seek(0, io.SeekCurrent)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Length", fmt.Sprint(size))
+	w.Header().Set("Content-Disposition",
+		fmt.Sprintf(`attachment; filename="quicgate-backup-%s.tar.gz"`, time.Now().Format("20060102-150405")))
+	_, _ = io.Copy(w, archive)
+}
+
+// writeBackup writes the archive to out and reports the first failure.
+func (s *Server) writeBackup(out io.Writer) error {
 	snap := filepath.Join(s.dataDir, fmt.Sprintf(".backup-%d.db", time.Now().UnixNano()))
 	if err := s.store.Snapshot(snap); err != nil {
-		writeErr(w, http.StatusInternalServerError, "snapshot: "+err.Error())
-		return
+		return fmt.Errorf("snapshot: %w", err)
 	}
 	defer os.Remove(snap)
 
-	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition",
-		fmt.Sprintf(`attachment; filename="quicgate-backup-%s.tar.gz"`, time.Now().Format("20060102-150405")))
-	gz := gzip.NewWriter(w)
+	gz := gzip.NewWriter(out)
 	tw := tar.NewWriter(gz)
-
 	if err := addFileToTar(tw, snap, "quicgate.db"); err != nil {
-		return // headers already sent; client sees a truncated archive
+		return err
 	}
 	certRoot := filepath.Join(s.dataDir, "certs")
-	_ = filepath.Walk(certRoot, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(s.dataDir, path)
+	if _, err := os.Stat(certRoot); err == nil {
+		err := filepath.Walk(certRoot, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(s.dataDir, path)
+			if err != nil {
+				return err
+			}
+			return addFileToTar(tw, path, filepath.ToSlash(rel))
+		})
 		if err != nil {
-			return nil
+			return fmt.Errorf("certificates: %w", err)
 		}
-		return addFileToTar(tw, path, filepath.ToSlash(rel))
-	})
-	_ = tw.Close()
-	_ = gz.Close()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("certificates: %w", err)
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	return gz.Close()
 }
 
 func addFileToTar(tw *tar.Writer, path, name string) error {
@@ -71,8 +113,14 @@ func addFileToTar(tw *tar.Writer, path, name string) error {
 	return err
 }
 
-// handleRestore accepts a backup tar.gz, restores the database atomically,
-// unpacks the cert tree, and reloads the engine.
+// handleRestore accepts a backup tar.gz and restores it as one unit: the
+// archive is unpacked and checked first, the certificate tree is swapped in,
+// the database is replaced in a transaction, and a failure at any step puts the
+// previous certificates back and leaves the database untouched. It never
+// reports success for a restore that did not fully apply. Afterwards every
+// admin session is revoked (the restored users, passwords and tokens are now
+// the ones that apply) and the engine reloads, which also picks up the
+// restored SSO signing key.
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	tmp, err := os.MkdirTemp(s.dataDir, ".restore-*")
 	if err != nil {
@@ -87,7 +135,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tr := tar.NewReader(gz)
-	sawDB := false
+	sawDB, sawCerts := false, false
 	seen := map[string]bool{}
 	var expanded int64
 	for {
@@ -126,6 +174,8 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		seen[name] = true
 		if name == "quicgate.db" {
 			sawDB = true
+		} else {
+			sawCerts = true
 		}
 		dst := filepath.Join(tmp, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
@@ -150,40 +200,100 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		f.Close()
+		if err := f.Close(); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	if !sawDB {
 		writeErr(w, http.StatusBadRequest, "archive contains no quicgate.db")
 		return
 	}
 
-	if err := s.store.RestoreFrom(filepath.Join(tmp, "quicgate.db")); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	// Swap the certificate tree first, keeping the current one to put back.
+	// An archive without certificates keeps the current tree: replacing it
+	// with nothing would force every certificate to be issued again.
+	live := filepath.Join(s.dataDir, "certs")
+	var rollback, commit func() error
+	if sawCerts {
+		rollback, commit, err = swapDir(live, filepath.Join(tmp, "certs"))
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "restore failed, nothing was changed: certificates: "+err.Error())
+			return
+		}
+	}
+	warnings, err := s.store.RestoreFrom(filepath.Join(tmp, "quicgate.db"))
+	if err != nil {
+		msg := "restore failed, nothing was changed: " + err.Error()
+		if rollback != nil {
+			if rbErr := rollback(); rbErr != nil {
+				msg = "restore failed and the previous certificates could not be put back (" + rbErr.Error() + "): " + err.Error()
+			}
+		}
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
-	// Cert files second: even if a copy fails the config db is consistent
-	// and certmagic will simply re-issue whatever is missing.
-	restoredCerts := filepath.Join(tmp, "certs")
-	_ = filepath.Walk(restoredCerts, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		rel, _ := filepath.Rel(tmp, path)
-		dst := filepath.Join(s.dataDir, rel)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		_ = os.WriteFile(dst, data, 0o600)
-		return nil
-	})
+	if commit != nil {
+		_ = commit() // only a leftover copy of the old certificates if this fails
+	}
+	s.revokeSessions(func(session) bool { return true }, "")
 
 	if err := s.reload(r.Context()); err != nil {
-		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		writeErr(w, http.StatusInternalServerError, "restored, but applying it failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "restored"})
+	certs := "replaced"
+	if !sawCerts {
+		certs = "kept (the archive contains none)"
+	}
+	if warnings == nil {
+		warnings = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "restored", "certificates": certs, "warnings": warnings, "reauthenticate": true,
+	})
+}
+
+// swapDir moves staged into place at live, keeping the previous live tree
+// aside until the caller knows whether the restore succeeded: rollback puts the
+// previous tree back, commit deletes it. staged must be on the same filesystem
+// as live (it is: restores unpack beneath the data directory).
+func swapDir(live, staged string) (rollback, commit func() error, err error) {
+	suffix := make([]byte, 6)
+	_, _ = rand.Read(suffix)
+	old := live + ".previous-" + hex.EncodeToString(suffix)
+	hadLive := false
+	if info, err := os.Lstat(live); err == nil {
+		if !info.IsDir() {
+			return nil, nil, fmt.Errorf("%s exists and is not a directory", live)
+		}
+		if err := os.Rename(live, old); err != nil {
+			return nil, nil, err
+		}
+		hadLive = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, nil, err
+	}
+	if err := os.Rename(staged, live); err != nil {
+		if hadLive {
+			_ = os.Rename(old, live)
+		}
+		return nil, nil, err
+	}
+	rollback = func() error {
+		if err := os.RemoveAll(live); err != nil {
+			return err
+		}
+		if hadLive {
+			return os.Rename(old, live)
+		}
+		return nil
+	}
+	commit = func() error {
+		if hadLive {
+			return os.RemoveAll(old)
+		}
+		return nil
+	}
+	return rollback, commit, nil
 }

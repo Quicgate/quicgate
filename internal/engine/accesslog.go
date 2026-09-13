@@ -26,7 +26,14 @@ type accessLogger struct {
 	status3xx atomic.Uint64
 	status4xx atomic.Uint64
 	status5xx atomic.Uint64
-	perHost   sync.Map // host -> *hostCounters
+	perHost   sync.Map // metric label -> *hostCounters
+	// hostLabel maps a request's Host to a bounded metric label (the matched
+	// route, or one label for everything unmatched). Set by the engine.
+	hostLabel func(host string) string
+
+	sendMu sync.RWMutex // held for reading while sending, for writing by Close
+	closed bool
+	done   chan struct{} // closed once the writer has flushed and exited
 }
 
 type hostCounters struct {
@@ -87,14 +94,31 @@ func newAccessLogger(dir string) *accessLogger {
 			MaxBackups: 5,
 			Compress:   true,
 		},
-		enc: make(chan []byte, 1024),
+		enc:  make(chan []byte, 1024),
+		done: make(chan struct{}),
 	}
 	go func() {
+		defer close(l.done)
 		for line := range l.enc {
 			_, _ = l.out.Write(append(line, '\n'))
 		}
 	}()
 	return l
+}
+
+// Close stops accepting lines, writes out the ones already queued and closes
+// the log file. Safe to call more than once.
+func (l *accessLogger) Close() error {
+	l.sendMu.Lock()
+	if l.closed {
+		l.sendMu.Unlock()
+		return nil
+	}
+	l.closed = true
+	close(l.enc)
+	l.sendMu.Unlock()
+	<-l.done
+	return l.out.Close()
 }
 
 type accessRecord struct {
@@ -168,7 +192,11 @@ func (l *accessLogger) wrap(next http.HandlerFunc) http.HandlerFunc {
 		case 5:
 			l.status5xx.Add(1)
 		}
-		hcAny, _ := l.perHost.LoadOrStore(promLabel(r.Host), &hostCounters{})
+		label := "_unmatched"
+		if l.hostLabel != nil {
+			label = l.hostLabel(r.Host)
+		}
+		hcAny, _ := l.perHost.LoadOrStore(label, &hostCounters{})
 		hc := hcAny.(*hostCounters)
 		hc.total.Add(1)
 		hc.bytes.Add(uint64(sw.bytes))
@@ -200,9 +228,13 @@ func (l *accessLogger) wrap(next http.HandlerFunc) http.HandlerFunc {
 		if err != nil {
 			return
 		}
-		select {
-		case l.enc <- line:
-		default: // never block the request path on a slow disk
+		l.sendMu.RLock()
+		if !l.closed {
+			select {
+			case l.enc <- line:
+			default: // never block the request path on a slow disk
+			}
 		}
+		l.sendMu.RUnlock()
 	}
 }

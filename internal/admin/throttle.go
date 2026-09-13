@@ -26,6 +26,10 @@ type failCounter struct {
 	until time.Time // non-zero while locked out
 }
 
+// loginMaxTracked caps the addresses the login throttle tracks; at the cap an
+// arbitrary entry is dropped. A variable so tests can use a small cap.
+var loginMaxTracked = 65536
+
 type loginThrottle struct {
 	mu     sync.Mutex
 	fails  map[string]*failCounter
@@ -61,6 +65,14 @@ func (t *loginThrottle) fail(ip string) {
 	now := time.Now()
 	f, ok := t.fails[ip]
 	if !ok || now.Sub(f.first) > loginWindow {
+		if !ok {
+			for k := range t.fails {
+				if len(t.fails) < loginMaxTracked {
+					break
+				}
+				delete(t.fails, k)
+			}
+		}
 		t.fails[ip] = &failCounter{count: 1, first: now}
 	} else {
 		f.count++
