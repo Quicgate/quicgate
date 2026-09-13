@@ -1,6 +1,6 @@
 # Feature status
 
-Status as of **v1.9.0**. Every claim in the README and the guides should map to a row here. The
+Status as of **v1.9.1**. Every claim in the README and the guides should map to a row here. The
 columns mean:
 
 - **Tested locally**: covered by the automated test suite (unit and integration tests, real
