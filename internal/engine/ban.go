@@ -11,6 +11,10 @@ import (
 // banManager implements fail2ban-style auto-banning: after N auth failures
 // within a window, an IP is blocked for a duration. Config is read live from
 // a getter so settings changes apply without restart.
+// banMaxTracked caps the addresses the ban manager tracks, per map. At the cap
+// an arbitrary entry is dropped. A variable so tests can use a small cap.
+var banMaxTracked = 65536
+
 type banManager struct {
 	mu       sync.Mutex
 	failures map[string][]time.Time
@@ -102,14 +106,30 @@ func (b *banManager) recordFailure(remoteAddr string) {
 		}
 	}
 	kept = append(kept, now)
+	if _, tracked := b.failures[ip]; !tracked {
+		evictOne(b.failures, banMaxTracked)
+	}
 	b.failures[ip] = kept
 	if len(kept) >= cfg.threshold {
+		if _, known := b.banned[ip]; !known {
+			evictOne(b.banned, banMaxTracked)
+		}
 		b.banned[ip] = now.Add(cfg.banFor)
 		delete(b.failures, ip)
 		log.Printf("ban: %s banned for %s (%d failures)", ip, cfg.banFor, cfg.threshold)
 		if b.notify != nil {
 			b.notify("quicgate: banned " + ip + " after " + itoa(cfg.threshold) + " auth failures")
 		}
+	}
+}
+
+// evictOne drops arbitrary entries until m is below max.
+func evictOne[V any](m map[string]V, max int) {
+	for k := range m {
+		if len(m) < max {
+			return
+		}
+		delete(m, k)
 	}
 }
 

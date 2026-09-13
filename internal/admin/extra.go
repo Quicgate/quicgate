@@ -3,6 +3,7 @@ package admin
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/pquerna/otp/totp"
+	"golang.org/x/crypto/bcrypt"
 
 	"quicgate/internal/engine"
 	"quicgate/internal/store"
@@ -69,20 +71,34 @@ func (s *Server) handle2FASetup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"secret": key.Secret(), "uri": key.URL()})
 }
 
+// reauthenticate checks the account password again for a change to the
+// account's own protection (second factor), so a borrowed or stolen session
+// alone cannot switch it off or replace it.
+func (s *Server) reauthenticate(sess session, password string) (store.User, int, string) {
+	u, err := s.store.GetUserByEmail(sess.email)
+	if err != nil {
+		return u, http.StatusBadRequest, "this account has no local password to confirm"
+	}
+	if password == "" || bcrypt.CompareHashAndPassword([]byte(u.Hash), []byte(password)) != nil {
+		return u, http.StatusUnauthorized, "confirm the change with your current password"
+	}
+	return u, 0, ""
+}
+
 func (s *Server) handle2FAEnable(w http.ResponseWriter, r *http.Request) {
 	sess := r.Context().Value(sessionKey).(session)
-	var body struct{ Secret, Code string }
+	var body struct{ Secret, Code, Password string }
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if !totp.Validate(body.Code, body.Secret) {
-		writeErr(w, http.StatusBadRequest, "code does not match; check your authenticator")
+	u, status, msg := s.reauthenticate(sess, body.Password)
+	if status != 0 {
+		writeErr(w, status, msg)
 		return
 	}
-	u, err := s.store.GetUserByEmail(sess.email)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+	if !totp.Validate(body.Code, body.Secret) {
+		writeErr(w, http.StatusBadRequest, "code does not match; check your authenticator")
 		return
 	}
 	if err := s.store.SetTOTPSecret(u.ID, body.Secret); err != nil {
@@ -94,9 +110,14 @@ func (s *Server) handle2FAEnable(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handle2FADisable(w http.ResponseWriter, r *http.Request) {
 	sess := r.Context().Value(sessionKey).(session)
-	u, err := s.store.GetUserByEmail(sess.email)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+	var body struct{ Password string }
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	u, status, msg := s.reauthenticate(sess, body.Password)
+	if status != 0 {
+		writeErr(w, status, msg)
 		return
 	}
 	if err := s.store.SetTOTPSecret(u.ID, ""); err != nil {
@@ -234,49 +255,35 @@ func (s *Server) handleCertFromFile(w http.ResponseWriter, r *http.Request) {
 
 // ---- declarative import ----
 
-// handleImport creates hosts, access lists and streams from a JSON document,
-// for GitOps-style config-as-code. Additive: existing entries are untouched.
+// handleImport applies a JSON document of access lists, hosts and streams, for
+// GitOps-style config-as-code. It is all or nothing (one transaction; a
+// rejected document changes neither the stored nor the running configuration)
+// and repeatable (entries matching existing ones by name, domain set or listen
+// port are updated in place). The response keeps the created counts at the top
+// level, as before, and adds what was updated.
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
-	var doc struct {
-		AccessLists []store.AccessList `json:"accessLists"`
-		Hosts       []store.Host       `json:"hosts"`
-		Streams     []store.Stream     `json:"streams"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&doc); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+	var doc store.ImportDoc
+	if err := decodeStrict(r, &doc); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid document: "+err.Error())
 		return
 	}
-	created := map[string]int{}
-	for i := range doc.AccessLists {
-		a := doc.AccessLists[i]
-		a.ID = 0
-		if err := s.store.CreateAccessList(&a); err != nil {
-			writeErr(w, http.StatusBadRequest, "access list: "+err.Error())
-			return
-		}
-		created["accessLists"]++
-	}
-	for i := range doc.Hosts {
-		h := doc.Hosts[i]
-		h.ID = 0
-		if err := s.store.CreateHost(&h); err != nil {
-			writeErr(w, http.StatusBadRequest, "host: "+err.Error())
-			return
-		}
-		created["hosts"]++
-	}
-	for i := range doc.Streams {
-		st := doc.Streams[i]
-		st.ID = 0
-		if err := s.store.CreateStream(&st, s.engine.ReservedPorts()); err != nil {
-			writeErr(w, http.StatusBadRequest, "stream: "+err.Error())
-			return
-		}
-		created["streams"]++
+	res, err := s.store.Import(doc, s.engine.ReservedPorts())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "import rejected, nothing was changed: "+err.Error())
+		return
 	}
 	if err := s.reload(r.Context()); err != nil {
-		writeErr(w, http.StatusInternalServerError, "change saved, but applying it failed: "+err.Error())
+		writeErr(w, http.StatusInternalServerError, "imported, but applying it failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, created)
+	out := map[string]any{"updated": res.Updated}
+	for k, v := range res.Created {
+		out[k] = v
+	}
+	for _, k := range []string{"accessLists", "hosts", "streams"} {
+		if _, ok := out[k]; !ok {
+			out[k] = 0
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }

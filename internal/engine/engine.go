@@ -79,14 +79,36 @@ type routingTable struct {
 	wildcard map[string]*route // "example.com" for "*.example.com"
 }
 
-func (t *routingTable) lookup(hostport string) *route {
+// routeName normalises a Host header or SNI for routing: lower case, no port,
+// and no trailing dot ("example.com." is the same DNS name as "example.com", so
+// it goes through the same host and the same gates).
+func routeName(hostport string) string {
 	name := strings.ToLower(hostport)
 	if h, _, err := net.SplitHostPort(name); err == nil {
 		name = h
 	}
-	// "example.com." is the same DNS name as "example.com": route it through
-	// the same host (and the same gates) rather than as an unknown name.
-	name = strings.TrimSuffix(name, ".")
+	return strings.TrimSuffix(name, ".")
+}
+
+// metricLabel names the configured route a request belongs to, for per-host
+// metrics: the exact domain, "*.suffix" for a wildcard route, or "_unmatched".
+// Labels therefore stay bounded by the configuration whatever Host a client
+// sends.
+func (t *routingTable) metricLabel(hostport string) string {
+	name := routeName(hostport)
+	if _, ok := t.exact[name]; ok {
+		return name
+	}
+	if i := strings.IndexByte(name, '.'); i > 0 {
+		if _, ok := t.wildcard[name[i+1:]]; ok {
+			return "*." + name[i+1:]
+		}
+	}
+	return "_unmatched"
+}
+
+func (t *routingTable) lookup(hostport string) *route {
+	name := routeName(hostport)
 	if r, ok := t.exact[name]; ok {
 		return r
 	}
@@ -153,6 +175,7 @@ func New(cfg Config, st *store.Store) *Engine {
 	e.acmeEmail = cfg.ACMEEmail
 	e.certs = newCertTracker(func() string { return st.GetSetting("notify_url", "") })
 	e.accessLog = newAccessLogger(cfg.DataDir)
+	e.accessLog.hostLabel = func(host string) string { return e.table.Load().metricLabel(host) }
 	e.geo = openGeoDB(cfg.DataDir + "/GeoLite2-Country.mmdb")
 	e.ban = newBanManager(func() banConfig { return e.banConfig() }, e.certs.send)
 	if cfg.UPnP {
@@ -244,6 +267,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	defer e.reloadMu.Unlock()
 	e.applyACMESettings()
 	e.buildRealIP()
+	e.syncOIDCSecret()
 	hosts, err := e.store.ListHosts()
 	if err != nil {
 		return err
@@ -734,23 +758,15 @@ func maintenanceHandler(customHTML string) http.Handler {
 }
 
 // wrapCommon applies the middleware shared by every host type, outermost
-// first: access list -> forward-auth -> OIDC SSO -> rate limit -> bots ->
-// exploit filter. With path-scoped auth rules configured, the auth layers
-// become per-path (see pathauth.go); everything below them stays host-wide.
+// first: path traversal check -> rate limit -> bad bots -> exploit filter ->
+// identity header strip -> access list -> forward-auth -> OIDC SSO. With
+// path-scoped auth rules configured, the auth layers become per-path (see
+// pathauth.go); everything around them stays host-wide.
 // A host with any identity-injecting gate (SSO on the host or on any path,
 // forward auth) additionally strips those identity headers from every inbound
 // request, public paths included, so an upstream that trusts them can never be
 // fed a spoofed value through quicgate.
 func wrapCommon(domains []string, handler http.Handler, o store.Options, acl *compiledAccess, acls map[int64]*compiledAccess, sso *oidcGate, newGate func(store.OIDCAuth) *oidcGate) http.Handler {
-	if o.BlockExploits {
-		handler = blockExploits(handler)
-	}
-	if o.BlockBadBots {
-		handler = blockBadBots(handler)
-	}
-	if o.RateLimit != nil {
-		handler = newRateLimiter(o.RateLimit).wrap(handler)
-	}
 	hostGate := func(h http.Handler) http.Handler {
 		if sso != nil {
 			h = sso.wrap(h)
@@ -771,6 +787,18 @@ func wrapCommon(domains []string, handler http.Handler, o store.Options, acl *co
 	// before any chain runs, and the gate's own injection happens after.
 	if names := trustedIdentityHeaders(o); len(names) > 0 {
 		out = stripHeaders(names, out)
+	}
+	// Abuse controls run before any authentication work, so a flood of
+	// credential guesses or SSO redirects is throttled and filtered before it
+	// costs a bcrypt comparison, a forward-auth call or an IdP round trip.
+	if o.BlockExploits {
+		out = blockExploits(out)
+	}
+	if o.BlockBadBots {
+		out = blockBadBots(out)
+	}
+	if o.RateLimit != nil {
+		out = newRateLimiter(o.RateLimit).wrap(out)
 	}
 	// Outermost of all: a path that means different things to quicgate's rules
 	// and to the upstream can defeat every gate below, so refuse it first.

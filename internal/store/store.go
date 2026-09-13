@@ -800,39 +800,148 @@ func (s *Store) Snapshot(path string) error {
 	return err
 }
 
-var backupTables = []string{"hosts", "users", "access_lists", "streams", "settings", "custom_certs", "oidc_providers"}
-
-// RestoreFrom replaces all configuration with the contents of the snapshot
-// database at dbPath, atomically. Fails cleanly (nothing changed) when the
-// snapshot's schema does not match this binary's.
-func (s *Store) RestoreFrom(dbPath string) error {
+// RestoreFrom replaces every configuration table with the contents of the
+// snapshot database at dbPath, in one transaction: on any error nothing changes.
+//
+// The tables come from this binary's own schema, so a table added later (API
+// tokens, port forwards) can never be left out of a restore by a hand-kept
+// list. A table the snapshot predates is emptied rather than kept, because the
+// restored state must be the snapshot's and never a mix with live rows (live
+// API tokens surviving a restore would be exactly that). Columns are matched by
+// name, so an older snapshot restores into a newer schema with defaults for the
+// columns it lacks. It returns warnings about references in the snapshot that
+// do not resolve; the engine fails closed on those.
+func (s *Store) RestoreFrom(dbPath string) ([]string, error) {
 	if _, err := s.db.Exec("ATTACH ? AS backup", dbPath); err != nil {
-		return fmt.Errorf("open snapshot: %w", err)
+		return nil, fmt.Errorf("open snapshot: %w", err)
 	}
 	defer s.db.Exec("DETACH backup")
+	var check string
+	if err := s.db.QueryRow("PRAGMA backup.quick_check").Scan(&check); err != nil || check != "ok" {
+		return nil, fmt.Errorf("snapshot database failed its integrity check: %v %s", err, check)
+	}
+	tables, err := tableNames(s.db, "main")
+	if err != nil {
+		return nil, err
+	}
+	backupTables, err := tableNames(s.db, "backup")
+	if err != nil {
+		return nil, err
+	}
+	inBackup := map[string]bool{}
+	for _, t := range backupTables {
+		inBackup[t] = true
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, t := range backupTables {
-		// A backup made by an older version may predate a table; keep this
-		// binary's (empty) table rather than failing the whole restore.
-		var n int
-		if err := tx.QueryRow("SELECT count(*) FROM backup.sqlite_master WHERE type='table' AND name=?", t).Scan(&n); err != nil {
-			tx.Rollback()
-			return err
+	defer tx.Rollback() // no-op after a successful commit
+	for _, t := range tables {
+		if _, err := tx.Exec("DELETE FROM " + quoteIdent(t)); err != nil {
+			return nil, err
 		}
-		if n == 0 {
+		if !inBackup[t] {
 			continue
 		}
-		if _, err := tx.Exec("DELETE FROM " + t); err != nil {
-			tx.Rollback()
-			return err
+		cols, err := sharedColumns(tx, t)
+		if err != nil {
+			return nil, err
 		}
-		if _, err := tx.Exec("INSERT INTO " + t + " SELECT * FROM backup." + t); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("restore %s (schema mismatch between backup and this version?): %w", t, err)
+		if len(cols) == 0 {
+			continue
+		}
+		list := strings.Join(cols, ", ")
+		if _, err := tx.Exec("INSERT INTO " + quoteIdent(t) + " (" + list + ") SELECT " + list + " FROM backup." + quoteIdent(t)); err != nil {
+			return nil, fmt.Errorf("restore %s (schema mismatch between backup and this version?): %w", t, err)
 		}
 	}
-	return tx.Commit()
+	warnings, err := danglingReferences(tx)
+	if err != nil {
+		return nil, err
+	}
+	return warnings, tx.Commit()
+}
+
+// tableNames lists the user tables of an attached schema (never SQLite's own).
+func tableNames(q dbtx, schema string) ([]string, error) {
+	rows, err := q.Query("SELECT name FROM " + schema + ".sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// sharedColumns returns the quoted column names table t has in both schemas.
+func sharedColumns(q dbtx, t string) ([]string, error) {
+	cols := func(schema string) (map[string]bool, []string, error) {
+		rows, err := q.Query("PRAGMA " + schema + ".table_info(" + quoteIdent(t) + ")")
+		if err != nil {
+			return nil, nil, err
+		}
+		defer rows.Close()
+		set := map[string]bool{}
+		var order []string
+		for rows.Next() {
+			var cid, notnull, pk int
+			var name, typ string
+			var dflt any
+			if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+				return nil, nil, err
+			}
+			set[name] = true
+			order = append(order, name)
+		}
+		return set, order, rows.Err()
+	}
+	_, mainOrder, err := cols("main")
+	if err != nil {
+		return nil, err
+	}
+	backupSet, _, err := cols("backup")
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, c := range mainOrder {
+		if backupSet[c] {
+			out = append(out, quoteIdent(c))
+		}
+	}
+	return out, nil
+}
+
+func quoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+
+// danglingReferences reports host and stream references that do not resolve.
+func danglingReferences(q dbtx) ([]string, error) {
+	var out []string
+	hosts, err := listHosts(q)
+	if err != nil {
+		return nil, err
+	}
+	for i := range hosts {
+		if err := checkHostRefs(q, &hosts[i]); err != nil {
+			out = append(out, hostLabel(hosts[i])+": "+err.Error())
+		}
+	}
+	streams, err := listStreams(q)
+	if err != nil {
+		return nil, err
+	}
+	for i := range streams {
+		if err := checkStreamRefs(q, &streams[i]); err != nil {
+			out = append(out, fmt.Sprintf("stream :%d: %s", streams[i].ListenPort, err))
+		}
+	}
+	return out, nil
 }

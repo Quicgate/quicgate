@@ -80,6 +80,29 @@ removed.
   itself, with its own address checked and nothing it sends parsed as a header.
   **Action needed:** a stream with *Accept inbound PROXY header* enabled and no
   trusted proxies does not start until you add them.
+- **Credential changes end live sessions (Q11).** Changing the admin password
+  left other sessions signed in, and replacing the SSO signing key did nothing
+  until a restart. A password change now signs out every other session of the
+  account (the caller continues on a fresh session id), a new *Sessions* card
+  can sign out every other admin session and sign every user out of all
+  SSO-protected hosts, a changed or cleared SSO signing key applies on the next
+  reload, and turning 2FA on or off asks for the current password.
+- **Admin OIDC login binds the sign-in (Q12).** The admin login now sends a
+  PKCE (S256) challenge and a nonce, keeps each sign-in as a one-use server-side
+  record valid for five minutes, checks the nonce in the ID token, marks the
+  state cookie `Secure` on HTTPS and scopes it to `/api/oidc/`, and bounds every
+  request to the IdP with a timeout (application SSO requests are bounded too).
+- **Request data is never rendered as HTML in the admin UI (Q13).** The log
+  viewer inserted the request path, Host and method a remote client chose
+  straight into the page. Those, and every other value that comes from the API
+  (certificate errors, custom certificate names, host targets, effective
+  configuration), are now escaped, and the escaping helper covers single quotes
+  as well.
+- **Bounded state for public traffic (Q14).** Per-host metrics are labelled by
+  configured route, with one `_unmatched` label for everything else, so invented
+  Host headers no longer grow the metrics without limit. Rate limiting, bad-bot
+  and exploit filtering now run before the authentication gates, and the
+  rate-limit, auto-ban and login-throttle tables have hard size caps.
 - **Stream resource limits (Q14, streams).** Each UDP listener keeps at most
   1024 client sessions, each TCP listener at most 4096 concurrent connections,
   and TLS-terminating streams allow 10 seconds for the handshake.
@@ -100,6 +123,29 @@ removed.
   reason when a saved stream cannot run.
 - The stream guide no longer claims managed ACME certificates work for TLS
   termination on streams; only custom certificates do.
+- **Import is atomic and repeatable (Q09).** `POST /api/import` wrote entries
+  one by one and stopped at the first error, leaving the earlier ones stored
+  but not applied, and importing the same access list twice failed on its
+  unique name. The whole document now applies in one transaction or not at all,
+  and entries matching existing configuration (access lists by name, hosts by
+  domain set, streams by listen port and protocol) are updated in place. The
+  response keeps the created counts and adds an `updated` object. Unknown fields
+  in the document are now rejected like everywhere else in the API.
+- **Restore reproduces the backup, or changes nothing (Q10).** Restore copied a
+  fixed list of tables that missed API tokens and port forwards (so tokens
+  created after the backup survived and the backup's own were lost), ignored
+  certificate copy errors, left stale certificate files, and still reported
+  success. It now replaces every table in the schema (emptying tables an older
+  backup lacks, matching columns by name), swaps the certificate tree in as a
+  unit with rollback, refuses a snapshot that fails SQLite's integrity check,
+  reports any failure without changing anything, returns warnings for dangling
+  references, and signs out every admin session afterwards. Backup export builds
+  the archive completely before sending it, so a read failure is an error
+  instead of a truncated download.
+- **Behaviour changes to note:** requests from clients over a host's rate limit
+  are now refused before authentication (they no longer reach the login
+  prompt), and `POST /api/2fa/enable` and `/api/2fa/disable` require a
+  `password` field.
 
 ## [1.8.1] - 2026-08-23
 

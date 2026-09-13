@@ -155,8 +155,10 @@ func scanAccessList(row interface{ Scan(...any) error }) (AccessList, error) {
 
 const accessCols = "id, name, satisfy, pass_auth, rules, users"
 
-func (s *Store) ListAccessLists() ([]AccessList, error) {
-	rows, err := s.db.Query("SELECT " + accessCols + " FROM access_lists ORDER BY name")
+func (s *Store) ListAccessLists() ([]AccessList, error) { return listAccessLists(s.db) }
+
+func listAccessLists(q dbtx) ([]AccessList, error) {
+	rows, err := q.Query("SELECT " + accessCols + " FROM access_lists ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -172,8 +174,10 @@ func (s *Store) ListAccessLists() ([]AccessList, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) GetAccessList(id int64) (AccessList, error) {
-	return scanAccessList(s.db.QueryRow("SELECT "+accessCols+" FROM access_lists WHERE id=?", id))
+func (s *Store) GetAccessList(id int64) (AccessList, error) { return getAccessList(s.db, id) }
+
+func getAccessList(q dbtx, id int64) (AccessList, error) {
+	return scanAccessList(q.QueryRow("SELECT "+accessCols+" FROM access_lists WHERE id=?", id))
 }
 
 func (a *AccessList) marshalParts() (string, string) {
@@ -186,12 +190,14 @@ func (a *AccessList) marshalParts() (string, string) {
 	return string(rules), string(users)
 }
 
-func (s *Store) CreateAccessList(a *AccessList) error {
+func (s *Store) CreateAccessList(a *AccessList) error { return createAccessList(s.db, a) }
+
+func createAccessList(q dbtx, a *AccessList) error {
 	if err := a.Validate(nil); err != nil {
 		return err
 	}
 	rules, users := a.marshalParts()
-	res, err := s.db.Exec("INSERT INTO access_lists (name, satisfy, pass_auth, rules, users) VALUES (?,?,?,?,?)",
+	res, err := q.Exec("INSERT INTO access_lists (name, satisfy, pass_auth, rules, users) VALUES (?,?,?,?,?)",
 		a.Name, a.Satisfy, b2i(a.PassAuth), rules, users)
 	if err != nil {
 		return err
@@ -200,8 +206,10 @@ func (s *Store) CreateAccessList(a *AccessList) error {
 	return err
 }
 
-func (s *Store) UpdateAccessList(a *AccessList) error {
-	prev, err := s.GetAccessList(a.ID)
+func (s *Store) UpdateAccessList(a *AccessList) error { return updateAccessList(s.db, a) }
+
+func updateAccessList(q dbtx, a *AccessList) error {
+	prev, err := getAccessList(q, a.ID)
 	if err != nil {
 		return err
 	}
@@ -209,7 +217,7 @@ func (s *Store) UpdateAccessList(a *AccessList) error {
 		return err
 	}
 	rules, users := a.marshalParts()
-	_, err = s.db.Exec("UPDATE access_lists SET name=?, satisfy=?, pass_auth=?, rules=?, users=? WHERE id=?",
+	_, err = q.Exec("UPDATE access_lists SET name=?, satisfy=?, pass_auth=?, rules=?, users=? WHERE id=?",
 		a.Name, a.Satisfy, b2i(a.PassAuth), rules, users, a.ID)
 	return err
 }

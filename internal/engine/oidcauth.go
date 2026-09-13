@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -81,19 +82,23 @@ func (e *Engine) oidcDiscover(r *http.Request, p store.OIDCProvider) (*oidc.Prov
 			return d.provider, d.err
 		}
 	}
-	ctx := r.Context()
-	if p.SkipTLSVerify {
-		ctx = oidc.ClientContext(ctx, &http.Client{
-			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
-			Timeout:   15 * time.Second,
-		})
-	}
-	provider, err := oidc.NewProvider(ctx, p.Issuer)
+	provider, err := oidc.NewProvider(idpContext(r.Context(), p), p.Issuer)
 	if err != nil {
 		log.Printf("oidc: discovery for %s failed: %v", p.Issuer, err)
 	}
 	e.oidcProviders.Store(key, &discoveredProvider{provider: provider, err: err, fetched: time.Now()})
 	return provider, err
+}
+
+// idpContext carries the HTTP client for every request to the provider
+// (discovery, token exchange, key set): always bounded by a timeout, and
+// skipping certificate verification only when the provider is configured to.
+func idpContext(ctx context.Context, p store.OIDCProvider) context.Context {
+	client := &http.Client{Timeout: 15 * time.Second}
+	if p.SkipTLSVerify {
+		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	}
+	return oidc.ClientContext(ctx, client)
 }
 
 func boolKey(b bool) string {
@@ -124,6 +129,22 @@ func (e *Engine) oidcSecret() []byte {
 	}
 	e.oidcSecretKey = key
 	return key
+}
+
+// syncOIDCSecret applies a replaced or cleared sso_cookie_secret to the running
+// gates. Without it the key stayed cached in memory until a restart, so the
+// documented way to sign everybody out (clearing the key) and a restore did
+// nothing to sessions already issued. Called on every reload.
+func (e *Engine) syncOIDCSecret() {
+	hexKey := e.store.GetSetting("sso_cookie_secret", "")
+	e.oidcSecretMu.Lock()
+	defer e.oidcSecretMu.Unlock()
+	if key, err := hex.DecodeString(hexKey); err == nil && len(key) == 32 {
+		e.oidcSecretKey = key
+		return
+	}
+	// Cleared or unusable: the next use generates and persists a fresh key.
+	e.oidcSecretKey = nil
 }
 
 // oidcGate is one compiled OIDC policy: a provider plus who it admits. A host
@@ -390,13 +411,7 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := g.oauthConfig(r, provider)
-	ctx := r.Context()
-	if g.provider.SkipTLSVerify {
-		ctx = oidc.ClientContext(ctx, &http.Client{
-			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
-			Timeout:   15 * time.Second,
-		})
-	}
+	ctx := idpContext(r.Context(), g.provider)
 	token, err := cfg.Exchange(ctx, r.URL.Query().Get("code"), oauth2.VerifierOption(st.Verifier))
 	if err != nil {
 		http.Error(w, "token exchange failed", http.StatusBadGateway)

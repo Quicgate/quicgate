@@ -2,8 +2,6 @@ package admin
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,6 +14,32 @@ import (
 // OIDC is an additive admin login option: password login always keeps
 // working, so a misconfigured IdP can never lock the admin out. Enabled and
 // configured entirely through settings.
+
+const (
+	// adminOIDCLoginTTL is how long a started sign-in may take at the IdP.
+	adminOIDCLoginTTL = 5 * time.Minute
+	// adminOIDCMaxPending bounds in-flight sign-ins held in memory; the oldest
+	// is dropped when it is reached (that user simply starts again).
+	adminOIDCMaxPending = 1024
+	// oidcHTTPTimeout bounds every request to the IdP: discovery, the token
+	// exchange and the key set.
+	oidcHTTPTimeout = 15 * time.Second
+)
+
+// adminOIDCLogin is one in-flight admin sign-in. It is created by the login
+// redirect and consumed by the first callback that presents its state, so a
+// callback URL cannot be replayed, and it carries the PKCE verifier and the
+// nonce the ID token must echo, which bind the returned code and token to the
+// browser that started the sign-in.
+type adminOIDCLogin struct {
+	nonce    string
+	verifier string
+	expires  time.Time
+}
+
+func oidcClientContext(ctx context.Context) context.Context {
+	return oidc.ClientContext(ctx, &http.Client{Timeout: oidcHTTPTimeout})
+}
 
 func (s *Server) oidcConfig(ctx context.Context) (*oidc.Provider, oauth2.Config, bool, error) {
 	if s.store.GetSetting("oidc_enabled", "") != "1" {
@@ -63,9 +87,9 @@ func (s *Server) oidcConfig(ctx context.Context) (*oidc.Provider, oauth2.Config,
 	return provider, cfg, true, nil
 }
 
-// handleOIDCLogin starts the auth-code flow.
+// handleOIDCLogin starts the auth-code flow with PKCE and a nonce.
 func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
-	_, cfg, ok, err := s.oidcConfig(r.Context())
+	_, cfg, ok, err := s.oidcConfig(oidcClientContext(r.Context()))
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "OIDC provider error: "+err.Error())
 		return
@@ -74,27 +98,67 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "OIDC not configured")
 		return
 	}
-	stateBytes := make([]byte, 16)
-	rand.Read(stateBytes)
-	state := hex.EncodeToString(stateBytes)
-	http.SetCookie(w, &http.Cookie{Name: "qg_oidc_state", Value: state, Path: "/", HttpOnly: true, MaxAge: 300, SameSite: http.SameSiteLaxMode})
-	http.Redirect(w, r, cfg.AuthCodeURL(state), http.StatusFound)
+	state, err := newSessionID()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	nonce, err := newSessionID()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	login := adminOIDCLogin{nonce: nonce, verifier: oauth2.GenerateVerifier(), expires: time.Now().Add(adminOIDCLoginTTL)}
+	s.mu.Lock()
+	now := time.Now()
+	oldestKey, oldest := "", time.Time{}
+	for k, l := range s.oidcLogins {
+		if now.After(l.expires) {
+			delete(s.oidcLogins, k)
+			continue
+		}
+		if oldestKey == "" || l.expires.Before(oldest) {
+			oldestKey, oldest = k, l.expires
+		}
+	}
+	if len(s.oidcLogins) >= adminOIDCMaxPending && oldestKey != "" {
+		delete(s.oidcLogins, oldestKey)
+	}
+	s.oidcLogins[state] = login
+	s.mu.Unlock()
+	http.SetCookie(w, &http.Cookie{
+		Name: "qg_oidc_state", Value: state, Path: "/api/oidc/", HttpOnly: true,
+		Secure: isHTTPS(r), MaxAge: int(adminOIDCLoginTTL.Seconds()), SameSite: http.SameSiteLaxMode,
+	})
+	http.Redirect(w, r, cfg.AuthCodeURL(state, oauth2.S256ChallengeOption(login.verifier), oidc.Nonce(login.nonce)), http.StatusFound)
 }
 
-// handleOIDCCallback exchanges the code, verifies the ID token, and — if the
-// email matches an allowed address — mints a session.
+// handleOIDCCallback consumes the sign-in, exchanges the code with its PKCE
+// verifier, verifies the ID token and its nonce, and, if the address is a
+// local admin or explicitly allowed, mints a session.
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
-	provider, cfg, ok, err := s.oidcConfig(r.Context())
+	state := r.URL.Query().Get("state")
+	stateCookie, err := r.Cookie("qg_oidc_state")
+	if err != nil || state == "" || state != stateCookie.Value {
+		writeErr(w, http.StatusBadRequest, "state mismatch")
+		return
+	}
+	s.mu.Lock()
+	login, pending := s.oidcLogins[state]
+	delete(s.oidcLogins, state) // one use, whatever happens next
+	s.mu.Unlock()
+	http.SetCookie(w, &http.Cookie{Name: "qg_oidc_state", Value: "", Path: "/api/oidc/", HttpOnly: true, Secure: isHTTPS(r), MaxAge: -1})
+	if !pending || time.Now().After(login.expires) {
+		writeErr(w, http.StatusBadRequest, "this sign-in expired or was already used; start again")
+		return
+	}
+	ctx := oidcClientContext(r.Context())
+	provider, cfg, ok, err := s.oidcConfig(ctx)
 	if err != nil || !ok {
 		writeErr(w, http.StatusBadGateway, "OIDC not available")
 		return
 	}
-	stateCookie, err := r.Cookie("qg_oidc_state")
-	if err != nil || r.URL.Query().Get("state") != stateCookie.Value {
-		writeErr(w, http.StatusBadRequest, "state mismatch")
-		return
-	}
-	oauth2Token, err := cfg.Exchange(r.Context(), r.URL.Query().Get("code"))
+	oauth2Token, err := cfg.Exchange(ctx, r.URL.Query().Get("code"), oauth2.VerifierOption(login.verifier))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "token exchange failed: "+err.Error())
 		return
@@ -105,9 +169,13 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	verifier := provider.Verifier(&oidc.Config{ClientID: cfg.ClientID})
-	idToken, err := verifier.Verify(r.Context(), rawID)
+	idToken, err := verifier.Verify(ctx, rawID)
 	if err != nil {
 		writeErr(w, http.StatusUnauthorized, "id_token verification failed")
+		return
+	}
+	if idToken.Nonce != login.nonce {
+		writeErr(w, http.StatusUnauthorized, "nonce mismatch")
 		return
 	}
 	var claims struct {
@@ -141,19 +209,10 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if localErr == nil {
 		email = u.Email
 	}
-	tok := make([]byte, 32)
-	if _, err := rand.Read(tok); err != nil {
-		writeErr(w, http.StatusInternalServerError, "entropy failure")
+	if err := s.startSession(w, r, u.ID, email); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	id := hex.EncodeToString(tok)
-	s.mu.Lock()
-	s.sessions[id] = session{userID: u.ID, email: email, expires: time.Now().Add(sessionTTL)}
-	s.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{
-		Name: "qg_session", Value: id, Path: "/", HttpOnly: true,
-		SameSite: http.SameSiteStrictMode, Secure: isHTTPS(r), MaxAge: int(sessionTTL.Seconds()),
-	})
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 

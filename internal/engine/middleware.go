@@ -110,6 +110,10 @@ func gzipWrap(next http.Handler) http.Handler {
 
 // ---- per-client rate limiting ----
 
+// rateLimitMaxClients caps the per-client buckets one host keeps. A variable
+// so tests can use a small cap.
+var rateLimitMaxClients = 65536
+
 type rateLimiter struct {
 	mu      sync.Mutex
 	rps     rate.Limit
@@ -135,7 +139,9 @@ func (r *rateLimiter) allow(remoteAddr string) bool {
 	defer r.mu.Unlock()
 	c, ok := r.clients[ip]
 	if !ok {
-		// Opportunistic GC: prune stale buckets when the map grows.
+		// Opportunistic GC: prune stale buckets when the map grows, and never
+		// let it pass the hard cap: at the cap an arbitrary bucket is dropped
+		// (that client just starts a fresh bucket).
 		if len(r.clients) > 4096 {
 			cutoff := time.Now().Add(-10 * time.Minute)
 			for k, v := range r.clients {
@@ -143,6 +149,12 @@ func (r *rateLimiter) allow(remoteAddr string) bool {
 					delete(r.clients, k)
 				}
 			}
+		}
+		for k := range r.clients {
+			if len(r.clients) < rateLimitMaxClients {
+				break
+			}
+			delete(r.clients, k)
 		}
 		c = &rateClient{lim: rate.NewLimiter(r.rps, r.burst)}
 		r.clients[ip] = c
