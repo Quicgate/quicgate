@@ -71,7 +71,7 @@ columns mean:
 | JSON access logs and viewer | yes | yes | |
 | Docker label discovery (multi-host) | yes | no | Dormant unless enabled. |
 | Graceful shutdown on SIGTERM | yes, on Linux | no | |
-| Signed build provenance for published images | CI | no | `gh attestation verify oci://ghcr.io/quicgate/quicgate:<tag> --owner Quicgate` |
+| Signed build provenance for published images | CI | yes (v1.9.0) | `gh attestation verify oci://ghcr.io/quicgate/quicgate:<tag> --owner Quicgate` |
 
 ## Deferred
 
