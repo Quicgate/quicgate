@@ -146,6 +146,51 @@ func TestRestoreFromRejectsForeignDatabase(t *testing.T) {
 	if hosts, _ := st.ListHosts(); len(hosts) != 1 {
 		t.Fatalf("refused restore changed live hosts: %d", len(hosts))
 	}
+
+	// Tables with the right names but none of the right columns share nothing
+	// with the schema: restoring them would empty hosts and users.
+	for name, setup := range map[string]string{
+		"foreign hosts and users": "CREATE TABLE hosts (body TEXT); INSERT INTO hosts VALUES ('x'); " +
+			"CREATE TABLE users (body TEXT); INSERT INTO users VALUES ('x')",
+		"foreign hosts, real users": "CREATE TABLE hosts (body TEXT); INSERT INTO hosts VALUES ('x'); " +
+			"CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, hash TEXT, must_change INTEGER NOT NULL DEFAULT 0); " +
+			"INSERT INTO users (email, hash) VALUES ('other@example.com', 'hash')",
+	} {
+		path := filepath.Join(t.TempDir(), "crafted.db")
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(setup); err != nil {
+			t.Fatal(err)
+		}
+		_ = db.Close()
+		if _, err := st.RestoreFrom(path); err == nil {
+			t.Fatalf("%s: a database with foreign columns was restored", name)
+		}
+		hosts, _ := st.ListHosts()
+		users, _ := st.CountUsers()
+		if len(hosts) != 1 || users != 1 {
+			t.Fatalf("%s: refused restore changed live state: %d hosts, %d users", name, len(hosts), users)
+		}
+	}
+}
+
+// The restored accounts must include one that can sign in: a users table whose
+// rows carry no password hash leaves nobody able to administer the proxy.
+func TestRestoreFromRejectsSnapshotWithoutUsableAdmin(t *testing.T) {
+	st := restoreTestStore(t)
+	snap := snapshotOf(t, st, func(db *sql.DB) {
+		if _, err := db.Exec("UPDATE users SET hash = ''"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if _, err := st.RestoreFrom(snap); err == nil {
+		t.Fatal("a backup whose only account has no password hash was restored")
+	}
+	if users, _ := st.CountUsers(); users != 1 {
+		t.Fatalf("refused restore changed live users: %d", users)
+	}
 }
 
 // A backup without an admin account is refused: restoring it would lock the

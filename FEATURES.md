@@ -65,7 +65,7 @@ columns mean:
 | Admin login through OIDC or LDAP | yes, synthetic IdP | no | PKCE, nonce and one-use sign-in for OIDC; LDAP requires `ldaps://`. |
 | Session revocation (password change, sign out others, SSO key rotation) | yes | no | |
 | API tokens | yes | yes | Full administrator credentials: no scopes, no expiry. |
-| Backup and restore | yes | no | Restores every table and the certificate tree as a unit, or changes nothing. Refuses files that are not quicgate backups or have no admin account. Archives are not encrypted. |
+| Backup and restore | yes | no | Restores every table and the certificate tree as a unit, or changes nothing. Refuses files that are not quicgate backups or would leave no admin able to sign in. Archives are not encrypted. |
 | Declarative import | yes | no | One transaction, idempotent by natural key. (The earlier, non-transactional import was used for a live migration.) |
 | Prometheus metrics | yes | no | Needs an API token to scrape. Per-host labels are bounded by configuration. |
 | JSON access logs and viewer | yes | yes | |

@@ -132,10 +132,11 @@ Every fix ships with a regression test that fails when the fix is removed.
   could share a cached response, and a `private` or `no-store` directive in a
   second `Cache-Control` header field was ignored.
 - **Restore refuses files that are not quicgate backups.** Any valid SQLite
-  file was accepted, and because tables missing from a backup are emptied, it
-  wiped the configuration and the admin account. A backup without any admin
-  account is refused too: restoring it would lock the operator out, and the
-  next start would recreate the default credentials.
+  file was accepted, and because tables missing from a backup are emptied (and
+  tables that share no columns with the schema restore no rows), it wiped the
+  configuration and the admin account. A restore that would leave no admin
+  account able to sign in is refused too: it would lock the operator out, and
+  the next start would recreate the default credentials.
 - **CORS preflights no longer pass address rules.** A preflight skipped the
   whole access list, so any client could send `OPTIONS` requests to a backend
   behind an IP allowlist, even one that fails closed. Preflights still skip

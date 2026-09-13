@@ -833,22 +833,26 @@ func (s *Store) RestoreFrom(dbPath string) ([]string, error) {
 		inBackup[t] = true
 	}
 	// Refuse anything that is not a quicgate backup before touching live rows:
-	// every table missing from the snapshot is emptied, so an unrelated SQLite
-	// file would wipe the configuration and the admin account. Hosts and users
-	// exist in every version's schema.
-	for _, required := range []string{"hosts", "users"} {
-		if !inBackup[required] {
-			return nil, fmt.Errorf("this is not a quicgate backup: it has no %s table", required)
+	// every table missing from the snapshot is emptied, and a table that shares
+	// no columns with the schema restores no rows, so an unrelated SQLite file
+	// would wipe the configuration and the admin account. These tables and
+	// columns exist in every version's schema.
+	for table, cols := range map[string][]string{
+		"hosts": {"id", "type", "domains", "upstream"},
+		"users": {"id", "email", "hash"},
+	} {
+		if !inBackup[table] {
+			return nil, fmt.Errorf("this is not a quicgate backup: it has no %s table", table)
 		}
-	}
-	var admins int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM backup.users").Scan(&admins); err != nil {
-		return nil, fmt.Errorf("read users from the backup: %w", err)
-	}
-	if admins == 0 {
-		// Restoring it would lock the operator out, and the next start would
-		// recreate the default credentials.
-		return nil, fmt.Errorf("the backup has no admin account")
+		have, err := columnSet(s.db, "backup", table)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range cols {
+			if !have[c] {
+				return nil, fmt.Errorf("this is not a quicgate backup: its %s table has no %s column", table, c)
+			}
+		}
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -874,11 +878,41 @@ func (s *Store) RestoreFrom(dbPath string) ([]string, error) {
 			return nil, fmt.Errorf("restore %s (schema mismatch between backup and this version?): %w", t, err)
 		}
 	}
+	// The restored state must leave someone able to sign in: without an account
+	// the operator is locked out, and the next start would recreate the
+	// default credentials.
+	var admins int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM users WHERE email <> '' AND hash <> ''").Scan(&admins); err != nil {
+		return nil, err
+	}
+	if admins == 0 {
+		return nil, fmt.Errorf("the backup has no admin account that can sign in")
+	}
 	warnings, err := danglingReferences(tx)
 	if err != nil {
 		return nil, err
 	}
 	return warnings, tx.Commit()
+}
+
+// columnSet returns the column names of table in an attached schema.
+func columnSet(q dbtx, schema, table string) (map[string]bool, error) {
+	rows, err := q.Query("PRAGMA " + schema + ".table_info(" + quoteIdent(table) + ")")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	set := map[string]bool{}
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		set[name] = true
+	}
+	return set, rows.Err()
 }
 
 // tableNames lists the user tables of an attached schema (never SQLite's own).
