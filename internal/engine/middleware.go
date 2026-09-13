@@ -63,6 +63,7 @@ func forwardAuth(fa *store.ForwardAuth, next http.Handler) http.Handler {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			markIdentified(r)
 			// Authorized: copy selected headers (e.g. Remote-User) upstream.
 			for _, h := range fa.ResponseHeaders {
 				if v := resp.Header.Get(h); v != "" {

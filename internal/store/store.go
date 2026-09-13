@@ -1,6 +1,7 @@
 package store
 
 import (
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -45,9 +46,9 @@ type RateLimit struct {
 // ForwardAuth delegates per-request authorization to an external endpoint
 // (Authelia / Authentik / Keycloak-style), mirroring Traefik's forwardAuth.
 type ForwardAuth struct {
-	URL              string   `json:"url"`              // auth endpoint
-	ResponseHeaders  []string `json:"responseHeaders"`  // copied from auth 2xx to upstream request
-	SkipTLSVerify    bool     `json:"skipTlsVerify"`    // for https auth endpoints with self-signed certs
+	URL             string   `json:"url"`             // auth endpoint
+	ResponseHeaders []string `json:"responseHeaders"` // copied from auth 2xx to upstream request
+	SkipTLSVerify   bool     `json:"skipTlsVerify"`   // for https auth endpoints with self-signed certs
 }
 
 // AuthRule scopes authentication to a URL path, so one host can keep a few
@@ -56,10 +57,10 @@ type ForwardAuth struct {
 // probe). Rules are matched longest-path-first; a request matching no rule
 // falls back to the host's own access list and forward-auth settings.
 type AuthRule struct {
-	Path         string   `json:"path"`                   // matched as a prefix unless Exact
-	Exact        bool     `json:"exact,omitempty"`        // match this exact path only
-	Mode         string   `json:"mode"`                   // public | accessList | forwardAuth | oidc
-	AccessListID *int64   `json:"accessListId,omitempty"` // required when mode=accessList
+	Path         string `json:"path"`                   // matched as a prefix unless Exact
+	Exact        bool   `json:"exact,omitempty"`        // match this exact path only
+	Mode         string `json:"mode"`                   // public | accessList | forwardAuth | oidc
+	AccessListID *int64 `json:"accessListId,omitempty"` // required when mode=accessList
 	// OIDC, when set on a mode=oidc rule, gates this path with its own
 	// identity provider and policy instead of the host's. That is how one host
 	// can put staff behind the work IdP and a partner endpoint behind another,
@@ -123,8 +124,8 @@ type Options struct {
 	BlockBadBots  bool         `json:"blockBadBots"`  // block known scraper/bot user-agents
 	RateLimit     *RateLimit   `json:"rateLimit,omitempty"`
 	ForwardAuth   *ForwardAuth `json:"forwardAuth,omitempty"`
-	OIDC          *OIDCAuth    `json:"oidc,omitempty"`      // built-in OpenID Connect SSO
-	AuthRules     []AuthRule   `json:"authRules,omitempty"` // path-scoped overrides of the gates above
+	OIDC          *OIDCAuth    `json:"oidc,omitempty"`       // built-in OpenID Connect SSO
+	AuthRules     []AuthRule   `json:"authRules,omitempty"`  // path-scoped overrides of the gates above
 	ClientCert    *ClientCert  `json:"clientCert,omitempty"` // mTLS
 
 	// Response group (continued)
@@ -150,19 +151,19 @@ type Host struct {
 	ID           int64      `json:"id"`
 	Type         string     `json:"type"` // proxy | redirect | dead | static
 	Domains      []string   `json:"domains"`
-	Upstream     Upstream   `json:"upstream"`             // primary target
-	Upstreams    []Upstream `json:"upstreams,omitempty"`  // load-balancing pool (optional)
-	Locations    []Location `json:"locations,omitempty"`  // path-prefix routes to other upstreams
+	Upstream     Upstream   `json:"upstream"`            // primary target
+	Upstreams    []Upstream `json:"upstreams,omitempty"` // load-balancing pool (optional)
+	Locations    []Location `json:"locations,omitempty"` // path-prefix routes to other upstreams
 	Redirect     *Redirect  `json:"redirect,omitempty"`
 	StaticRoot   string     `json:"staticRoot,omitempty"` // when type=static
-	CertMode     string    `json:"certMode"` // auto (ACME) | none (plain http) | custom
-	CertID       *int64    `json:"certId"`   // when certMode=custom
-	ForceSSL     bool      `json:"forceSsl"`
-	Enabled      bool      `json:"enabled"`
-	AccessListID *int64    `json:"accessListId"`
-	Options      Options   `json:"options"`
-	CreatedAt    string    `json:"createdAt,omitempty"`
-	UpdatedAt    string    `json:"updatedAt,omitempty"`
+	CertMode     string     `json:"certMode"`             // auto (ACME) | none (plain http) | custom
+	CertID       *int64     `json:"certId"`               // when certMode=custom
+	ForceSSL     bool       `json:"forceSsl"`
+	Enabled      bool       `json:"enabled"`
+	AccessListID *int64     `json:"accessListId"`
+	Options      Options    `json:"options"`
+	CreatedAt    string     `json:"createdAt,omitempty"`
+	UpdatedAt    string     `json:"updatedAt,omitempty"`
 }
 
 // AccessRule is one ordered rule; first match wins, no match denies. Exactly
@@ -207,13 +208,13 @@ type SNIRoute struct {
 // empty = anyone (needed since UPnP may expose the port to the WAN),
 // non-empty = only matching sources, everything else dropped at accept time.
 type Stream struct {
-	ID           int64    `json:"id"`
-	ListenPort   int      `json:"listenPort"`
-	ListenPortEnd int     `json:"listenPortEnd,omitempty"` // >0: listen on the whole range
-	Protocol     string   `json:"protocol"` // tcp | udp | both
-	ForwardHost  string   `json:"forwardHost"`
-	ForwardPort  int      `json:"forwardPort"`
-	AllowedCIDRs []string `json:"allowedCidrs"`
+	ID            int64    `json:"id"`
+	ListenPort    int      `json:"listenPort"`
+	ListenPortEnd int      `json:"listenPortEnd,omitempty"` // >0: listen on the whole range
+	Protocol      string   `json:"protocol"`                // tcp | udp | both
+	ForwardHost   string   `json:"forwardHost"`
+	ForwardPort   int      `json:"forwardPort"`
+	AllowedCIDRs  []string `json:"allowedCidrs"`
 	// AccessListID, when set, reuses that access list's allow CIDR/host rules
 	// as the source filter instead of AllowedCIDRs (define an allowlist once).
 	AccessListID *int64 `json:"accessListId,omitempty"`
@@ -362,6 +363,9 @@ func (h *Host) Validate() error {
 	if h.CertMode == "none" && h.ForceSSL {
 		return errors.New("forceSsl requires TLS")
 	}
+	if h.CertMode == "none" && h.Options.ClientCert != nil {
+		return errors.New("client certificates require TLS; certMode none serves plain HTTP only")
+	}
 	return h.Options.validate()
 }
 
@@ -392,6 +396,20 @@ func (o *Options) validate() error {
 	case "", "1.2", "1.3":
 	default:
 		return fmt.Errorf("minTlsVersion must be 1.2 or 1.3, got %q", o.MinTLSVersion)
+	}
+	if cc := o.ClientCert; cc != nil {
+		switch cc.Mode {
+		case "":
+			cc.Mode = "require"
+		case "require", "request":
+		default:
+			return fmt.Errorf("clientCert mode must be require or request, got %q", cc.Mode)
+		}
+		// A bundle that yields no CA would leave the policy unenforceable, so it
+		// is refused here rather than silently accepted.
+		if !x509.NewCertPool().AppendCertsFromPEM([]byte(cc.CAPEM)) {
+			return errors.New("clientCert needs a PEM bundle with at least one valid CA certificate")
+		}
 	}
 	if o.HSTS.Enabled && o.HSTS.MaxAge <= 0 {
 		o.HSTS.MaxAge = 15552000 // 180 days, NPM's default

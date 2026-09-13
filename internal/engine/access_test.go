@@ -13,7 +13,7 @@ func TestMethodScopedRules(t *testing.T) {
 	c := compileAccess(store.AccessList{
 		Name: "t", Satisfy: "any",
 		Rules: []store.AccessRule{{Action: "allow", CIDR: "0.0.0.0/0", Methods: []string{"GET", "HEAD"}}},
-	}, nil, nil)
+	}, nil, nil, nil)
 
 	if !c.ipAllowed("1.2.3.4:9", "GET") {
 		t.Fatal("GET should be allowed by the GET/HEAD rule")
@@ -29,7 +29,7 @@ func TestCORSPreflightBypassesGate(t *testing.T) {
 	c := compileAccess(store.AccessList{
 		Name: "t", Satisfy: "all",
 		Rules: []store.AccessRule{{Action: "allow", CIDR: "10.0.0.0/8"}},
-	}, nil, nil)
+	}, nil, nil, nil)
 	reached := false
 	h := c.wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached = true

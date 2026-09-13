@@ -32,7 +32,7 @@ type Config struct {
 	HTTPSAddr  string // ":443", also the UDP port for HTTP/3
 	DataDir    string
 	ACMEEmail  string
-	ACMEStage  bool // use Let's Encrypt staging CA
+	ACMEStage  bool   // use Let's Encrypt staging CA
 	DisableTLS bool   // dev mode: no TLS/QUIC listeners at all
 	DisableH3  bool   // skip the HTTP/3 (QUIC) listener + Alt-Svc; force clients to h2
 	UPnP       bool   // request router port forwards via UPnP IGD
@@ -68,6 +68,10 @@ func (e *Engine) Info() Info {
 type route struct {
 	host  store.Host
 	proxy http.Handler
+	// warnings are configuration problems that made part of this route fail
+	// closed (an unresolvable access-list hostname, a missing reference, an
+	// unusable client CA), shown in the effective-config viewer.
+	warnings []string
 }
 
 type routingTable struct {
@@ -80,6 +84,9 @@ func (t *routingTable) lookup(hostport string) *route {
 	if h, _, err := net.SplitHostPort(name); err == nil {
 		name = h
 	}
+	// "example.com." is the same DNS name as "example.com": route it through
+	// the same host (and the same gates) rather than as an unknown name.
+	name = strings.TrimSuffix(name, ".")
 	if r, ok := t.exact[name]; ok {
 		return r
 	}
@@ -119,7 +126,8 @@ type Engine struct {
 	realIP        atomic.Pointer[realIPConfig]   // compiled trusted-proxy / real-client-IP config
 	oidcProviders sync.Map                       // issuer -> *discoveredProvider (lazy IdP discovery)
 	oidcSecretMu  sync.Mutex
-	oidcSecretKey []byte // HMAC key for SSO session cookies, persisted in settings
+	oidcSecretKey []byte    // HMAC key for SSO session cookies, persisted in settings
+	dns           *dnsCache // access-list hostname resolution with last-known-good fallback
 }
 
 // SetDockerRoutes replaces the hosts and streams derived from Docker labels and
@@ -140,7 +148,7 @@ func (e *Engine) SetDockerRoutes(hosts []store.Host, streams []store.Stream) {
 }
 
 func New(cfg Config, st *store.Store) *Engine {
-	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager(), health: newHealthChecker()}
+	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager(), health: newHealthChecker(), dns: newDNSCache()}
 	e.acmeStaging = cfg.ACMEStage
 	e.acmeEmail = cfg.ACMEEmail
 	e.certs = newCertTracker(func() string { return st.GetSetting("notify_url", "") })
@@ -246,7 +254,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	}
 	access := map[int64]*compiledAccess{}
 	for _, a := range lists {
-		access[a.ID] = compileAccess(a, e.geo, e.ban)
+		access[a.ID] = compileAccess(a, e.geo, e.ban, e.dns)
 	}
 	streams, err := e.store.ListStreams()
 	if err != nil {
@@ -275,9 +283,14 @@ func (e *Engine) Reload(ctx context.Context) error {
 		}
 		var acl *compiledAccess
 		if h.AccessListID != nil {
-			acl = access[*h.AccessListID]
+			if acl = access[*h.AccessListID]; acl == nil {
+				// A reference to a deleted list must close the host, never open it.
+				log.Printf("engine: host %v names access list %d, which does not exist; the host is closed", h.Domains, *h.AccessListID)
+				acl = deniedAccess(fmt.Sprintf("access list %d", *h.AccessListID))
+			}
 		}
 		r := e.buildRoute(h, acl, access, oidcProv)
+		r.warnings = e.routeWarnings(h, acl, access)
 		placed := false
 		for _, d := range h.Domains {
 			if strings.HasPrefix(d, "*.") {
@@ -516,17 +529,20 @@ func newUpstreamTransport(h store.Host) *http.Transport {
 // buildRoute compiles one host's typed options into a ready http.Handler chain.
 func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*compiledAccess, oidcProv map[int64]store.OIDCProvider) *route {
 	o := h.Options
-	// One gate per identity provider this host uses: the host default plus any
-	// named by a path rule. They share a siblings map so the single callback
-	// path can be finished by whichever provider started the login.
-	siblings := map[int64]*oidcGate{}
+	// One gate per distinct SSO policy this host uses: the host default plus any
+	// named by a path rule. Rules on the same provider still get their own gate
+	// whenever their policy differs, so a stricter /admin/ rule is never
+	// collapsed into the broader host policy. They share a siblings map so the
+	// single callback path can be finished by whichever gate started the login.
+	siblings := map[string]*oidcGate{}
 	newGate := func(auth store.OIDCAuth) *oidcGate {
-		if g, ok := siblings[auth.ProviderID]; ok {
+		key := oidcGateKey(auth)
+		if g, ok := siblings[key]; ok {
 			return g
 		}
 		g := e.newOIDCGate(auth, oidcProv)
 		g.siblings = siblings
-		siblings[auth.ProviderID] = g
+		siblings[key] = g
 		return g
 	}
 	var sso *oidcGate
@@ -542,7 +558,7 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 	// Maintenance mode short-circuits every request to a 503 page, whatever the
 	// host type. Access lists and rate limits still apply (via wrapCommon).
 	if o.Maintenance {
-		return &route{host: h, proxy: wrapCommon(maintenanceHandler(o.MaintenanceHTML), o, acl, acls, sso, newGate)}
+		return &route{host: h, proxy: wrapCommon(h.Domains, maintenanceHandler(o.MaintenanceHTML), o, acl, acls, sso, newGate)}
 	}
 
 	// Non-proxy hosts skip the proxy machinery entirely, but still get the
@@ -553,12 +569,12 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 		if h.Redirect != nil {
 			handler = buildRedirectHandler(*h.Redirect)
 		}
-		return &route{host: h, proxy: wrapCommon(handler, o, acl, acls, sso, newGate)}
+		return &route{host: h, proxy: wrapCommon(h.Domains, handler, o, acl, acls, sso, newGate)}
 	case "dead":
-		return &route{host: h, proxy: wrapCommon(deadHandler(), o, acl, acls, sso, newGate)}
+		return &route{host: h, proxy: wrapCommon(h.Domains, deadHandler(), o, acl, acls, sso, newGate)}
 	case "static":
 		fs := http.FileServer(http.Dir(h.StaticRoot))
-		return &route{host: h, proxy: wrapCommon(fs, o, acl, acls, sso, newGate)}
+		return &route{host: h, proxy: wrapCommon(h.Domains, fs, o, acl, acls, sso, newGate)}
 	}
 
 	// Build the balancer target list: primary plus any pool members.
@@ -660,7 +676,7 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 			inner.ServeHTTP(w, r)
 		})
 	}
-	handler = wrapCommon(handler, o, acl, acls, sso, newGate)
+	handler = wrapCommon(h.Domains, handler, o, acl, acls, sso, newGate)
 	return &route{host: h, proxy: handler}
 }
 
@@ -733,10 +749,11 @@ func maintenanceHandler(customHTML string) http.Handler {
 // first: access list -> forward-auth -> OIDC SSO -> rate limit -> bots ->
 // exploit filter. With path-scoped auth rules configured, the auth layers
 // become per-path (see pathauth.go); everything below them stays host-wide.
-// A host with OIDC configured additionally strips the Remote-* identity
-// headers from every inbound request, public paths included, so an upstream
-// that trusts them can never be fed a spoofed value through quicgate.
-func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess, acls map[int64]*compiledAccess, sso *oidcGate, newGate func(store.OIDCAuth) *oidcGate) http.Handler {
+// A host with any identity-injecting gate (SSO on the host or on any path,
+// forward auth) additionally strips those identity headers from every inbound
+// request, public paths included, so an upstream that trusts them can never be
+// fed a spoofed value through quicgate.
+func wrapCommon(domains []string, handler http.Handler, o store.Options, acl *compiledAccess, acls map[int64]*compiledAccess, sso *oidcGate, newGate func(store.OIDCAuth) *oidcGate) http.Handler {
 	if o.BlockExploits {
 		handler = blockExploits(handler)
 	}
@@ -760,16 +777,20 @@ func wrapCommon(handler http.Handler, o store.Options, acl *compiledAccess, acls
 	}
 	out := hostGate(handler)
 	if len(o.AuthRules) > 0 {
-		out = buildPathAuth(o.AuthRules, o, acls, sso, newGate, handler, out)
+		out = buildPathAuth(domains, o.AuthRules, o, acls, sso, newGate, handler, out)
 	}
 	// The strip sits OUTSIDE every gate: inbound spoofed values are removed
 	// before any chain runs, and the gate's own injection happens after.
-	if sso != nil {
-		out = stripIdentityHeaders(out)
+	if names := trustedIdentityHeaders(o); len(names) > 0 {
+		out = stripHeaders(names, out)
 	}
 	// Outermost of all: a path that means different things to quicgate's rules
 	// and to the upstream can defeat every gate below, so refuse it first.
-	return rejectTraversal(out)
+	// The request-auth record is attached before any gate can strip credentials.
+	inner := rejectTraversal(out)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inner.ServeHTTP(w, withRequestAuth(r))
+	})
 }
 
 // badGatewayHandler renders the upstream-down page, using a per-host custom
@@ -886,9 +907,13 @@ func (e *Engine) serveUnmatched(w http.ResponseWriter, r *http.Request) {
 
 // serveHTTPS is the shared handler behind the TLS (TCP) and QUIC (UDP) listeners.
 func (e *Engine) serveHTTPS(w http.ResponseWriter, r *http.Request) {
-	rt := e.table.Load().lookup(r.Host)
+	t := e.table.Load()
+	rt := t.lookup(r.Host)
 	if rt == nil {
 		e.serveUnmatched(w, r)
+		return
+	}
+	if !e.clientCertOK(w, r, t, rt) {
 		return
 	}
 	o := rt.host.Options
@@ -924,7 +949,9 @@ func (e *Engine) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		e.serveUnmatched(w, r)
 		return
 	}
-	if rt.host.ForceSSL {
+	// A host that takes client certificates is HTTPS only, whatever its
+	// force-SSL flag says: plain HTTP carries no certificate to check.
+	if rt.host.ForceSSL || rt.host.Options.ClientCert != nil {
 		code := http.StatusMovedPermanently
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			code = http.StatusPermanentRedirect
@@ -985,7 +1012,9 @@ func (e *Engine) tlsConfig() *tls.Config {
 	return base
 }
 
-// clientCAPool parses and caches a PEM CA bundle for mTLS verification.
+// clientCAPool parses and caches a PEM CA bundle for mTLS verification. A
+// bundle that does not parse is cached as nil (logged once): callers treat nil
+// as "no usable policy" and refuse the request.
 func (e *Engine) clientCAPool(pemStr string) *x509.CertPool {
 	if pemStr == "" {
 		return nil
@@ -995,11 +1024,94 @@ func (e *Engine) clientCAPool(pemStr string) *x509.CertPool {
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM([]byte(pemStr)) {
-		log.Printf("engine: mTLS CA bundle did not parse")
+		log.Printf("engine: mTLS CA bundle did not parse; hosts using it refuse every request")
+		e.caPoolCache.Store(pemStr, (*x509.CertPool)(nil))
 		return nil
 	}
 	e.caPoolCache.Store(pemStr, pool)
 	return pool
+}
+
+// clientCertOK enforces a host's client-certificate policy on every request.
+// The handshake applies the policy of the SNI name, but a client chooses the
+// Host header independently, and HTTP/2 and HTTP/3 can carry several
+// authorities over one connection. So a request is refused with 421 whenever
+// its SNI selects a different host and either side takes client certificates,
+// and the peer certificate is verified again against the requested host's
+// current CA pool, which also covers a CA replaced on reload while an already
+// verified connection stays open. Serves the TLS and QUIC listeners alike.
+func (e *Engine) clientCertOK(w http.ResponseWriter, r *http.Request, t *routingTable, rt *route) bool {
+	policy := rt.host.Options.ClientCert
+	if r.TLS == nil {
+		if policy == nil {
+			return true
+		}
+		http.Error(w, "client certificate required", http.StatusForbidden)
+		return false
+	}
+	if sni := t.lookup(r.TLS.ServerName); sni != rt {
+		if policy != nil || (sni != nil && sni.host.Options.ClientCert != nil) {
+			http.Error(w, "misdirected request: the TLS server name does not match this host", http.StatusMisdirectedRequest)
+			return false
+		}
+	}
+	if policy == nil {
+		return true
+	}
+	pool := e.clientCAPool(policy.CAPEM)
+	if pool == nil {
+		http.Error(w, "client certificate policy unavailable", http.StatusForbidden)
+		return false
+	}
+	certs := r.TLS.PeerCertificates
+	if len(certs) == 0 {
+		if policy.Mode == "request" {
+			return true
+		}
+		http.Error(w, "client certificate required", http.StatusForbidden)
+		return false
+	}
+	intermediates := x509.NewCertPool()
+	for _, c := range certs[1:] {
+		intermediates.AddCert(c)
+	}
+	if _, err := certs[0].Verify(x509.VerifyOptions{
+		Roots:         pool,
+		Intermediates: intermediates,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		http.Error(w, "client certificate not accepted", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// routeWarnings collects the configuration problems that make parts of a host
+// fail closed, for the effective-config viewer.
+func (e *Engine) routeWarnings(h store.Host, acl *compiledAccess, access map[int64]*compiledAccess) []string {
+	var out []string
+	if acl != nil {
+		out = append(out, acl.warnings...)
+	}
+	seen := map[int64]bool{}
+	if h.AccessListID != nil {
+		seen[*h.AccessListID] = true
+	}
+	for _, r := range h.Options.AuthRules {
+		if r.Mode != "accessList" || r.AccessListID == nil || seen[*r.AccessListID] {
+			continue
+		}
+		seen[*r.AccessListID] = true
+		if a := access[*r.AccessListID]; a != nil {
+			out = append(out, a.warnings...)
+		} else {
+			out = append(out, fmt.Sprintf("path %s: access list %d no longer exists, so the path refuses every request", r.Path, *r.AccessListID))
+		}
+	}
+	if cc := h.Options.ClientCert; cc != nil && e.clientCAPool(cc.CAPEM) == nil {
+		out = append(out, "the client certificate CA bundle does not parse, so the host refuses every request")
+	}
+	return out
 }
 
 // Run starts the data-plane listeners and blocks until ctx is cancelled.
@@ -1126,10 +1238,11 @@ func (e *Engine) NotifyTest() { e.certs.SendTest() }
 
 // EffectiveRoute summarizes one active route for the "applied config" viewer.
 type EffectiveRoute struct {
-	Domain   string `json:"domain"`
-	Type     string `json:"type"`
-	Target   string `json:"target"`
-	Wildcard bool   `json:"wildcard"`
+	Domain   string   `json:"domain"`
+	Type     string   `json:"type"`
+	Target   string   `json:"target"`
+	Wildcard bool     `json:"wildcard"`
+	Warnings []string `json:"warnings,omitempty"` // parts of this route that fail closed
 }
 
 // EffectiveConfig returns what the engine is actually serving right now,
@@ -1138,7 +1251,7 @@ func (e *Engine) EffectiveConfig() []EffectiveRoute {
 	t := e.table.Load()
 	var out []EffectiveRoute
 	summ := func(domain string, r *route, wildcard bool) EffectiveRoute {
-		er := EffectiveRoute{Domain: domain, Type: r.host.Type, Wildcard: wildcard}
+		er := EffectiveRoute{Domain: domain, Type: r.host.Type, Wildcard: wildcard, Warnings: r.warnings}
 		switch r.host.Type {
 		case "proxy":
 			er.Target = fmt.Sprintf("%s://%s:%d", r.host.Upstream.Scheme, r.host.Upstream.Host, r.host.Upstream.Port)

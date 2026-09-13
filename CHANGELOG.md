@@ -4,6 +4,66 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Security remediation from an independent review of v1.8.1 (findings Q01 to
+Q16). Every fix ships with a regression test that fails when the fix is
+removed.
+
+### Security
+- **Client certificates are bound to the requested host (Q01).** The TLS
+  handshake picks the client-certificate policy from the SNI name, but the
+  request was routed by its Host header, so a connection opened for a public
+  name could ask for a certificate-protected host and be served. A request is
+  now refused with `421 Misdirected Request` whenever its SNI selects a
+  different host and either side takes client certificates (this also covers
+  HTTP/2 and HTTP/3 connection reuse), and the certificate is verified again
+  against the requested host's current CA on every request, so replacing a CA
+  applies to connections that are already open. A client-certificate host is
+  never served over plain HTTP, whatever its force-SSL flag says. A CA bundle
+  that does not parse is now rejected when saved, and one already in the
+  configuration closes the host instead of silently dropping the requirement.
+  Client certificates on a `certMode: none` host are refused.
+- **Per-path SSO policies on the same identity provider are kept apart
+  (Q02).** Gates were shared by provider id, so a stricter `/admin/` rule on
+  the same IdP as the host inherited the host's broader allowed groups, emails,
+  domains and passIdentity. Each distinct policy now gets its own gate (they
+  still share discovery and token verification), every request is authorised
+  against the policy of the rule that matched it, and the login callback is
+  finished by the gate that started the login.
+- **The response cache never crosses identities (Q03).** The cache key held
+  only method, host and URI, so a personalised response could be replayed to
+  another user. Requests that carry a cookie, arrived with an Authorization
+  header (even one an access list stripped), or were admitted by an identity
+  gate (basic-auth user, SSO session, forward auth) now bypass the cache
+  entirely. The key also varies on the normalised Accept-Encoding, so a
+  compressed upstream body is never replayed to a client that did not ask for
+  it; any other `Vary` is not cached; request `Cache-Control: no-cache` and
+  `no-store` are honoured; `max-age=0` and `s-maxage=0` responses are not
+  stored.
+- **A DNS failure can no longer open an access list (Q04).** A hostname rule
+  that failed to resolve was dropped, and an access list left with no rules was
+  treated as unrestricted. Hostname rules now keep their last resolved
+  addresses for up to 24 hours while DNS is failing; after that, or with no
+  earlier answer, an unresolved allow rule matches nobody and an unresolved
+  deny rule denies everyone who reaches it. Country rules behave the same way
+  when the GeoIP database is not loaded. The effective-config view shows these
+  conditions as warnings on the affected routes.
+- **Missing security references fail closed (Q05, engine side).** A host
+  naming a deleted access list was served without one, and a path rule naming
+  a deleted access list, forward auth the host does not configure, SSO without
+  a provider, or an unknown mode fell back to the host's own gate, which may be
+  public. All of these now refuse every request on the affected host or path.
+- **Spoofed identity headers are stripped on every path (Q06).** Inbound
+  `Remote-User`, `Remote-Email` and `Remote-Groups` were only removed on hosts
+  with host-level SSO. They are now removed on any host with an SSO gate on
+  any path, and forward-auth response headers are removed host-wide, so public
+  carve-outs cannot pass forged values to an upstream that trusts them.
+
+### Changed
+- A Host header or SNI with a trailing dot (`example.com.`) now routes to the
+  same host as `example.com` instead of being an unknown name.
+
 ## [1.8.1] - 2026-08-23
 
 ### Changed

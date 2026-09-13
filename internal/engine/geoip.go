@@ -103,6 +103,16 @@ func (e *Engine) GeoIPReload() GeoStatus {
 	return e.geo.status()
 }
 
+// loaded reports whether a database is open. Nil-safe: no geoDB means none.
+func (g *geoDB) loaded() bool {
+	if g == nil {
+		return false
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.db != nil
+}
+
 // country returns the ISO country code for an IP, or "" if unknown / no DB.
 func (g *geoDB) country(ip net.IP) string {
 	g.mu.RLock()

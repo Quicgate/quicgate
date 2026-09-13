@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +14,10 @@ import (
 // 200 responses to GET/HEAD when they are safely cacheable, and serves them
 // until they expire. A fresh cache is built on every reload, so a config change
 // clears it.
+//
+// The cache is shared by every client of the host, so it only ever holds
+// anonymous responses: a request tied to an identity (credentials, a cookie, a
+// gate that admitted it by identity) is neither answered from it nor stored.
 type respCache struct {
 	mu  sync.Mutex
 	m   map[string]*cacheEntry
@@ -70,37 +75,95 @@ func (c *respCache) put(key string, e *cacheEntry) {
 	c.m[key] = e
 }
 
+// sharedCacheable reports whether r may be answered from, or stored in, the
+// shared cache. A request tied to an identity is not: credentials that arrived
+// with it (even if an access list has stripped them since), any cookie (quicgate
+// cannot tell which of an application's cookies carry a session), or a gate
+// that admitted it by identity.
+func sharedCacheable(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+		return false
+	}
+	if ra := requestAuthOf(r); ra != nil && (ra.hadAuthorization || ra.identified) {
+		return false
+	}
+	return true
+}
+
+// cacheKey varies on the normalised Accept-Encoding as well as the URL, so a
+// compressed upstream body is only ever replayed to a client that accepts that
+// encoding.
+func cacheKey(r *http.Request) string {
+	return r.Method + " " + strings.ToLower(r.Host) + " " + r.URL.RequestURI() + " ae=" + normalizeAcceptEncoding(r.Header.Get("Accept-Encoding"))
+}
+
+// normalizeAcceptEncoding reduces an Accept-Encoding value to its sorted set of
+// acceptable codings, so equivalent headers share one cache entry.
+func normalizeAcceptEncoding(v string) string {
+	var codings []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(v, ",") {
+		coding, params, _ := strings.Cut(part, ";")
+		coding = strings.ToLower(strings.TrimSpace(coding))
+		if coding == "" || seen[coding] {
+			continue
+		}
+		if q, ok := strings.CutPrefix(strings.ReplaceAll(strings.ToLower(params), " ", ""), "q="); ok {
+			if f, err := strconv.ParseFloat(q, 64); err == nil && f == 0 {
+				continue // explicitly refused
+			}
+		}
+		seen[coding] = true
+		codings = append(codings, coding)
+	}
+	sort.Strings(codings)
+	return strings.Join(codings, ",")
+}
+
 // wrap serves cache HITs and records cacheable MISSes.
 func (c *respCache) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Only safe, unauthenticated reads are cacheable.
-		if (r.Method != http.MethodGet && r.Method != http.MethodHead) || r.Header.Get("Authorization") != "" {
+		if !sharedCacheable(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		key := r.Method + " " + r.Host + " " + r.URL.RequestURI()
-		if e := c.get(key); e != nil {
-			h := w.Header()
-			for k, v := range e.header {
-				h[k] = v
+		reqCC := strings.ToLower(r.Header.Get("Cache-Control"))
+		noStore := hasCacheDirective(reqCC, "no-store")
+		key := cacheKey(r)
+		// A request asking for a fresh or unstored response skips the lookup.
+		if !noStore && !hasCacheDirective(reqCC, "no-cache") {
+			if e := c.get(key); e != nil {
+				h := w.Header()
+				for k, v := range e.header {
+					h[k] = v
+				}
+				h.Set("X-Cache", "HIT")
+				w.WriteHeader(e.status)
+				if r.Method == http.MethodGet {
+					_, _ = w.Write(e.body)
+				}
+				return
 			}
-			h.Set("X-Cache", "HIT")
-			w.WriteHeader(e.status)
-			if r.Method == http.MethodGet {
-				_, _ = w.Write(e.body)
-			}
-			return
 		}
 		rec := &cacheRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		if rec.cacheable && rec.buf != nil {
-			ttl := c.ttl
-			if ma := maxAge(rec.savedHeader.Get("Cache-Control")); ma > 0 && time.Duration(ma)*time.Second < ttl {
-				ttl = time.Duration(ma) * time.Second
+		if noStore || !rec.cacheable || rec.buf == nil {
+			return
+		}
+		ttl := c.ttl
+		if age, ok := freshnessLifetime(rec.savedHeader.Get("Cache-Control")); ok {
+			if age <= 0 {
+				return // already stale by the origin's own account (max-age=0)
 			}
-			if ttl > 0 {
-				c.put(key, &cacheEntry{status: rec.status, header: rec.savedHeader, body: rec.buf.Bytes(), expires: time.Now().Add(ttl)})
+			if age < ttl {
+				ttl = age
 			}
+		}
+		if ttl > 0 {
+			c.put(key, &cacheEntry{status: rec.status, header: rec.savedHeader, body: rec.buf.Bytes(), expires: time.Now().Add(ttl)})
 		}
 	})
 }
@@ -163,23 +226,58 @@ func (r *cacheRecorder) decide() {
 	if h.Get("Set-Cookie") != "" {
 		return
 	}
-	if vary := strings.TrimSpace(h.Get("Vary")); vary != "" && !strings.EqualFold(vary, "accept-encoding") {
-		return
+	// The key varies on Accept-Encoding only, so any other Vary (or "*") would
+	// need a key this cache does not build: do not store those.
+	for _, v := range h.Values("Vary") {
+		for _, field := range strings.Split(v, ",") {
+			if f := strings.TrimSpace(field); f != "" && !strings.EqualFold(f, "accept-encoding") {
+				return
+			}
+		}
 	}
 	r.savedHeader = h.Clone()
 	r.cacheable = true
 	r.buf = &bytes.Buffer{}
 }
 
-// maxAge parses the max-age directive (seconds) from a Cache-Control value.
-func maxAge(cc string) int {
-	for _, part := range strings.Split(strings.ToLower(cc), ",") {
-		part = strings.TrimSpace(part)
-		if v, ok := strings.CutPrefix(part, "max-age="); ok {
-			if n, err := strconv.Atoi(v); err == nil {
-				return n
-			}
+// hasCacheDirective reports whether a lower-cased Cache-Control value carries
+// the named directive (with or without an argument).
+func hasCacheDirective(cc, name string) bool {
+	for _, part := range strings.Split(cc, ",") {
+		d, _, _ := strings.Cut(strings.TrimSpace(part), "=")
+		if d == name {
+			return true
 		}
 	}
-	return 0
+	return false
+}
+
+// freshnessLifetime returns how long the origin allows a shared cache to keep a
+// response: s-maxage when present, else max-age. ok is false when neither is
+// given, so the host's own cache TTL applies.
+func freshnessLifetime(cc string) (time.Duration, bool) {
+	maxAge, sMaxAge := -1, -1
+	for _, part := range strings.Split(strings.ToLower(cc), ",") {
+		name, val, found := strings.Cut(strings.TrimSpace(part), "=")
+		if !found {
+			continue
+		}
+		n, err := strconv.Atoi(strings.Trim(val, `"`))
+		if err != nil {
+			continue
+		}
+		switch name {
+		case "max-age":
+			maxAge = n
+		case "s-maxage":
+			sMaxAge = n
+		}
+	}
+	switch {
+	case sMaxAge >= 0:
+		return time.Duration(sMaxAge) * time.Second, true
+	case maxAge >= 0:
+		return time.Duration(maxAge) * time.Second, true
+	}
+	return 0, false
 }

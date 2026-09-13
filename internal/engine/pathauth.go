@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -57,16 +58,27 @@ func (p *pathAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.fallback.ServeHTTP(w, r)
 }
 
+// closedPath answers every request on a path whose rule names a gate that
+// cannot be built (a deleted access list, forward auth or SSO the host does not
+// configure, an unknown mode). Falling back to the host's own gate instead
+// would open the path whenever the host itself is public.
+func closedPath(host []string, rule store.AuthRule, why string) http.Handler {
+	log.Printf("engine: host %v path %q: %s; the path is closed", host, rule.Path, why)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	})
+}
+
 // buildPathAuth compiles the rules into gates ordered longest path first, so
 // the most specific rule wins regardless of the order they were entered in.
 // An exact rule beats a prefix rule of the same length.
 //
-// A rule naming an access list that no longer exists falls back to the host's
-// own gate rather than becoming public: a dangling reference must never open a
-// path up. The admin API rejects such a reference on write as well.
-// ssoFor builds the gate for a rule that names its own identity provider, so
-// one host can send different URLs to different IdPs.
-func buildPathAuth(rules []store.AuthRule, o store.Options, acls map[int64]*compiledAccess, sso *oidcGate, ssoFor func(store.OIDCAuth) *oidcGate, inner, fallback http.Handler) http.Handler {
+// A rule whose gate cannot be built closes its path (see closedPath): a dangling
+// reference must never open anything. The admin API rejects such a reference on
+// write as well. ssoFor builds the gate for a rule that names its own identity
+// provider or policy, so one host can send different URLs to different IdPs or
+// admit different groups per URL.
+func buildPathAuth(domains []string, rules []store.AuthRule, o store.Options, acls map[int64]*compiledAccess, sso *oidcGate, ssoFor func(store.OIDCAuth) *oidcGate, inner, fallback http.Handler) http.Handler {
 	gates := make([]pathGate, 0, len(rules))
 	for _, r := range rules {
 		g := pathGate{path: r.Path, exact: r.Exact}
@@ -81,7 +93,7 @@ func buildPathAuth(rules []store.AuthRule, o store.Options, acls map[int64]*comp
 			g.handler = inner
 		case "forwardAuth":
 			if o.ForwardAuth == nil || o.ForwardAuth.URL == "" {
-				g.handler = fallback
+				g.handler = closedPath(domains, r, "forward auth is not configured on this host")
 				break
 			}
 			g.handler = forwardAuth(o.ForwardAuth, inner)
@@ -91,22 +103,22 @@ func buildPathAuth(rules []store.AuthRule, o store.Options, acls map[int64]*comp
 				gate = ssoFor(*r.OIDC)
 			}
 			if gate == nil {
-				g.handler = fallback
+				g.handler = closedPath(domains, r, "single sign-on is not configured for this path")
 				break
 			}
 			g.handler = gate.wrap(inner)
 		case "accessList":
-			acl := (*compiledAccess)(nil)
+			var acl *compiledAccess
 			if r.AccessListID != nil {
 				acl = acls[*r.AccessListID]
 			}
 			if acl == nil {
-				g.handler = fallback
+				g.handler = closedPath(domains, r, "its access list does not exist")
 				break
 			}
 			g.handler = acl.wrap(inner)
 		default:
-			g.handler = fallback
+			g.handler = closedPath(domains, r, "unknown mode "+r.Mode)
 		}
 		gates = append(gates, g)
 	}
