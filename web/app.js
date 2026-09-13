@@ -28,84 +28,122 @@ const SKINS = [
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem('qg_theme', theme);
+  $('theme-light').checked = theme === 'light';
 }
 function applySkin(skin) {
   const chosen = SKINS.find((s) => s.id === skin) || SKINS[0];
   document.documentElement.dataset.skin = chosen.id;
   localStorage.setItem('qg_skin', chosen.id);
-  $('skin-label').textContent = chosen.name;
-  $('skin-swatch').style.background = chosen.accent;
-  $('skin-swatch').style.borderColor = chosen.bg;
-  for (const item of $('skin-pop').children) {
+  for (const item of $('usermenu-skins').children) {
     item.setAttribute('aria-checked', String(item.dataset.skin === chosen.id));
   }
 }
 applyTheme(localStorage.getItem('qg_theme') || 'dark');
 
-// A native <select> renders its dropdown with the operating system's own
-// colours, which fights any dark theme. This is a small popover we control:
-// each entry previews the theme it selects.
+/* ---- user menu ----
+   Account, appearance and sign-out live under the signed-in user, like in
+   most admin consoles, instead of crowding the top bar. */
 {
-  const btn = $('skin-btn');
-  const pop = $('skin-pop');
+  const btn = $('usermenu-btn');
+  const pop = $('usermenu-pop');
   for (const s of SKINS) {
     const item = document.createElement('button');
     item.type = 'button';
-    item.className = 'skinmenu__item';
+    item.className = 'usermenu__item usermenu__skin';
     item.dataset.skin = s.id;
     item.setAttribute('role', 'menuitemradio');
     item.innerHTML =
-      `<span class="skinmenu__preview" style="background:${s.bg}"><i style="background:${s.accent}"></i></span>` +
-      `<span class="skinmenu__text"><b>${s.name}</b><span>${s.note}</span></span>` +
-      '<span class="skinmenu__tick" aria-hidden="true">&check;</span>';
-    item.addEventListener('click', () => { applySkin(s.id); closeSkinMenu(); btn.focus(); });
-    pop.appendChild(item);
+      `<span class="usermenu__swatch" style="background:${s.bg}"><i style="background:${s.accent}"></i></span>` +
+      `<span class="usermenu__skinname">${s.name}</span>` +
+      '<span class="usermenu__tick" aria-hidden="true">&check;</span>';
+    item.addEventListener('click', () => applySkin(s.id));
+    $('usermenu-skins').appendChild(item);
   }
-  const openSkinMenu = () => {
+  const openMenu = () => {
     pop.hidden = false;
     btn.setAttribute('aria-expanded', 'true');
     document.addEventListener('click', onDocClick, true);
     document.addEventListener('keydown', onKey, true);
   };
-  window.closeSkinMenu = () => {
+  window.closeUserMenu = () => {
     pop.hidden = true;
     btn.setAttribute('aria-expanded', 'false');
     document.removeEventListener('click', onDocClick, true);
     document.removeEventListener('keydown', onKey, true);
   };
-  function onDocClick(e) { if (!$('skinmenu').contains(e.target)) closeSkinMenu(); }
-  function onKey(e) { if (e.key === 'Escape') { closeSkinMenu(); btn.focus(); } }
-  btn.addEventListener('click', () => (pop.hidden ? openSkinMenu() : closeSkinMenu()));
+  function onDocClick(e) { if (!$('usermenu').contains(e.target)) closeUserMenu(); }
+  function onKey(e) { if (e.key === 'Escape') { closeUserMenu(); btn.focus(); } }
+  btn.addEventListener('click', () => (pop.hidden ? openMenu() : closeUserMenu()));
+  pop.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-account]');
+    if (item) { closeUserMenu(); switchPage('account', item.dataset.account); }
+  });
   applySkin(localStorage.getItem('qg_skin') || SKINS[0].id);
 }
-$('btn-theme').addEventListener('click', () => {
-  applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
-});
+$('theme-light').addEventListener('change', () => applyTheme($('theme-light').checked ? 'light' : 'dark'));
 
-/* ---- page nav ---- */
-const pages = { overview: null, hosts: 'btn-add', access: 'btn-add-acl', streams: 'btn-add-stream', docker: null, certs: 'btn-add-cert', system: null, settings: null, profile: null, help: null };
-function switchPage(name) {
+/* ---- page nav ----
+   The page, and the section within Settings or Account, is kept in the URL
+   fragment, so a reload or a shared link opens the same view. */
+const pageLoaders = {
+  overview: () => refreshOverview(),
+  hosts: () => refresh(),
+  access: () => refreshAcls(),
+  streams: () => refreshStreams(),
+  docker: () => refreshDocker(),
+  certs: () => { refreshCerts(); refreshCustomCerts(); },
+  logs: () => loadLogs(),
+  settings: () => loadSettings(),
+  account: () => loadProfile(),
+  help: () => renderGuideIndex(),
+};
+const sectionNavs = { settings: 'settings-nav', account: 'account-nav' };
+const currentSection = {};
+
+function showSection(page, section) {
+  const nav = $(sectionNavs[page]);
+  const ids = [...nav.children].map((b) => b.dataset.section);
+  const want = ids.includes(section) ? section : (currentSection[page] || ids[0]);
+  currentSection[page] = want;
+  for (const b of nav.children) b.classList.toggle('is-active', b.dataset.section === want);
+  for (const sec of $(`page-${page}`).querySelectorAll('.setsec')) sec.hidden = sec.dataset.section !== want;
+}
+
+function switchPage(name, section) {
+  if (!pageLoaders[name]) name = 'overview';
   for (const b of $('pagenav').children) b.classList.toggle('is-active', b.dataset.page === name);
-  for (const p of Object.keys(pages)) {
-    $(`page-${p}`).hidden = p !== name;
-    if (pages[p]) $(pages[p]).hidden = p !== name;
-  }
-  if (name === 'overview') refreshOverview();
-  if (name === 'hosts') refresh();
-  if (name === 'access') refreshAcls();
-  if (name === 'streams') refreshStreams();
-  if (name === 'docker') refreshDocker();
-  if (name === 'certs') { refreshCerts(); refreshCustomCerts(); }
-  if (name === 'system') loadSystem();
-  if (name === 'settings') loadSettings();
-  if (name === 'profile') loadProfile();
-  if (name === 'help') renderGuideIndex();
+  for (const p of Object.keys(pageLoaders)) $(`page-${p}`).hidden = p !== name;
+  if (sectionNavs[name]) showSection(name, section);
+  history.replaceState(null, '', `#/${name}${sectionNavs[name] ? '/' + currentSection[name] : ''}`);
+  window.scrollTo(0, 0);
+  pageLoaders[name]();
+}
+
+for (const [page, navId] of Object.entries(sectionNavs)) {
+  $(navId).addEventListener('click', (e) => {
+    const b = e.target.closest('[data-section]');
+    if (!b) return;
+    showSection(page, b.dataset.section);
+    history.replaceState(null, '', `#/${page}/${b.dataset.section}`);
+  });
 }
 $('pagenav').addEventListener('click', (e) => {
   if (e.target.dataset.page) switchPage(e.target.dataset.page);
 });
-$('me-email').addEventListener('click', () => switchPage('profile'));
 $('btn-help').addEventListener('click', () => switchPage('help'));
+
+function routeFromHash() {
+  const [page, section] = location.hash.replace(/^#\/?/, '').split('/');
+  return { page: page || 'overview', section };
+}
+
+// initials is the avatar text: the first letters of the account name.
+function initials(email) {
+  const name = String(email || '').replace(/^ldap:/, '').split('@')[0];
+  const parts = name.split(/[._-]+/).filter(Boolean);
+  const letters = parts.length > 1 ? parts[0][0] + parts[1][0] : name.slice(0, 2);
+  return (letters || '?').toUpperCase();
+}
 
 /* ---- built-in guides (markdown, embedded in the binary) ---- */
 const GUIDES = [
@@ -208,87 +246,89 @@ async function boot() {
 
 function afterLogin(me) {
   $('me-email').textContent = me.email;
-  if (me.version) $('qg-version').textContent = /^v|^dev/.test(me.version) ? me.version : 'v' + me.version;
+  $('me-email-full').textContent = me.email;
+  $('account-sub').textContent = me.email;
+  $('me-avatar').textContent = initials(me.email);
+  if (me.version) $('qg-version').textContent = 'quicgate ' + (/^v|^dev/.test(me.version) ? me.version : 'v' + me.version);
   if (me.mustChange) {
     show('view-password');
   } else {
     show('view-app');
-    switchPage('overview');
+    const r = routeFromHash();
+    switchPage(r.page, r.section);
   }
 }
 
-/* ---- overview dashboard ---- */
-function ovCard(label, big, sub) {
-  return `<div class="card"><div class="ov-label">${esc(label)}</div><div class="ov-big">${esc(big)}</div>${sub ? `<div class="ov-sub">${sub}</div>` : ''}</div>`;
-}
-function donutSVG(segments) {
-  const total = segments.reduce((s, x) => s + x.value, 0);
-  const r = 42, C = 2 * Math.PI * r;
-  if (total === 0) {
-    return `<svg viewBox="0 0 120 120" class="ov-donut"><circle cx="60" cy="60" r="${r}" fill="none" stroke="rgba(127,127,127,.18)" stroke-width="16"/><text x="60" y="66" text-anchor="middle" class="ov-donut-total">0</text></svg>`;
-  }
-  let off = 0;
-  const arcs = segments.filter((s) => s.value > 0).map((s) => {
-    const len = (s.value / total) * C;
-    const el = `<circle cx="60" cy="60" r="${r}" fill="none" stroke="${s.color}" stroke-width="16" stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-off}" transform="rotate(-90 60 60)"/>`;
-    off += len;
-    return el;
-  }).join('');
-  return `<svg viewBox="0 0 120 120" class="ov-donut"><circle cx="60" cy="60" r="${r}" fill="none" stroke="rgba(127,127,127,.15)" stroke-width="16"/>${arcs}<text x="60" y="66" text-anchor="middle" class="ov-donut-total">${total}</text></svg>`;
-}
-function donutCard(title, segments) {
-  const legend = segments.map((s) => `<div class="ov-leg"><span class="ov-dot" style="background:${s.color}"></span>${esc(s.label)} <b>${s.value}</b></div>`).join('');
-  return `<div class="card"><div class="ov-label">${esc(title)}</div><div class="ov-donutrow">${donutSVG(segments)}<div class="ov-legend">${legend}</div></div></div>`;
-}
+/* ---- overview ----
+   Numbers that matter, and a list of what needs attention, instead of a wall
+   of charts. Every item links to the page where it can be dealt with. */
+function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
+
 async function refreshOverview() {
-  let o;
-  try { o = await api('GET', '/api/overview'); }
-  catch (err) { $('ov-stats').innerHTML = `<div class="hs-muted">${esc(err.message)}</div>`; return; }
-  const green = '#22c55e', amber = '#f59e0b', red = '#ef4444';
+  let o, routes, streams;
+  try {
+    [o, routes, streams] = await Promise.all([
+      api('GET', '/api/overview'),
+      api('GET', '/api/config').catch(() => []),
+      api('GET', '/api/streams').catch(() => []),
+    ]);
+  } catch (err) {
+    $('ov-attention').innerHTML = `<div class="attn"><span class="sdot sdot--bad"></span><span class="attn__text">${esc(err.message)}</span></div>`;
+    return;
+  }
+  const H = o.hosts || {}, S = o.streams || {}, C = o.certs || {}, U = o.upstreams || {}, L = o.listeners || {}, F = o.features || {};
+  $('ov-sub').textContent = o.version ? `quicgate ${/^v|^dev/.test(o.version) ? o.version : 'v' + o.version}` : '';
 
-  // Listeners
-  const L = o.listeners || {};
-  const lc = [`<div class="card"><div class="ov-label">HTTP</div><div class="ov-big">${esc(L.http || '')}</div><div class="ov-sub">redirect / ACME</div></div>`];
-  if (L.tls) lc.push(`<div class="card"><div class="ov-label">HTTPS</div><div class="ov-big">${esc(L.https || '')}</div><div class="ov-sub">${L.http3 ? 'h1 &middot; h2 &middot; <b>h3</b>' : 'h1 &middot; h2'}</div></div>`);
-  else lc.push('<div class="card"><div class="ov-label">TLS</div><div class="ov-big">off</div><div class="ov-sub">dev mode</div></div>');
-  $('ov-listeners').innerHTML = lc.join('');
-
-  // At a glance
-  const H = o.hosts || {}, S = o.streams || {}, certs = o.certs || {};
-  const stats = [
-    ovCard('Proxy hosts', `${H.enabled || 0}/${H.total || 0}`, 'enabled'),
-    ovCard('Certificates', String(certs.issued || 0), 'issued'),
-    ovCard('Streams', `${S.enabled || 0}/${S.total || 0}`, 'enabled'),
-    ovCard('Access lists', String(o.accessLists || 0), ''),
+  const stat = (page, label, value, sub, bad) =>
+    `<button type="button" class="statstrip__item${bad ? ' is-bad' : ''}" data-goto="${page}">` +
+    `<span class="statstrip__label">${esc(label)}</span><span class="statstrip__value">${esc(value)}</span>` +
+    `<span class="statstrip__sub">${esc(sub)}</span></button>`;
+  const down = U.down || 0, up = U.up || 0;
+  const failedCerts = C.failed || 0, pendingCerts = C.pending || 0;
+  const items = [
+    stat('hosts', 'Proxy hosts', String(H.total || 0), `${H.enabled || 0} enabled`),
+    stat('hosts', 'Upstreams', `${up}/${up + down}`, down ? `${down} unreachable` : 'all reachable', down > 0),
+    stat('certs', 'Certificates', String(C.issued || 0), failedCerts ? `${failedCerts} failed` : pendingCerts ? `${pendingCerts} pending` : 'issued', failedCerts > 0),
+    stat('streams', 'Streams', String(S.total || 0), `${S.enabled || 0} enabled`),
+    stat('access', 'Access lists', String(o.accessLists || 0), `${H.withAccessList || 0} hosts behind one`),
   ];
-  if (o.docker) stats.push(ovCard('Docker', `${o.docker.routed}/${o.docker.containers}`, 'routed'));
-  $('ov-stats').innerHTML = stats.join('');
+  if (o.docker) items.push(stat('docker', 'Docker', `${o.docker.routed}/${o.docker.containers}`, 'containers routed'));
+  $('ov-stats').innerHTML = items.join('');
 
-  // Health donuts
-  const up = o.upstreams || { up: 0, down: 0 };
-  const bt = H.byType || {};
-  $('ov-donuts').innerHTML = [
-    donutCard('Upstreams', [{ label: 'Up', value: up.up || 0, color: green }, { label: 'Down', value: up.down || 0, color: red }]),
-    donutCard('Certificates', [{ label: 'Issued', value: certs.issued || 0, color: green }, { label: 'Pending', value: certs.pending || 0, color: amber }, { label: 'Failed', value: certs.failed || 0, color: red }]),
-    donutCard('Hosts by type', [
-      { label: 'Proxy', value: bt.proxy || 0, color: '#3b82f6' },
-      { label: 'Redirect', value: bt.redirect || 0, color: '#8b5cf6' },
-      { label: 'Static', value: bt.static || 0, color: '#14b8a6' },
-      { label: '404 / dead', value: bt.dead || 0, color: '#6b7280' },
-    ]),
-  ].join('');
+  const attention = [];
+  const attn = (level, text, page) => attention.push(
+    `<div class="attn"><span class="sdot sdot--${level}"></span><span class="attn__text">${esc(text)}</span>` +
+    (page ? `<button type="button" class="btn btn--ghost btn--sm" data-goto="${page}">View</button>` : '') + '</div>');
+  if (down) attn('bad', `${plural(down, 'upstream is', 'upstreams are')} unreachable`, 'hosts');
+  if (failedCerts) attn('bad', `${plural(failedCerts, 'certificate', 'certificates')} failed to issue or renew`, 'certs');
+  const closed = (routes || []).filter((r) => (r.warnings || []).length).length;
+  if (closed) attn('warn', `${plural(closed, 'route fails', 'routes fail')} closed because of a configuration problem`, 'hosts');
+  const notRunning = (streams || []).filter((s) => (s.listeners || []).some((l) => l.state !== 'running')).length;
+  if (notRunning) attn('bad', `${plural(notRunning, 'stream is', 'streams are')} not running`, 'streams');
+  if (o.docker && o.docker.connected < o.docker.endpoints) {
+    attn('warn', `${plural(o.docker.endpoints - o.docker.connected, 'Docker host is', 'Docker hosts are')} disconnected`, 'docker');
+  }
+  if (pendingCerts) attn('info', `${plural(pendingCerts, 'certificate is', 'certificates are')} waiting to be issued`, 'certs');
+  if (!attention.length) attn('ok', 'Nothing needs attention.', '');
+  $('ov-attention').innerHTML = attention.join('');
 
-  // Features
-  const F = o.features || {};
-  const feats = [['HTTP/3', 'http3'], ['UPnP', 'upnp'], ['Auto-ban', 'autoban'], ['GeoIP', 'geoip'], ['Forward-auth', 'forwardAuth'], ['OIDC', 'oidc'], ['LDAP', 'ldap'], ['Docker', 'docker']];
-  $('ov-features').innerHTML = feats.map(([lab, key]) =>
-    `<div class="card ov-feat"><div class="ov-label">${esc(lab)}</div>${F[key] ? '<span class="badge badge--success">ON</span>' : '<span class="badge">OFF</span>'}</div>`).join('');
+  const kv = (k, v) => `<div class="kv"><span class="kv__k">${esc(k)}</span><span class="kv__v mono">${v}</span></div>`;
+  const listeners = [kv('HTTP', `${esc(L.http || '')} <span class="hs-muted">redirects and ACME</span>`)];
+  listeners.push(L.tls
+    ? kv('HTTPS', `${esc(L.https || '')} <span class="hs-muted">${L.http3 ? 'h1, h2, h3' : 'h1, h2'}</span>`)
+    : kv('HTTPS', '<span class="hs-muted">off (TLS disabled)</span>'));
+  $('ov-listeners').innerHTML = listeners.join('');
 
-  // Providers
-  const provs = ['<div class="card"><div class="ov-label">Database</div><div class="ov-big">SQLite</div><div class="ov-sub">source of truth</div></div>'];
-  if (o.docker) provs.push(`<div class="card"><div class="ov-label">Docker</div><div class="ov-big">${o.docker.connected}/${o.docker.endpoints}</div><div class="ov-sub">hosts connected</div></div>`);
-  $('ov-providers').innerHTML = provs.join('');
+  const feats = [['HTTP/3', 'http3'], ['UPnP port mapping', 'upnp'], ['Auto-ban', 'autoban'], ['GeoIP', 'geoip'],
+    ['Forward authentication', 'forwardAuth'], ['Admin OIDC sign-in', 'oidc'], ['Admin LDAP sign-in', 'ldap'], ['Docker labels', 'docker']];
+  $('ov-features').innerHTML = feats.map(([label, key]) =>
+    kv(label, F[key] ? '<span class="sdot sdot--ok"></span>on' : '<span class="sdot sdot--off"></span><span class="hs-muted">off</span>')).join('');
 }
+$('page-overview').addEventListener('click', (e) => {
+  const target = e.target.closest('[data-goto]');
+  if (target) switchPage(target.dataset.goto);
+});
+$('btn-ov-refresh').addEventListener('click', refreshOverview);
 
 /* ---- auth ---- */
 $('login-form').addEventListener('submit', async (e) => {
@@ -324,13 +364,14 @@ $('password-form').addEventListener('submit', async (e) => {
   try {
     await api('POST', '/api/password', { current: $('pw-current').value, new: $('pw-new').value });
     show('view-app');
-    refresh();
+    switchPage('overview');
   } catch (err) {
     setError('pw-error', err);
   }
 });
 
 $('btn-logout').addEventListener('click', async () => {
+  closeUserMenu();
   await api('POST', '/api/logout').catch(() => {});
   show('view-login');
 });
@@ -346,18 +387,31 @@ function hostMatches(h, q) {
 $('host-search').addEventListener('input', () => renderHosts());
 
 let healthMap = {};
+// routeWarnings maps a domain to the parts of its route that fail closed (an
+// unresolvable hostname rule, a missing reference), from the effective config.
+let routeWarnings = {};
 async function refresh() {
-  let health;
+  let health, routes;
   // Providers load here too: the host modal's OIDC pickers would otherwise be
   // empty until the Access Lists page had been opened once, and saving a host
   // from an empty picker drops the provider it was using.
-  [hosts, accessLists, customCerts, health, oidcProviders] = await Promise.all([
+  [hosts, accessLists, customCerts, health, oidcProviders, routes] = await Promise.all([
     api('GET', '/api/hosts'), api('GET', '/api/access-lists'), api('GET', '/api/custom-certs'),
     api('GET', '/api/health').catch(() => []),
     api('GET', '/api/oidc-providers').catch(() => []),
+    api('GET', '/api/config').catch(() => []),
   ]);
   healthMap = {};
   for (const t of health) healthMap[t.target] = t.up;
+  routeWarnings = {};
+  for (const r of routes || []) {
+    if ((r.warnings || []).length) routeWarnings[r.domain.toLowerCase()] = r.warnings;
+  }
+  const enabled = hosts.filter((h) => h.enabled).length;
+  const gated = hosts.filter((h) => h.accessListId != null).length;
+  $('hosts-sub').textContent = hosts.length
+    ? `${hosts.length} hosts, ${enabled} enabled, ${gated} behind an access list.`
+    : 'HTTP and HTTPS services behind quicgate.';
   renderHosts();
   refreshCerts();
 }
@@ -395,15 +449,24 @@ function renderHosts() {
       line.append(domainLink(h, d));
       tdDomains.append(line);
     }
+    const warnings = [...new Set(h.domains.flatMap((d) => routeWarnings[d.toLowerCase()] || []))];
+    for (const w of warnings) {
+      const line = document.createElement('div');
+      line.className = 'rowwarn';
+      line.textContent = w;
+      line.title = w;
+      tdDomains.append(line);
+      tr.classList.add('row--warn');
+    }
 
     const tdUpstream = document.createElement('td');
     tdUpstream.className = 'domain';
     if (h.type === 'redirect' && h.redirect) {
-      tdUpstream.innerHTML = `<span class="badge">${esc(h.redirect.httpCode)} redirect</span> ${esc(h.redirect.targetHost)}`;
+      tdUpstream.innerHTML = `<span class="badge badge--muted">${esc(h.redirect.httpCode)} redirect</span> ${esc(h.redirect.targetHost)}`;
     } else if (h.type === 'dead') {
       tdUpstream.innerHTML = '<span class="badge badge--danger">404 host</span>';
     } else if (h.type === 'static') {
-      tdUpstream.innerHTML = `<span class="badge">static</span> ${esc(h.staticRoot)}`;
+      tdUpstream.innerHTML = `<span class="badge badge--muted">static</span> ${esc(h.staticRoot)}`;
     } else {
       const pool = [h.upstream, ...(h.upstreams || [])];
       const primary = `${h.upstream.scheme}://${h.upstream.host}:${h.upstream.port}`;
@@ -421,7 +484,7 @@ function renderHosts() {
     const tdTLS = document.createElement('td');
     const badge = document.createElement('span');
     const cm = h.certMode;
-    badge.className = 'badge' + (cm === 'auto' || cm === 'custom' ? ' badge--success' : '');
+    badge.className = 'badge ' + (cm === 'auto' || cm === 'custom' ? 'badge--success' : 'badge--muted');
     badge.textContent = cm === 'auto' ? (h.forceSsl ? 'auto + force ssl' : 'auto')
       : cm === 'custom' ? 'custom cert' : 'http only';
     tdTLS.appendChild(badge);
@@ -429,8 +492,8 @@ function renderHosts() {
     const tdAccess = document.createElement('td');
     const acl = accessLists.find((a) => a.id === h.accessListId);
     tdAccess.innerHTML = acl
-      ? `<span class="badge badge--success">${esc(acl.name)}</span>`
-      : '<span class="badge">public</span>';
+      ? `<span class="badge">${esc(acl.name)}</span>`
+      : '<span class="badge badge--muted">public</span>';
 
     const tdCert = document.createElement('td');
     tdCert.className = 'domain';
@@ -441,10 +504,10 @@ function renderHosts() {
         const exp = c.notAfter ? ' ' + new Date(c.notAfter).toLocaleDateString() : '';
         tdCert.innerHTML = `<span class="badge ${cls}">${esc(c.status)}</span>${esc(exp)}`;
       } else {
-        tdCert.innerHTML = '<span class="badge">pending</span>';
+        tdCert.innerHTML = '<span class="badge badge--muted">pending</span>';
       }
     } else if (h.certMode === 'custom') {
-      tdCert.innerHTML = '<span class="badge">custom</span>';
+      tdCert.innerHTML = '<span class="badge badge--muted">custom</span>';
     } else {
       tdCert.textContent = '-';
     }
@@ -958,7 +1021,7 @@ async function refreshAcls() {
     const tdName = document.createElement('td');
     tdName.textContent = a.name;
     const tdSatisfy = document.createElement('td');
-    tdSatisfy.innerHTML = `<span class="badge">${esc(a.satisfy)}</span>`;
+    tdSatisfy.innerHTML = `<span class="badge badge--muted">${esc(a.satisfy)}</span>`;
     const tdRules = document.createElement('td');
     tdRules.className = 'domain';
     tdRules.textContent = (a.rules || []).map((r) => `${r.action} ${r.cidr || r.host || ('country:' + r.country)}`).join('\n') || '-';
@@ -1160,7 +1223,7 @@ function renderIdps() {
     tdClient.className = 'domain';
     tdClient.textContent = p.clientId;
     const tdSession = document.createElement('td');
-    tdSession.innerHTML = `<span class="badge">${esc(p.sessionHours || 12)}h</span>`;
+    tdSession.innerHTML = `<span class="badge badge--muted">${esc(p.sessionHours || 12)}h</span>`;
     const tdActions = document.createElement('td');
     tdActions.style.textAlign = 'right';
     const btnEdit = document.createElement('button');
@@ -1245,7 +1308,7 @@ async function refreshStreams() {
     if (s.sendProxyProtocol) badges.push('proxy-' + s.sendProxyProtocol);
     if (s.terminateTls) badges.push('tls-term');
     if (s.sniRoutes && s.sniRoutes.length) badges.push('sni');
-    if (badges.length) tdListen.innerHTML += ' ' + badges.map((b) => `<span class="badge">${esc(b)}</span>`).join(' ');
+    if (badges.length) tdListen.innerHTML += ' ' + badges.map((b) => `<span class="badge badge--muted">${esc(b)}</span>`).join(' ');
     const failed = (s.listeners || []).filter((l) => l.state === 'failed');
     if (failed.length) {
       const b = document.createElement('span');
@@ -1255,7 +1318,7 @@ async function refreshStreams() {
       tdListen.append(' ', b);
     }
     const tdProto = document.createElement('td');
-    tdProto.innerHTML = `<span class="badge">${esc(s.protocol === 'both' ? 'tcp + udp' : s.protocol)}</span>`;
+    tdProto.innerHTML = `<span class="badge badge--muted">${esc(s.protocol === 'both' ? 'tcp + udp' : s.protocol)}</span>`;
     const tdFwd = document.createElement('td');
     tdFwd.className = 'domain';
     tdFwd.textContent = `${s.forwardHost}:${s.forwardPort}`;
@@ -1263,11 +1326,11 @@ async function refreshStreams() {
     const nCidrs = (s.allowedCidrs || []).length;
     if (s.accessListId) {
       const acl = accessLists.find((a) => a.id === s.accessListId);
-      tdSources.innerHTML = `<span class="badge badge--success">${esc(acl ? acl.name : 'access list')}</span>`;
+      tdSources.innerHTML = `<span class="badge">${esc(acl ? acl.name : 'access list')}</span>`;
     } else if (nCidrs) {
-      tdSources.innerHTML = `<span class="badge badge--success">${nCidrs} CIDR${nCidrs > 1 ? 's' : ''}</span>`;
+      tdSources.innerHTML = `<span class="badge">${nCidrs} CIDR${nCidrs > 1 ? 's' : ''}</span>`;
     } else {
-      tdSources.innerHTML = '<span class="badge badge--danger">open</span>';
+      tdSources.innerHTML = '<span class="badge badge--warn" title="No source restriction: anyone who can reach the port">anyone</span>';
     }
     const tdEnabled = document.createElement('td');
     const sw = document.createElement('label');
@@ -1500,12 +1563,6 @@ $('cert-form').addEventListener('submit', async (e) => {
   }
 });
 
-/* ---- system page ---- */
-function loadSystem() {
-  refreshLogs();
-  refreshEffConfig();
-}
-
 /* ---- profile page ---- */
 function loadProfile() {
   refreshTokens();
@@ -1519,96 +1576,142 @@ $('profile-pw-form').addEventListener('submit', async (e) => {
     await api('POST', '/api/password', { current: $('pp-current').value, new: $('pp-new').value });
     $('pp-current').value = '';
     $('pp-new').value = '';
-    setError('pp-error', 'Password updated.');
+    flashStatus($('pp-error'), 'Password updated', false);
   } catch (err) {
-    setError('pp-error', err);
+    flashStatus($('pp-error'), err.message, true);
   }
 });
 
-let logCache = [];
+/* ---- logs page ----
+   One viewer for every access log: traffic that matched no host, all of it,
+   or a single host. The server returns the newest entries (at most 2000);
+   filtering and paging happen here, so a busy log is a page of rows instead of
+   twenty screens. */
+const logState = { entries: [], page: 0, status: '', pendingScope: '' };
+
+function logScopeQuery(scope) {
+  if (scope === 'unmatched') return '&general=1';
+  if (scope === 'all') return '';
+  return '&host=' + encodeURIComponent(scope.replace(/^host:/, ''));
+}
+
+async function loadLogs() {
+  if (!hosts.length) hosts = await api('GET', '/api/hosts').catch(() => []);
+  fillLogScopes();
+  await refreshLogs();
+}
+
+function fillLogScopes() {
+  const sel = $('logs-scope');
+  const keep = logState.pendingScope || sel.value || 'unmatched';
+  logState.pendingScope = '';
+  sel.innerHTML = '';
+  const add = (parent, value, label) => {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = label;
+    parent.appendChild(o);
+  };
+  add(sel, 'unmatched', 'Unmatched traffic');
+  add(sel, 'all', 'All traffic');
+  const domains = [...new Set(hosts.flatMap((h) => h.domains))].sort();
+  if (domains.length) {
+    const group = document.createElement('optgroup');
+    group.label = 'Proxy hosts';
+    for (const d of domains) add(group, 'host:' + d, d);
+    sel.appendChild(group);
+  }
+  sel.value = [...sel.options].some((o) => o.value === keep) ? keep : 'unmatched';
+}
+
 async function refreshLogs() {
-  // System page shows only traffic that matched no configured host.
-  logCache = await api('GET', '/api/logs?n=500&general=1').catch(() => []);
+  const scope = $('logs-scope').value || 'unmatched';
+  logState.entries = (await api('GET', '/api/logs?n=2000' + logScopeQuery(scope)).catch(() => [])) || [];
+  logState.page = 0;
+  $('logs-host-col').hidden = scope.startsWith('host:');
   renderLogs();
 }
-$('logs-filter').addEventListener('input', renderLogs);
+
+function filteredLogs() {
+  const q = $('logs-filter').value.trim().toLowerCase();
+  return logState.entries.filter((e) => {
+    if (logState.status && String(e.status).charAt(0) !== logState.status) return false;
+    return !q || `${e.host} ${e.client_ip} ${e.method} ${e.path} ${e.status}`.toLowerCase().includes(q);
+  });
+}
+
+function fmtLogTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (d.toDateString() === new Date().toDateString()) return d.toLocaleTimeString([], { hour12: false });
+  return d.toLocaleString([], { hour12: false, month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
 
 function logRow(e, withHost) {
   const tr = document.createElement('tr');
-  const cls = e.status >= 400 ? 'badge--danger' : 'badge--success';
+  const cls = e.status >= 500 ? 'st--5' : e.status >= 400 ? 'st--4' : e.status >= 300 ? 'st--3' : 'st--2';
   // Host, method and path are whatever a remote client sent: never markup.
   tr.innerHTML =
-    `<td class="domain">${esc(e.ts ? new Date(e.ts).toLocaleTimeString() : '')}</td>` +
-    `<td class="domain">${esc(e.client_ip)}</td>` +
-    (withHost ? `<td class="domain">${esc(e.host)}</td>` : '') +
-    `<td class="domain">${esc(e.method)} ${esc(e.path)}</td>` +
-    `<td><span class="badge ${cls}">${esc(e.status)}</span></td>` +
-    `<td class="domain">${esc(e.dur_ms)}</td>`;
+    `<td class="mono nowrap">${esc(fmtLogTime(e.ts))}</td>` +
+    `<td class="mono nowrap">${esc(e.client_ip)}</td>` +
+    (withHost ? `<td class="mono">${esc(e.host)}</td>` : '') +
+    `<td class="mono">${esc(e.method)}</td>` +
+    `<td class="mono logpath" title="${esc(e.path)}">${esc(e.path)}</td>` +
+    `<td><span class="st ${cls}">${esc(e.status)}</span></td>` +
+    `<td class="mono num">${esc(e.dur_ms)}</td>`;
   return tr;
 }
 
 function renderLogs() {
-  const q = $('logs-filter').value.trim().toLowerCase();
-  const logs = q
-    ? logCache.filter((e) => `${e.host} ${e.client_ip} ${e.path} ${e.status}`.toLowerCase().includes(q))
-    : logCache;
+  const rows = filteredLogs();
+  const size = parseInt($('logs-pagesize').value, 10) || 50;
+  const pages = Math.max(1, Math.ceil(rows.length / size));
+  logState.page = Math.max(0, Math.min(logState.page, pages - 1));
+  const start = logState.page * size;
+  const slice = rows.slice(start, start + size);
+  const withHost = !$('logs-scope').value.startsWith('host:');
   const body = $('logs-body');
   body.innerHTML = '';
-  $('logs-empty').hidden = logs.length > 0;
-  for (const e of logs) body.appendChild(logRow(e, true));
+  for (const e of slice) body.appendChild(logRow(e, withHost));
+  $('logs-empty').hidden = rows.length > 0;
+  $('logs-count').textContent = rows.length ? `${start + 1}-${start + slice.length} of ${rows.length}` : '0 entries';
+  $('logs-page').textContent = `${logState.page + 1} / ${pages}`;
+  $('logs-prev').disabled = logState.page === 0;
+  $('logs-next').disabled = logState.page >= pages - 1;
 }
+
+function logsToPage(delta) {
+  logState.page += delta;
+  renderLogs();
+  $('logs-table').closest('.logview__scroll').scrollTop = 0;
+}
+
+$('logs-scope').addEventListener('change', refreshLogs);
+$('logs-filter').addEventListener('input', () => { logState.page = 0; renderLogs(); });
+$('logs-pagesize').addEventListener('change', () => { logState.page = 0; renderLogs(); });
+$('logs-status').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-status]');
+  if (!b) return;
+  logState.status = b.dataset.status;
+  for (const x of $('logs-status').children) x.classList.toggle('is-active', x === b);
+  logState.page = 0;
+  renderLogs();
+});
+$('logs-prev').addEventListener('click', () => logsToPage(-1));
+$('logs-next').addEventListener('click', () => logsToPage(1));
 $('btn-logs-refresh').addEventListener('click', refreshLogs);
 
-// ---- per-host access log modal ----
-let hostLogCache = [];
-let hostLogDomain = '';
-async function refreshHostLogs() {
-  hostLogCache = await api('GET', `/api/logs?n=300&host=${encodeURIComponent(hostLogDomain)}`).catch(() => []);
-  renderHostLogs();
-}
-function renderHostLogs() {
-  const q = $('hostlog-filter').value.trim().toLowerCase();
-  const logs = q
-    ? hostLogCache.filter((e) => `${e.client_ip} ${e.path} ${e.status}`.toLowerCase().includes(q))
-    : hostLogCache;
-  const body = $('hostlog-body');
-  body.innerHTML = '';
-  $('hostlog-empty').hidden = logs.length > 0;
-  for (const e of logs) body.appendChild(logRow(e, false));
-}
+// A host's Logs button opens the Logs page scoped to that host.
 function openHostLogs(h) {
-  hostLogDomain = h.domains[0];
-  $('hostlog-title').textContent = `Access log: ${hostLogDomain}`;
-  $('hostlog-filter').value = '';
-  $('hostlog-modal').hidden = false;
-  refreshHostLogs();
+  logState.pendingScope = 'host:' + h.domains[0];
+  switchPage('logs');
 }
-$('hostlog-filter').addEventListener('input', renderHostLogs);
-$('hostlog-refresh').addEventListener('click', refreshHostLogs);
-$('hostlog-close').addEventListener('click', () => { $('hostlog-modal').hidden = true; });
-$('hostlog-modal').addEventListener('click', (e) => {
-  if (e.target === $('hostlog-modal')) $('hostlog-modal').hidden = true;
-});
-
-async function refreshEffConfig() {
-  const routes = (await api('GET', '/api/config').catch(() => [])) || [];
-  const body = $('effconfig-body');
-  body.innerHTML = '';
-  for (const r of routes.sort((a, b) => a.domain.localeCompare(b.domain))) {
-    const tr = document.createElement('tr');
-    const warn = (r.warnings || []).length
-      ? `<div>${r.warnings.map((w) => `<span class="badge badge--danger">closed</span> <span class="hs-muted">${esc(w)}</span>`).join('<br>')}</div>`
-      : '';
-    tr.innerHTML = `<td class="domain">${esc(r.domain)}</td><td><span class="badge">${esc(r.type)}</span></td><td class="domain">${esc(r.target)}${warn}</td>`;
-    body.appendChild(tr);
-  }
-}
-$('btn-config-refresh').addEventListener('click', refreshEffConfig);
 
 async function refreshTokens() {
   const tokens = await api('GET', '/api/tokens').catch(() => []);
   const body = $('tokens-body');
   body.innerHTML = '';
+  $('tokens-empty').hidden = tokens.length > 0;
   for (const t of tokens) {
     const tr = document.createElement('tr');
     const td0 = document.createElement('td'); td0.textContent = t.name;
@@ -1700,6 +1803,29 @@ $('btn-revoke-sso-sessions').addEventListener('click', async () => {
 });
 
 /* ---- settings page ---- */
+// flashStatus shows the outcome of a save in the panel's own status line.
+function flashStatus(el, text, isError) {
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = text;
+  el.classList.toggle('is-error', !!isError);
+  el.classList.toggle('is-ok', !isError);
+  clearTimeout(el._timer);
+  if (!isError) el._timer = setTimeout(() => { el.hidden = true; }, 4000);
+}
+
+async function saveSettings(panel, values, statusEl) {
+  const el = statusEl || panel.querySelector('[data-status]');
+  try {
+    await api('PUT', '/api/settings', values);
+    flashStatus(el, 'Saved', false);
+    return true;
+  } catch (err) {
+    flashStatus(el, err.message, true);
+    return false;
+  }
+}
+
 function syncDnsField() {
   $('dns-config-field').hidden = $('set-dns-provider').value === '';
 }
@@ -1762,7 +1888,7 @@ async function refreshDocker() {
     tdName.textContent = c.name;
 
     const tdHost = document.createElement('td');
-    tdHost.innerHTML = `<span class="badge">${esc(c.endpoint)}</span>`;
+    tdHost.innerHTML = `<span class="badge badge--muted">${esc(c.endpoint)}</span>`;
 
     const tdRoute = document.createElement('td');
     tdRoute.innerHTML = c.routed
@@ -1931,94 +2057,77 @@ async function loadSettings() {
   syncDefaultSiteField();
 }
 
-$('oidc-form').addEventListener('submit', async (e) => {
+$('oidc-form').addEventListener('submit', (e) => {
   e.preventDefault();
-  try {
-    await api('PUT', '/api/settings', {
-      oidc_enabled: $('set-oidc-enabled').checked ? '1' : '0',
-      admin_oidc_provider_id: $('set-oidc-provider').value,
-      oidc_issuer: $('set-oidc-issuer').value.trim(),
-      oidc_client_id: $('set-oidc-client-id').value.trim(),
-      oidc_client_secret: $('set-oidc-client-secret').value,
-      oidc_redirect_url: $('set-oidc-redirect').value.trim(),
-      oidc_allowed_emails: $('set-oidc-emails').value.trim(),
-    });
-  } catch (err) { alert(err.message); }
+  saveSettings($('oidc-form'), {
+    oidc_enabled: $('set-oidc-enabled').checked ? '1' : '0',
+    admin_oidc_provider_id: $('set-oidc-provider').value,
+    oidc_issuer: $('set-oidc-issuer').value.trim(),
+    oidc_client_id: $('set-oidc-client-id').value.trim(),
+    oidc_client_secret: $('set-oidc-client-secret').value,
+    oidc_redirect_url: $('set-oidc-redirect').value.trim(),
+    oidc_allowed_emails: $('set-oidc-emails').value.trim(),
+  });
 });
 
-$('ldap-form').addEventListener('submit', async (e) => {
+$('ldap-form').addEventListener('submit', (e) => {
   e.preventDefault();
-  try {
-    await api('PUT', '/api/settings', {
-      ldap_enabled: $('set-ldap-enabled').checked ? '1' : '0',
-      ldap_url: $('set-ldap-url').value.trim(),
-      ldap_bind_dn_template: $('set-ldap-dn').value.trim(),
-      ldap_allowed_users: $('set-ldap-allowed').value.trim(),
-    });
-  } catch (err) { alert(err.message); }
+  saveSettings($('ldap-form'), {
+    ldap_enabled: $('set-ldap-enabled').checked ? '1' : '0',
+    ldap_url: $('set-ldap-url').value.trim(),
+    ldap_bind_dn_template: $('set-ldap-dn').value.trim(),
+    ldap_allowed_users: $('set-ldap-allowed').value.trim(),
+  });
 });
 
-$('set-trustedproxies-save').addEventListener('click', async () => {
-  try {
-    await api('PUT', '/api/settings', {
-      trusted_proxies: $('set-trustedproxies').value.trim(),
-      real_ip_header: $('set-realip-header').value.trim(),
-    });
-  } catch (err) { alert(err.message); }
+$('set-trustedproxies-save').addEventListener('click', () => {
+  saveSettings($('trustedproxies-panel'), {
+    trusted_proxies: $('set-trustedproxies').value.trim(),
+    real_ip_header: $('set-realip-header').value.trim(),
+  });
 });
 
-$('ban-form').addEventListener('submit', async (e) => {
+$('ban-form').addEventListener('submit', (e) => {
   e.preventDefault();
-  try {
-    await api('PUT', '/api/settings', {
-      ban_enabled: $('set-ban-enabled').checked ? '1' : '0',
-      ban_threshold: $('set-ban-threshold').value || '5',
-      ban_window_sec: $('set-ban-window').value || '300',
-      ban_duration_sec: $('set-ban-duration').value || '3600',
-    });
-  } catch (err) {
-    alert(err.message);
-  }
+  saveSettings($('ban-form'), {
+    ban_enabled: $('set-ban-enabled').checked ? '1' : '0',
+    ban_threshold: $('set-ban-threshold').value || '5',
+    ban_window_sec: $('set-ban-window').value || '300',
+    ban_duration_sec: $('set-ban-duration').value || '3600',
+  });
 });
 
-$('settings-form').addEventListener('submit', async (e) => {
+$('settings-form').addEventListener('submit', (e) => {
   e.preventDefault();
-  setError('settings-error', null);
-  try {
-    await api('PUT', '/api/settings', {
-      acme_email: $('set-acme-email').value.trim(),
-      acme_staging: $('set-acme-staging').checked ? '1' : '0',
-      acme_ca_url: $('set-acme-ca-url').value.trim(),
-      notify_url: $('set-notify-url').value.trim(),
-      acme_dns_provider: $('set-dns-provider').value,
-      acme_dns_config: $('set-dns-config').value.trim(),
-    });
-    setError('settings-error', 'Saved.');
-  } catch (err) {
-    setError('settings-error', err);
-  }
+  saveSettings($('settings-form'), {
+    acme_email: $('set-acme-email').value.trim(),
+    acme_staging: $('set-acme-staging').checked ? '1' : '0',
+    acme_ca_url: $('set-acme-ca-url').value.trim(),
+    acme_dns_provider: $('set-dns-provider').value,
+    acme_dns_config: $('set-dns-config').value.trim(),
+  }, $('settings-error'));
 });
 
-$('defaultsite-form').addEventListener('submit', async (e) => {
+$('defaultsite-form').addEventListener('submit', (e) => {
   e.preventDefault();
-  try {
-    await api('PUT', '/api/settings', {
-      default_site: $('set-default-site').value,
-      default_site_value: $('set-default-site-value').value,
-    });
-  } catch (err) {
-    alert(err.message);
-  }
+  saveSettings($('defaultsite-form'), {
+    default_site: $('set-default-site').value,
+    default_site_value: $('set-default-site-value').value,
+  });
+});
+
+$('notify-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  saveSettings($('notify-form'), { notify_url: $('set-notify-url').value.trim() }, $('notify-status'));
 });
 
 $('btn-notify-test').addEventListener('click', async () => {
-  setError('settings-error', null);
+  if (!await saveSettings($('notify-form'), { notify_url: $('set-notify-url').value.trim() }, $('notify-status'))) return;
   try {
-    await api('PUT', '/api/settings', { notify_url: $('set-notify-url').value.trim() });
     await api('POST', '/api/notify-test');
-    setError('settings-error', 'Test alert sent (check your notification channel).');
+    flashStatus($('notify-status'), 'Test alert sent, check your notification channel', false);
   } catch (err) {
-    setError('settings-error', err);
+    flashStatus($('notify-status'), err.message, true);
   }
 });
 

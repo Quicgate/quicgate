@@ -172,7 +172,7 @@ tracked in [FEATURES.md](FEATURES.md).
 ## API
 
 Everything the UI does is a REST call — interactive Swagger at `/docs.html`, spec at `/openapi.yaml`,
-prose in [API.md](API.md). Create a bearer token under Profile → API tokens:
+prose in [API.md](API.md). Create a bearer token under the account menu → API tokens:
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" http://<host>:81/api/hosts

@@ -4,6 +4,37 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.10.0] - 2026-09-13
+
+### Changed
+- **A more deliberate admin interface.** The layout now reads like an
+  operations console instead of a demo:
+  - Account, appearance and sign-out live in a menu under the signed-in user at
+    the top right. The profile page became an Account page (password and 2FA,
+    sessions, API tokens) reached from that menu.
+  - Every page has a header with its title, a short summary and its main
+    action, instead of action buttons in the top bar.
+  - Settings is split into sections (General, Certificates, Client IP & GeoIP,
+    Auto-ban, Notifications, Admin sign-in, Backup & restore), each a panel of
+    labelled rows with an explanation per field. Saving reports success or the
+    server's error in the panel, instead of a browser alert.
+  - The System page is now Logs: one viewer for traffic that matched no host,
+    all traffic or a single host, with search, status filters and paging,
+    instead of hundreds of rows on one long page. A host's Logs button opens it
+    for that host. The page and section are kept in the URL, so a reload stays
+    where you were.
+  - The effective-configuration table is gone. What it added over the host list
+    (routes that fail closed) is now shown on the affected host rows and on the
+    Overview.
+  - The Overview shows the key numbers, a list of what needs attention
+    (unreachable upstreams, failed certificates, routes that fail closed,
+    streams that are not running, disconnected Docker hosts) and plain lists of
+    listeners and features, instead of charts and on/off tiles.
+  - Tables use quieter badges, and destructive buttons only turn red when you
+    point at them.
+
+[1.10.0]: https://github.com/Quicgate/quicgate/releases/tag/v1.10.0
+
 ## [1.9.1] - 2026-09-13
 
 ### Changed
