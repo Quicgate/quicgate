@@ -87,14 +87,14 @@ Responses (list, create, update) add `listeners: [{streamId, key, state, error?,
 | GET | `/api/certs` | Managed (ACME) cert status: `[{domain, status, notAfter, lastError, errorAt}]`. |
 | GET | `/api/custom-certs` | Uploaded certs (key material never returned). |
 | POST | `/api/custom-certs` | `{name, certPem, keyPem}`. |
-| PUT | `/api/custom-certs/{id}` | Replace PEM in place (hosts keep referencing it). |
+| PUT | `/api/custom-certs/{id}` | Replace PEM in place (hosts keep referencing it). The TLS listener serves the new certificate immediately. |
 | DELETE | `/api/custom-certs/{id}` | Blocked if a host uses it. |
 | POST | `/api/custom-certs/self-signed` | `{name, domains[], days}`. Generates + stores. |
 | POST | `/api/custom-certs/from-file` | `{name, certPath, keyPath}`. Reads the server-local files once, at import; later changes to those files are not picked up (import again or replace the certificate). |
 
 ## Settings
 
-`GET /api/settings` returns the closed key set; `PUT /api/settings` merges a subset (unknown keys `400`). All values are strings.
+`GET /api/settings` returns the closed key set; `PUT /api/settings` merges a subset (unknown keys `400`). All values are strings. `admin_oidc_provider_id` must name an existing identity provider (`400` otherwise); when the provider it names is gone, admin OIDC sign-in fails instead of using the inline issuer fields.
 
 Keys: `acme_email`, `acme_staging` (`"1"`/`"0"`), `acme_ca_url`, `acme_dns_provider`, `acme_dns_config`, `notify_url`, `default_site` (`404|html|redirect`), `default_site_value`, `ban_enabled`, `ban_threshold`, `ban_window_sec`, `ban_duration_sec`, `oidc_*`, `ldap_*`.
 
@@ -115,7 +115,7 @@ Keys: `acme_email`, `acme_staging` (`"1"`/`"0"`), `acme_ca_url`, `acme_dns_provi
 | GET | `/api/config` | Effective (applied) routing table: `[{domain, type, target, wildcard, warnings?}]`. `warnings` lists the parts of a route that fail closed (an unresolvable access-list hostname, a missing reference, an unusable client CA). |
 | GET | `/api/logs?n=200` | Recent access-log lines (newest first), each the JSON log record. Max `n`=2000. |
 | GET | `/api/backup` | A `tar.gz` of every database table plus the certificate tree. Built completely before it is sent, so a read failure returns an error instead of a truncated archive. |
-| POST | `/api/restore` | Body = a backup `tar.gz`. Replaces every table and swaps the certificate tree in as one unit; on any failure nothing changes and the error says so. Returns `{status, certificates, warnings[], reauthenticate}`; every admin session is signed out. |
+| POST | `/api/restore` | Body = a backup `tar.gz`. Replaces every table and swaps the certificate tree in as one unit; on any failure nothing changes and the error says so. Returns `{status, certificates, warnings[], reauthenticate}`; every admin session is signed out. A file that is not a quicgate backup, or has no admin account, is refused with `400`. |
 | POST | `/api/import` | Declarative config: `{accessLists[], hosts[], streams[]}`, applied in one transaction (an invalid entry changes nothing). Entries matching existing ones (lists by name, hosts by domain set, streams by listen port and protocol) are updated in place, so re-importing is safe. Returns the created counts at the top level and `updated: {accessLists, hosts, streams}`. |
 | GET | `/metrics` | Prometheus exposition; requires admin authentication (a session, or `Authorization: Bearer <API token>` for scrapers). Counters: `quicgate_requests_total`, `quicgate_responses_total{class}`, `quicgate_response_bytes_total`, and per route `quicgate_host_requests_total{host}`, `quicgate_host_errors_total{host}`, `quicgate_host_response_bytes_total{host}`, where `host` is a configured domain, `*.suffix` for a wildcard route, or `_unmatched`. |
 

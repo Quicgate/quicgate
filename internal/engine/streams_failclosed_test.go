@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,16 +150,26 @@ func TestStreamInvalidInlineCIDRsAreClosed(t *testing.T) {
 	}
 }
 
-// Q08: a client that connects directly cannot pick its own identity by
-// sending a PROXY header.
-func TestStreamProxyProtocolFromUntrustedPeerIsNotBelieved(t *testing.T) {
+// Q08: accepting PROXY headers without saying whom to believe them from is a
+// configuration that cannot run safely, so the stream does not start at all
+// and says why. (A running listener that ignores an untrusted peer's header is
+// TestProxyProtocolUntrustedPeerHeaderIsPayload.)
+func TestStreamAcceptProxyWithoutTrustedProxiesDoesNotRun(t *testing.T) {
 	e, _ := newTestEngine(t)
 	port := freeTCPPort(t)
-	runStreams(t, e, store.Stream{ListenPort: port, Protocol: "tcp", ForwardHost: "127.0.0.1", ForwardPort: echoBackend(t),
+	runStreams(t, e, store.Stream{ID: 7, ListenPort: port, Protocol: "tcp", ForwardHost: "127.0.0.1", ForwardPort: echoBackend(t),
 		AcceptProxyProtocol: true, AllowedCIDRs: []string{"10.0.0.0/8"}, Enabled: true})
-	header := fmt.Sprintf("PROXY TCP4 10.1.2.3 127.0.0.1 5555 %d\r\n", port)
-	if streamEchoes(t, port, header) {
-		t.Fatal("a loopback client claiming 10.1.2.3 in a PROXY header was admitted by a 10.0.0.0/8 filter")
+	var status *StreamStatus
+	for _, st := range e.StreamStatuses() {
+		if st.StreamID == 7 {
+			status = &st
+		}
+	}
+	if status == nil || status.State != "failed" || !strings.Contains(status.Error, "trusted proxy") {
+		t.Fatalf("status = %+v, want failed because no trusted proxy is configured", status)
+	}
+	if streamEchoes(t, port, v1Header("10.1.2.3", port)) {
+		t.Fatal("a client claiming 10.1.2.3 in a PROXY header was forwarded by a stream that must not run")
 	}
 }
 

@@ -131,6 +131,12 @@ type Engine struct {
 	streams *StreamManager
 	upnp    *UPnPManager
 
+	// certCache is magic's certificate cache, and customCerts the entries
+	// loadCustomCerts put in it (by cache hash), so a reload can unload a
+	// custom certificate that was replaced, restored over or is no longer used.
+	certCache   *certmagic.Cache
+	customCerts map[string]bool
+
 	acmeStaging   bool
 	acmeEmail     string
 	acmeDNS       string
@@ -186,6 +192,7 @@ func New(cfg Config, st *store.Store) *Engine {
 	cache := certmagic.NewCache(certmagic.CacheOptions{
 		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) { return e.magic, nil },
 	})
+	e.certCache = cache
 	// No OnDemand: the domain set is known, so ManageAsync obtains every
 	// managed cert proactively in the background. This also makes unknown-SNI
 	// noise (scanners, retired hostnames) fail the handshake fast instead of
@@ -447,11 +454,27 @@ func (e *Engine) Reload(ctx context.Context) error {
 }
 
 // loadCustomCerts caches any user-uploaded certificates so the TLS listener
-// serves them for their host without ACME. Idempotent across reloads.
+// serves them for their host without ACME. Idempotent across reloads, and it
+// unloads the certificates it cached earlier that are no longer current: the
+// cache keeps every certificate it is given, so a replaced or restored-over
+// certificate would otherwise go on being served for the same name.
 func (e *Engine) loadCustomCerts(hosts []store.Host) {
 	if e.cfg.DisableTLS {
 		return
 	}
+	current := map[string]bool{}
+	defer func() {
+		var stale []string
+		for hash := range e.customCerts {
+			if !current[hash] {
+				stale = append(stale, hash)
+			}
+		}
+		if len(stale) > 0 {
+			e.certCache.Remove(stale)
+		}
+		e.customCerts = current
+	}()
 	seen := map[int64]bool{}
 	for _, h := range hosts {
 		if h.CertMode != "custom" || h.CertID == nil || seen[*h.CertID] {
@@ -463,9 +486,12 @@ func (e *Engine) loadCustomCerts(hosts []store.Host) {
 			log.Printf("engine: custom cert %d: %v", *h.CertID, err)
 			continue
 		}
-		if _, err := e.magic.CacheUnmanagedCertificatePEMBytes(context.Background(), []byte(certPEM), []byte(keyPEM), nil); err != nil {
+		hash, err := e.magic.CacheUnmanagedCertificatePEMBytes(context.Background(), []byte(certPEM), []byte(keyPEM), nil)
+		if err != nil {
 			log.Printf("engine: cache custom cert %d: %v", *h.CertID, err)
+			continue
 		}
+		current[hash] = true
 	}
 }
 

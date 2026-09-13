@@ -7,8 +7,8 @@ All notable changes to quicgate are documented here. The format follows
 ## [Unreleased]
 
 Security remediation from an independent review of v1.8.1 (findings Q01 to
-Q16). Every fix ships with a regression test that fails when the fix is
-removed.
+Q16), plus the defects a second, independent check of that remediation found.
+Every fix ships with a regression test that fails when the fix is removed.
 
 ### Security
 - **Client certificates are bound to the requested host (Q01).** The TLS
@@ -119,10 +119,51 @@ removed.
   with host-level SSO. They are now removed on any host with an SSO gate on
   any path, and forward-auth response headers are removed host-wide, so public
   carve-outs cannot pass forged values to an upstream that trusts them.
+- **An SSO login-state cookie is no longer accepted as a session.** The
+  short-lived state cookie that every anonymous visitor receives when a login
+  starts was signed with the same key as the session cookie, and its JSON
+  shares the session's host, expiry and provider fields. Renamed to the session
+  cookie, it opened any host whose SSO policy admits every authenticated user,
+  without a login. Both cookies are now signed for their own purpose. Existing
+  SSO sessions and logins in progress become invalid once on upgrade, so users
+  of SSO-protected hosts sign in again.
+- **The response cache also bypasses client certificates and reads every
+  Cache-Control field.** Two clients presenting different client certificates
+  could share a cached response, and a `private` or `no-store` directive in a
+  second `Cache-Control` header field was ignored.
+- **Restore refuses files that are not quicgate backups.** Any valid SQLite
+  file was accepted, and because tables missing from a backup are emptied, it
+  wiped the configuration and the admin account. A backup without any admin
+  account is refused too: restoring it would lock the operator out, and the
+  next start would recreate the default credentials.
+- **CORS preflights no longer pass address rules.** A preflight skipped the
+  whole access list, so any client could send `OPTIONS` requests to a backend
+  behind an IP allowlist, even one that fails closed. Preflights still skip
+  the basic-auth check (they cannot carry credentials), but address, hostname
+  and country rules now apply to them, evaluated for the method the preflight
+  announces.
+- **The admin sign-in provider fails closed.** `admin_oidc_provider_id` accepted
+  an id that does not exist, and when the provider it named was gone, admin
+  OIDC sign-in silently used the inline issuer settings instead. The setting is
+  now validated, and a missing provider stops OIDC sign-in with an error.
+- **A sign-in cannot outlive a password change it raced.** A login that
+  verified the old password while the password was being changed could still
+  create its session after the change had signed everyone out. Sessions are now
+  only created while the account's password and second factor are the ones the
+  login checked.
+- **Changing a stream closes the connections it admitted.** A TCP connection
+  accepted before a source restriction was added kept its access until it
+  closed by itself. When a stream's settings change, or it is disabled or
+  removed, its open connections are now closed with the old listener.
 
 ### Changed
 - A Host header or SNI with a trailing dot (`example.com.`) now routes to the
   same host as `example.com` instead of being an unknown name.
+- **A replaced or restored custom certificate is served right away.** The
+  certificate cache kept every certificate it had loaded, so after replacing a
+  custom certificate's PEM (or restoring a backup) the TLS listener could go on
+  serving the old one until a restart. Reload now unloads the certificates that
+  are no longer current.
 - **Stream listeners report whether they run (Q09).** A saved stream could fail
   to start (a port another process holds) with only a log line to show for it.
   `GET /api/streams` and the stream create and update responses now include a
@@ -164,8 +205,10 @@ removed.
   benchmark wording no longer claims the proxy is never the bottleneck.
 - **Behaviour changes to note:** requests from clients over a host's rate limit
   are now refused before authentication (they no longer reach the login
-  prompt), and `POST /api/2fa/enable` and `/api/2fa/disable` require a
-  `password` field.
+  prompt), `POST /api/2fa/enable` and `/api/2fa/disable` require a `password`
+  field, CORS preflights from addresses an access list does not admit get
+  `403`, users of SSO-protected hosts sign in once more after the upgrade, and
+  editing a stream reconnects its clients.
 
 ## [1.8.1] - 2026-08-23
 

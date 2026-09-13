@@ -3,8 +3,10 @@ package engine
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/x509"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -167,5 +169,86 @@ func TestCacheSkipsMaxAgeZero(t *testing.T) {
 	req(e, "GET", "stale.test", "/", "203.0.113.9", nil)
 	if rr := req(e, "GET", "stale.test", "/", "203.0.113.9", nil); rr.Header().Get("X-Cache") == "HIT" {
 		t.Fatalf("max-age=0 response was served from the cache (%q)", rr.Body.String())
+	}
+}
+
+// A verified client certificate is an identity: two clients presenting
+// different certificates must never share a cached response.
+func TestCacheBypassesClientCertificates(t *testing.T) {
+	e, st := newTestEngine(t)
+	serverCA, clientCA := newTestCA(t, "server"), newTestCA(t, "client")
+	var renders atomic.Int32
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "render-%d", renders.Add(1))
+	})
+	h := &store.Host{Type: "proxy", Domains: []string{"certcache.test"}, Upstream: up}
+	h.Options.ClientCert = &store.ClientCert{Mode: "require", CAPEM: clientCA.pem}
+	h.Options.CacheSec = 60
+	createTLSHost(t, st, h)
+	reload(t, e)
+	srv := startTLSEngine(t, e, serverCA.issue(t, "server", []string{"certcache.test"}, x509.ExtKeyUsageServerAuth))
+
+	alice := clientCA.issue(t, "alice", nil, x509.ExtKeyUsageClientAuth)
+	bob := clientCA.issue(t, "bob", nil, x509.ExtKeyUsageClientAuth)
+	ac, ab, _, aerr := getAs(t, tlsClient(t, serverCA, "certcache.test", &alice, false), srv, "certcache.test")
+	bc, bb, _, berr := getAs(t, tlsClient(t, serverCA, "certcache.test", &bob, false), srv, "certcache.test")
+	if aerr != nil || berr != nil || ac != http.StatusOK || bc != http.StatusOK {
+		t.Fatalf("requests failed: alice %d %v, bob %d %v", ac, aerr, bc, berr)
+	}
+	if ab == bb || renders.Load() != 2 {
+		t.Fatalf("alice %q and bob %q shared a response (%d renders)", ab, bb, renders.Load())
+	}
+}
+
+// Cache-Control may arrive as several header fields; a directive in any of them
+// counts, so a private response is never stored because its first field
+// looked public.
+func TestCacheReadsEveryCacheControlField(t *testing.T) {
+	e, st := newTestEngine(t)
+	var renders atomic.Int32
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Cache-Control", "max-age=60")
+		w.Header().Add("Cache-Control", "private, no-store")
+		fmt.Fprintf(w, "private-render-%d", renders.Add(1))
+	})
+	cachedHost(t, st, "ccfields.test", up, nil)
+	reload(t, e)
+
+	req(e, "GET", "ccfields.test", "/me", "203.0.113.9", nil)
+	b := req(e, "GET", "ccfields.test", "/me", "203.0.113.10", nil)
+	if b.Header().Get("X-Cache") == "HIT" || renders.Load() != 2 {
+		t.Fatalf("response with private, no-store in a second field was cached: %q (%d renders)", b.Body.String(), renders.Load())
+	}
+
+	// A freshness lifetime of zero in a later field also keeps it out.
+	var stale atomic.Int32
+	zero := backend(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Cache-Control", "public")
+		w.Header().Add("Cache-Control", "max-age=0")
+		fmt.Fprintf(w, "stale-render-%d", stale.Add(1))
+	})
+	cachedHost(t, st, "zerofield.test", zero, nil)
+	reload(t, e)
+	req(e, "GET", "zerofield.test", "/", "203.0.113.9", nil)
+	if z := req(e, "GET", "zerofield.test", "/", "203.0.113.10", nil); z.Header().Get("X-Cache") == "HIT" {
+		t.Fatalf("response with max-age=0 in a second field was cached")
+	}
+
+	// The same holds for the request: no-cache in a second field skips the lookup.
+	var hits atomic.Int32
+	pub := backend(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "public-render-%d", hits.Add(1))
+	})
+	cachedHost(t, st, "reqfields.test", pub, nil)
+	reload(t, e)
+	req(e, "GET", "reqfields.test", "/", "203.0.113.9", nil)
+	r2 := httptest.NewRequest("GET", "http://reqfields.test/", nil)
+	r2.RemoteAddr = "203.0.113.10:50000"
+	r2.Header.Add("Cache-Control", "max-stale=5")
+	r2.Header.Add("Cache-Control", "no-cache")
+	rr := httptest.NewRecorder()
+	e.serveHTTPS(rr, r2)
+	if rr.Header().Get("X-Cache") == "HIT" {
+		t.Fatalf("request with no-cache in a second Cache-Control field was answered from the cache")
 	}
 }

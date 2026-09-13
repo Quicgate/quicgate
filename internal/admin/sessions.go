@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"time"
+
+	"quicgate/internal/store"
 )
 
 // Admin sessions live in memory. Anything that changes who may administer the
@@ -31,11 +33,44 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID int
 	s.mu.Lock()
 	s.sessions[id] = session{userID: userID, email: email, expires: time.Now().Add(sessionTTL)}
 	s.mu.Unlock()
+	setSessionCookie(w, r, id)
+	return nil
+}
+
+func setSessionCookie(w http.ResponseWriter, r *http.Request, id string) {
 	http.SetCookie(w, &http.Cookie{
 		Name: "qg_session", Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
 		Secure: isHTTPS(r), MaxAge: int(sessionTTL.Seconds()),
 	})
-	return nil
+}
+
+// errCredentialsChanged reports that an account's password or second factor
+// changed after a login verified them.
+var errCredentialsChanged = errors.New("credentials changed during sign-in")
+
+// startSessionIfUnchanged returns a startSession for a password login that was
+// verified against u: it stores the session only while the account still has
+// that password hash and second factor. A password change or restore that lands
+// while the login runs bcrypt has already revoked the account's sessions; the
+// check and the insert share the sessions lock, so this login cannot add a
+// session behind that revocation.
+func (s *Server) startSessionIfUnchanged(u store.User) func(http.ResponseWriter, *http.Request, int64, string) error {
+	return func(w http.ResponseWriter, r *http.Request, userID int64, email string) error {
+		id, err := newSessionID()
+		if err != nil {
+			return err
+		}
+		s.mu.Lock()
+		cur, err := s.store.GetUserByEmail(u.Email)
+		if err != nil || cur.ID != u.ID || cur.Hash != u.Hash || cur.TOTPSecret != u.TOTPSecret {
+			s.mu.Unlock()
+			return errCredentialsChanged
+		}
+		s.sessions[id] = session{userID: userID, email: email, expires: time.Now().Add(sessionTTL)}
+		s.mu.Unlock()
+		setSessionCookie(w, r, id)
+		return nil
+	}
 }
 
 // revokeSessions deletes every session match accepts, except the one with id

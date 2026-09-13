@@ -87,6 +87,11 @@ func sharedCacheable(r *http.Request) bool {
 	if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
 		return false
 	}
+	// A client certificate identifies the client as surely as a cookie does, and
+	// the upstream may render per certificate.
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		return false
+	}
 	if ra := requestAuthOf(r); ra != nil && (ra.hadAuthorization || ra.identified) {
 		return false
 	}
@@ -130,7 +135,7 @@ func (c *respCache) wrap(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		reqCC := strings.ToLower(r.Header.Get("Cache-Control"))
+		reqCC := cacheControl(r.Header)
 		noStore := hasCacheDirective(reqCC, "no-store")
 		key := cacheKey(r)
 		// A request asking for a fresh or unstored response skips the lookup.
@@ -154,7 +159,7 @@ func (c *respCache) wrap(next http.Handler) http.Handler {
 			return
 		}
 		ttl := c.ttl
-		if age, ok := freshnessLifetime(rec.savedHeader.Get("Cache-Control")); ok {
+		if age, ok := freshnessLifetime(cacheControl(rec.savedHeader)); ok {
 			if age <= 0 {
 				return // already stale by the origin's own account (max-age=0)
 			}
@@ -219,7 +224,7 @@ func (r *cacheRecorder) decide() {
 		return
 	}
 	h := r.ResponseWriter.Header()
-	cc := strings.ToLower(h.Get("Cache-Control"))
+	cc := cacheControl(h)
 	if strings.Contains(cc, "no-store") || strings.Contains(cc, "private") || strings.Contains(cc, "no-cache") {
 		return
 	}
@@ -238,6 +243,13 @@ func (r *cacheRecorder) decide() {
 	r.savedHeader = h.Clone()
 	r.cacheable = true
 	r.buf = &bytes.Buffer{}
+}
+
+// cacheControl returns every Cache-Control field of h as one lower-cased list.
+// The header may be split across several fields, and a directive in any of
+// them applies.
+func cacheControl(h http.Header) string {
+	return strings.ToLower(strings.Join(h.Values("Cache-Control"), ","))
 }
 
 // hasCacheDirective reports whether a lower-cased Cache-Control value carries

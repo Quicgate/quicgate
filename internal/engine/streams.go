@@ -376,6 +376,64 @@ func (t *throttledLog) printf(format string, args ...any) {
 	log.Printf(format, args...)
 }
 
+// connTracker holds a TCP listener's open connections, each with the backend
+// connection it was spliced to. A listener stops because its stream was removed,
+// disabled or reconfigured, and the connections it admitted under the old
+// configuration end with it instead of outliving a new source restriction.
+type connTracker struct {
+	mu      sync.Mutex
+	stopped bool
+	conns   map[net.Conn][]io.Closer
+}
+
+func newConnTracker() *connTracker {
+	return &connTracker{conns: map[net.Conn][]io.Closer{}}
+}
+
+// track registers c. It reports false once the listener has stopped.
+func (t *connTracker) track(c net.Conn) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped {
+		return false
+	}
+	t.conns[c] = nil
+	return true
+}
+
+// attach ties another closer (the backend connection) to c. It reports false
+// when c has already been closed by stop.
+func (t *connTracker) attach(c net.Conn, other io.Closer) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.conns[c]; !ok {
+		return false
+	}
+	t.conns[c] = append(t.conns[c], other)
+	return true
+}
+
+func (t *connTracker) untrack(c net.Conn) {
+	t.mu.Lock()
+	delete(t.conns, c)
+	t.mu.Unlock()
+}
+
+// closeAll stops the tracker and closes every open connection and its backend.
+func (t *connTracker) closeAll() {
+	t.mu.Lock()
+	t.stopped = true
+	conns := t.conns
+	t.conns = map[net.Conn][]io.Closer{}
+	t.mu.Unlock()
+	for c, others := range conns {
+		_ = c.Close()
+		for _, o := range others {
+			_ = o.Close()
+		}
+	}
+}
+
 func startTCP(key, addr string, spec *streamSpec) (*forwarder, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -384,6 +442,7 @@ func startTCP(key, addr string, spec *streamSpec) (*forwarder, error) {
 	done := make(chan struct{})
 	maxConns := tcpMaxConns
 	slots := make(chan struct{}, maxConns)
+	open := newConnTracker()
 	var limited throttledLog
 	go func() {
 		for {
@@ -397,24 +456,34 @@ func startTCP(key, addr string, spec *streamSpec) (*forwarder, error) {
 					return
 				}
 			}
+			if !open.track(conn) {
+				_ = conn.Close()
+				return
+			}
 			select {
 			case slots <- struct{}{}:
 				go func() {
 					defer func() { <-slots }()
-					handleTCP(key, conn, spec)
+					defer open.untrack(conn)
+					handleTCP(key, conn, spec, open)
 				}()
 			default:
+				open.untrack(conn)
 				limited.printf("stream %s: %d concurrent connections reached, refusing new ones", key, maxConns)
 				_ = conn.Close()
 			}
 		}
 	}()
-	return &forwarder{key: key, target: spec.target, sig: spec.sig, stop: func() { close(done); ln.Close() }}, nil
+	return &forwarder{key: key, target: spec.target, sig: spec.sig, stop: func() {
+		close(done)
+		ln.Close()
+		open.closeAll()
+	}}, nil
 }
 
 // handleTCP applies PROXY-accept, SNI routing or TLS termination as
 // configured, then splices the connection to the chosen backend.
-func handleTCP(key string, raw net.Conn, spec *streamSpec) {
+func handleTCP(key string, raw net.Conn, spec *streamSpec, open *connTracker) {
 	defer raw.Close()
 	var clientConn net.Conn = raw
 	clientAddr := raw.RemoteAddr()
@@ -474,6 +543,9 @@ func handleTCP(key string, raw net.Conn, spec *streamSpec) {
 		return
 	}
 	defer backend.Close()
+	if !open.attach(raw, backend) {
+		return // the listener stopped while this connection was being set up
+	}
 
 	// Announce the real client to the backend via PROXY protocol.
 	if spec.tcp.sendProxy != "" {

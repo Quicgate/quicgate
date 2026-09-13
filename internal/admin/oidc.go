@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+
+	"quicgate/internal/store"
 )
 
 // OIDC is an additive admin login option: password login always keeps
@@ -41,6 +44,20 @@ func oidcClientContext(ctx context.Context) context.Context {
 	return oidc.ClientContext(ctx, &http.Client{Timeout: oidcHTTPTimeout})
 }
 
+// adminOIDCProvider resolves the admin_oidc_provider_id setting value.
+func (s *Server) adminOIDCProvider(id string) (store.OIDCProvider, bool, error) {
+	list, err := s.store.ListOIDCProviders()
+	if err != nil {
+		return store.OIDCProvider{}, false, err
+	}
+	for _, p := range list {
+		if strconv.FormatInt(p.ID, 10) == id {
+			return p, true, nil
+		}
+	}
+	return store.OIDCProvider{}, false, nil
+}
+
 func (s *Server) oidcConfig(ctx context.Context) (*oidc.Provider, oauth2.Config, bool, error) {
 	if s.store.GetSetting("oidc_enabled", "") != "1" {
 		return nil, oauth2.Config{}, false, nil
@@ -55,18 +72,18 @@ func (s *Server) oidcConfig(ctx context.Context) (*oidc.Provider, oauth2.Config,
 	// applications behind it. The inline fields stay as the fallback, so
 	// existing configurations keep working untouched.
 	if id := s.store.GetSetting("admin_oidc_provider_id", ""); id != "" {
-		list, err := s.store.ListOIDCProviders()
+		p, found, err := s.adminOIDCProvider(id)
 		if err != nil {
 			return nil, oauth2.Config{}, false, err
 		}
-		for _, p := range list {
-			if strconv.FormatInt(p.ID, 10) == id {
-				issuer, clientID, clientSecret = p.Issuer, p.ClientID, p.ClientSecret
-				if len(p.Scopes) > 0 {
-					scopes = p.Scopes
-				}
-				break
-			}
+		if !found {
+			// Never fall back to the inline issuer: that is a different sign-in
+			// than the one the operator selected.
+			return nil, oauth2.Config{}, false, fmt.Errorf("the selected identity provider %s no longer exists", id)
+		}
+		issuer, clientID, clientSecret = p.Issuer, p.ClientID, p.ClientSecret
+		if len(p.Scopes) > 0 {
+			scopes = p.Scopes
 		}
 	}
 	redirect := s.store.GetSetting("oidc_redirect_url", "")

@@ -292,7 +292,8 @@ func (c *compiledAccess) authOK(r *http.Request) bool {
 
 // isCORSPreflight reports whether r is a browser CORS preflight. Preflights
 // carry no credentials by spec, so gating them behind auth breaks every
-// cross-origin app; let them through and gate the real request that follows.
+// cross-origin app: credential checks let them through and gate the real
+// request that follows. Network rules still apply to them.
 func isCORSPreflight(r *http.Request) bool {
 	return r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != ""
 }
@@ -300,8 +301,20 @@ func isCORSPreflight(r *http.Request) bool {
 // wrap gates next behind the access list, mirroring NPM's satisfy semantics.
 func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isCORSPreflight(r) && !c.denyAll {
-			next.ServeHTTP(w, r)
+		if isCORSPreflight(r) {
+			// The credential half of the list cannot apply to a preflight; the
+			// network half can, for the method the real request will use. When
+			// credentials alone could admit that request (satisfy any), its
+			// preflight passes wherever it comes from.
+			announced := strings.ToUpper(strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")))
+			if c.ipAllowed(r.RemoteAddr, announced) || (c.satisfy == "any" && c.restricted && len(c.users) > 0 && !c.denyAll) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if c.ban != nil {
+				c.ban.recordFailure(r.RemoteAddr)
+			}
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		ipOK := c.ipAllowed(r.RemoteAddr, r.Method)

@@ -832,6 +832,24 @@ func (s *Store) RestoreFrom(dbPath string) ([]string, error) {
 	for _, t := range backupTables {
 		inBackup[t] = true
 	}
+	// Refuse anything that is not a quicgate backup before touching live rows:
+	// every table missing from the snapshot is emptied, so an unrelated SQLite
+	// file would wipe the configuration and the admin account. Hosts and users
+	// exist in every version's schema.
+	for _, required := range []string{"hosts", "users"} {
+		if !inBackup[required] {
+			return nil, fmt.Errorf("this is not a quicgate backup: it has no %s table", required)
+		}
+	}
+	var admins int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM backup.users").Scan(&admins); err != nil {
+		return nil, fmt.Errorf("read users from the backup: %w", err)
+	}
+	if admins == 0 {
+		// Restoring it would lock the operator out, and the next start would
+		// recreate the default credentials.
+		return nil, fmt.Errorf("the backup has no admin account")
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
