@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"quicgate/internal/admin"
@@ -148,7 +149,10 @@ func main() {
 		adm.SetDocker(dockerProvider)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// SIGTERM is what `docker stop` and most service managers send; without it
+	// the process died without shutting listeners down, releasing UPnP
+	// mappings or flushing the access log.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if dockerProvider != nil {

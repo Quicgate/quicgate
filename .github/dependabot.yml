@@ -12,3 +12,9 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+
+  # Keeps the digest-pinned build image in the Dockerfile current.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly

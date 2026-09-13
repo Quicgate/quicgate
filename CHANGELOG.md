@@ -106,6 +106,14 @@ removed.
 - **Stream resource limits (Q14, streams).** Each UDP listener keeps at most
   1024 client sessions, each TCP listener at most 4096 concurrent connections,
   and TLS-terminating streams allow 10 seconds for the handshake.
+- **Reproducible, scanned and attested releases (Q15).** The build used a
+  mutable `golang:1.26-alpine` image and whatever Go CI picked, and six
+  reachable standard-library advisories affected Go 1.26.5 builds. `go.mod`
+  now pins `toolchain go1.26.8` and CI fails if the runner's Go differs, the
+  build image is pinned by digest (Dependabot keeps it current), a
+  `govulncheck` job gates the image build on zero reachable vulnerabilities,
+  and every published image gets signed build provenance
+  (`gh attestation verify oci://ghcr.io/quicgate/quicgate:<tag> --owner Quicgate`).
 - **Spoofed identity headers are stripped on every path (Q06).** Inbound
   `Remote-User`, `Remote-Email` and `Remote-Groups` were only removed on hosts
   with host-level SSO. They are now removed on any host with an SSO gate on
@@ -142,6 +150,18 @@ removed.
   references, and signs out every admin session afterwards. Backup export builds
   the archive completely before sending it, so a read failure is an error
   instead of a truncated download.
+- **Graceful shutdown on SIGTERM (Q16).** Only Ctrl-C triggered the shutdown
+  path, so `docker stop` killed the process without closing listeners,
+  releasing UPnP mappings or flushing the access log. SIGTERM now shuts down
+  the same way, and the access log is flushed on exit.
+- **Claims match what is built (Q16).** A new [FEATURES.md](FEATURES.md) tracks,
+  per feature, whether it is tested locally, qualified against real
+  infrastructure, deferred or a non-goal. The roadmap no longer says every item
+  is fully proven, the spec no longer promises encrypted key storage, roles or
+  an audit log that do not exist, the API reference no longer calls `/metrics`
+  unauthenticated, from-file certificates are documented as read once, the
+  per-host HTTP/3 switch is documented as advertisement-only, and the
+  benchmark wording no longer claims the proxy is never the bottleneck.
 - **Behaviour changes to note:** requests from clients over a host's rate limit
   are now refused before authentication (they no longer reach the login
   prompt), and `POST /api/2fa/enable` and `/api/2fa/disable` require a

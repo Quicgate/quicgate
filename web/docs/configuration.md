@@ -36,7 +36,7 @@ Drop a `GeoLite2-Country.mmdb` into `QG_DATA` to enable country rules in access 
 
 ## HTTP/3 notes
 
-The TLS listener serves h1/h2 on TCP 443 and h3 on UDP 443 from the same certificates. Browsers upgrade via `Alt-Svc` and cache that hint for 30 days; disabling h3 per host therefore sends `Alt-Svc: clear` to actively evict the cached hint. Remember to forward **UDP 443** on your router or firewall (or let `QG_UPNP=1` do it).
+The TLS listener serves h1/h2 on TCP 443 and h3 on UDP 443 from the same certificates. Browsers upgrade via `Alt-Svc` and cache that hint for 30 days; disabling h3 per host therefore sends `Alt-Svc: clear` to actively evict the cached hint. The per-host switch controls advertisement only: a client that already speaks HTTP/3 to the listener is still answered. Remember to forward **UDP 443** on your router or firewall (or let `QG_UPNP=1` do it).
 
 ## IPv6
 

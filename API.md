@@ -32,13 +32,15 @@ The admin port itself should stay network-gated (e.g. behind Pangolin/an IP allo
 | POST | `/api/login` | `{email, password, code?}`. Returns `{email, mustChange, totpEnabled}`. If 2FA is on and `code` is omitted, returns `{totpRequired:true}` — resend with `code`. |
 | POST | `/api/logout` | Clears the session. |
 | GET | `/api/me` | Current user: `{email, mustChange, totpEnabled}`. |
-| POST | `/api/password` | `{current, new}` (new ≥ 8 chars). |
+| POST | `/api/password` | `{current, new}` (new ≥ 8 chars). Signs out every other session of the account and issues the caller a fresh session cookie. |
+| POST | `/api/sessions/revoke` | Signs out every admin session except the caller's (an API-token caller has none, so all). Returns `{revoked}`. |
+| POST | `/api/sso/revoke-sessions` | Replaces the signing key of the built-in SSO cookies, signing every user out of every SSO-protected host. |
 | GET | `/api/auth-methods` | `{oidc, ldap}` booleans — which SSO options are enabled (public). |
-| GET | `/api/oidc/login` | Starts the OIDC auth-code flow (redirect). |
+| GET | `/api/oidc/login` | Starts the OIDC auth-code flow (redirect) with PKCE (S256) and a nonce. Each sign-in can be completed once, within 5 minutes. |
 | GET | `/api/oidc/callback` | OIDC redirect target; mints a session. |
 | POST | `/api/2fa/setup` | Returns `{secret, uri}` (otpauth URI). Not persisted until enabled. |
-| POST | `/api/2fa/enable` | `{secret, code}`. Verifies and turns on 2FA. |
-| POST | `/api/2fa/disable` | Turns off 2FA. |
+| POST | `/api/2fa/enable` | `{secret, code, password}`. Verifies the code and the current password, then turns on 2FA. |
+| POST | `/api/2fa/disable` | `{password}`. Turns off 2FA after checking the current password. |
 
 ## Hosts
 
@@ -67,7 +69,9 @@ Object: `{id, name, satisfy, passAuth, rules[], users[]}`. A rule sets exactly o
 
 ## Streams
 
-Object: `{id, listenPort, listenPortEnd?, protocol, forwardHost, forwardPort, allowedCidrs[], sendProxyProtocol?, acceptProxyProtocol?, terminateTls?, certId?, sniRoutes[], enabled}`. `protocol` ∈ `tcp | udp | both`.
+Object: `{id, listenPort, listenPortEnd?, protocol, forwardHost, forwardPort, allowedCidrs[], accessListId?, sendProxyProtocol?, acceptProxyProtocol?, trustedProxies[]?, terminateTls?, certId?, sniRoutes[], enabled}`. `protocol` ∈ `tcp | udp | both`. `acceptProxyProtocol` requires `trustedProxies` (IPs or CIDRs whose PROXY header is required and believed).
+
+Responses (list, create, update) add `listeners: [{streamId, key, state, error?, warnings?}]`, where `state` is `running` or `failed`: a stream can be saved yet not run (a port in use, a missing certificate). Send only the stream object back on update, not `listeners`.
 
 | Method | Path |
 |---|---|
@@ -86,7 +90,7 @@ Object: `{id, listenPort, listenPortEnd?, protocol, forwardHost, forwardPort, al
 | PUT | `/api/custom-certs/{id}` | Replace PEM in place (hosts keep referencing it). |
 | DELETE | `/api/custom-certs/{id}` | Blocked if a host uses it. |
 | POST | `/api/custom-certs/self-signed` | `{name, domains[], days}`. Generates + stores. |
-| POST | `/api/custom-certs/from-file` | `{name, certPath, keyPath}`. Reads server-local files. |
+| POST | `/api/custom-certs/from-file` | `{name, certPath, keyPath}`. Reads the server-local files once, at import; later changes to those files are not picked up (import again or replace the certificate). |
 
 ## Settings
 
@@ -108,12 +112,12 @@ Keys: `acme_email`, `acme_staging` (`"1"`/`"0"`), `acme_ca_url`, `acme_dns_provi
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/config` | Effective (applied) routing table: `[{domain, type, target, wildcard}]`. |
+| GET | `/api/config` | Effective (applied) routing table: `[{domain, type, target, wildcard, warnings?}]`. `warnings` lists the parts of a route that fail closed (an unresolvable access-list hostname, a missing reference, an unusable client CA). |
 | GET | `/api/logs?n=200` | Recent access-log lines (newest first), each the JSON log record. Max `n`=2000. |
-| GET | `/api/backup` | Streams a `tar.gz` (SQLite snapshot + cert tree). |
-| POST | `/api/restore` | Body = a backup `tar.gz`. Replaces everything atomically. |
-| POST | `/api/import` | Declarative config: `{accessLists[], hosts[], streams[]}`. Additive; returns counts. |
-| GET | `/metrics` | Prometheus exposition (unauthenticated; gate the port). Counters: `quicgate_requests_total`, `quicgate_responses_total{class}`, `quicgate_response_bytes_total`. |
+| GET | `/api/backup` | A `tar.gz` of every database table plus the certificate tree. Built completely before it is sent, so a read failure returns an error instead of a truncated archive. |
+| POST | `/api/restore` | Body = a backup `tar.gz`. Replaces every table and swaps the certificate tree in as one unit; on any failure nothing changes and the error says so. Returns `{status, certificates, warnings[], reauthenticate}`; every admin session is signed out. |
+| POST | `/api/import` | Declarative config: `{accessLists[], hosts[], streams[]}`, applied in one transaction (an invalid entry changes nothing). Entries matching existing ones (lists by name, hosts by domain set, streams by listen port and protocol) are updated in place, so re-importing is safe. Returns the created counts at the top level and `updated: {accessLists, hosts, streams}`. |
+| GET | `/metrics` | Prometheus exposition; requires admin authentication (a session, or `Authorization: Bearer <API token>` for scrapers). Counters: `quicgate_requests_total`, `quicgate_responses_total{class}`, `quicgate_response_bytes_total`, and per route `quicgate_host_requests_total{host}`, `quicgate_host_errors_total{host}`, `quicgate_host_response_bytes_total{host}`, where `host` is a configured domain, `*.suffix` for a wildcard route, or `_unmatched`. |
 
 ## Example: create a proxy host via token
 
