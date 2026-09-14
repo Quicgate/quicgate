@@ -314,6 +314,7 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 			if c.ban != nil {
 				c.ban.recordFailure(r.RemoteAddr)
 			}
+			markBlocked(w, blockAccessList)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -327,6 +328,7 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 			if c.ban != nil {
 				c.ban.recordFailure(r.RemoteAddr)
 			}
+			markBlocked(w, blockAccessList)
 			if len(c.users) > 0 && !authOK {
 				w.Header().Set("WWW-Authenticate", `Basic realm="`+c.name+`"`)
 				http.Error(w, "authentication required", http.StatusUnauthorized)

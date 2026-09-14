@@ -51,6 +51,7 @@ type Info struct {
 	TLS       bool   `json:"tls"`
 	HTTP3     bool   `json:"http3"`
 	UPnP      bool   `json:"upnp"`
+	StartedAt int64  `json:"startedAt"` // unix time the engine was created
 }
 
 // Info returns the engine's listener/feature summary.
@@ -62,6 +63,7 @@ func (e *Engine) Info() Info {
 		TLS:       !e.cfg.DisableTLS,
 		HTTP3:     !e.cfg.DisableTLS && !e.cfg.DisableH3,
 		UPnP:      e.cfg.UPnP,
+		StartedAt: e.started.Unix(),
 	}
 }
 
@@ -144,6 +146,8 @@ type Engine struct {
 	acmeCAURL     string
 	certs         *certTracker
 	accessLog     *accessLogger
+	traffic       *trafficStats // history behind the overview charts
+	started       time.Time
 	health        *healthChecker
 	geo           *geoDB
 	ban           *banManager
@@ -177,7 +181,7 @@ func (e *Engine) SetDockerRoutes(hosts []store.Host, streams []store.Stream) {
 }
 
 func New(cfg Config, st *store.Store) *Engine {
-	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager(), health: newHealthChecker(), dns: newDNSCache()}
+	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager(), health: newHealthChecker(), dns: newDNSCache(), started: time.Now()}
 	e.acmeStaging = cfg.ACMEStage
 	e.acmeEmail = cfg.ACMEEmail
 	e.certs = newCertTracker(func() string { return st.GetSetting("notify_url", "") })
@@ -190,6 +194,9 @@ func New(cfg Config, st *store.Store) *Engine {
 		}
 		return banConfig{}
 	}, e.certs.send)
+	e.traffic = newTrafficStats(e.accessLog, e.ban, e.streams, e.geo, cfg.DataDir)
+	e.streams.traffic = e.traffic
+	e.accessLog.client = e.traffic.countClient
 	if cfg.UPnP {
 		e.upnp = NewUPnPManager(3600)
 	}
@@ -1096,11 +1103,13 @@ func (e *Engine) clientCertOK(w http.ResponseWriter, r *http.Request, t *routing
 		if policy == nil {
 			return true
 		}
+		markBlocked(w, blockClientCert)
 		http.Error(w, "client certificate required", http.StatusForbidden)
 		return false
 	}
 	if sni := t.lookup(r.TLS.ServerName); sni != rt {
 		if policy != nil || (sni != nil && sni.host.Options.ClientCert != nil) {
+			markBlocked(w, blockClientCert)
 			http.Error(w, "misdirected request: the TLS server name does not match this host", http.StatusMisdirectedRequest)
 			return false
 		}
@@ -1110,6 +1119,7 @@ func (e *Engine) clientCertOK(w http.ResponseWriter, r *http.Request, t *routing
 	}
 	pool := e.clientCAPool(policy.CAPEM)
 	if pool == nil {
+		markBlocked(w, blockClientCert)
 		http.Error(w, "client certificate policy unavailable", http.StatusForbidden)
 		return false
 	}
@@ -1118,6 +1128,7 @@ func (e *Engine) clientCertOK(w http.ResponseWriter, r *http.Request, t *routing
 		if policy.Mode == "request" {
 			return true
 		}
+		markBlocked(w, blockClientCert)
 		http.Error(w, "client certificate required", http.StatusForbidden)
 		return false
 	}
@@ -1130,6 +1141,7 @@ func (e *Engine) clientCertOK(w http.ResponseWriter, r *http.Request, t *routing
 		Intermediates: intermediates,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}); err != nil {
+		markBlocked(w, blockClientCert)
 		http.Error(w, "client certificate not accepted", http.StatusForbidden)
 		return false
 	}
@@ -1186,10 +1198,18 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 	}()
 
+	go e.traffic.run(ctx)
+
 	httpHandler := e.acme.HTTPChallengeHandler(e.wrapRealIP(e.ban.wrap(e.accessLog.wrap(e.serveHTTP))))
 	httpSrv := newPublicServer(e.cfg.HTTPAddr, httpHandler, nil)
 	errCh := make(chan error, 3)
-	go func() { errCh <- fmt.Errorf("http listener: %w", httpSrv.ListenAndServe()) }()
+	go func() {
+		ln, err := e.listenCounted(e.cfg.HTTPAddr)
+		if err == nil {
+			err = httpSrv.Serve(ln)
+		}
+		errCh <- fmt.Errorf("http listener: %w", err)
+	}()
 	log.Printf("engine: http listening on %s", e.cfg.HTTPAddr)
 
 	var httpsSrv *http.Server
@@ -1197,17 +1217,19 @@ func (e *Engine) Run(ctx context.Context) error {
 		tlsCfg := e.tlsConfig()
 		httpsHandler := e.wrapRealIP(e.ban.wrap(e.accessLog.wrap(e.serveHTTPS)))
 		httpsSrv = newPublicServer(e.cfg.HTTPSAddr, httpsHandler, tlsCfg)
-		go func() { errCh <- fmt.Errorf("https listener: %w", httpsSrv.ListenAndServeTLS("", "")) }()
+		go func() {
+			ln, err := e.listenCounted(e.cfg.HTTPSAddr)
+			if err == nil {
+				err = httpsSrv.ServeTLS(ln, "", "")
+			}
+			errCh <- fmt.Errorf("https listener: %w", err)
+		}()
 
 		// HTTP/3 is opt-out: when disabled we never create e.h3, which also
 		// stops Alt-Svc advertisement (serveHTTPS checks e.h3 != nil), so
 		// browsers never upgrade and existing ones fall back to h2.
 		if !e.cfg.DisableH3 {
-			e.h3 = &http3.Server{
-				Addr:      e.cfg.HTTPSAddr,
-				Handler:   httpsHandler,
-				TLSConfig: http3.ConfigureTLSConfig(tlsCfg),
-			}
+			e.h3 = e.newHTTP3Server(httpsHandler, tlsCfg)
 			go func() { errCh <- fmt.Errorf("http3 listener: %w", e.h3.ListenAndServe()) }()
 			log.Printf("engine: https + http/3 listening on %s (tcp+udp)", e.cfg.HTTPSAddr)
 		} else {
@@ -1234,11 +1256,90 @@ func (e *Engine) Run(ctx context.Context) error {
 			e.upnp.Close()
 		}
 		_ = e.accessLog.Close()
+		if err := e.traffic.save(); err != nil {
+			log.Printf("engine: save traffic history: %v", err)
+		}
 		log.Printf("engine: shutdown complete")
 		return nil
 	case err := <-errCh:
 		return err
 	}
+}
+
+// listenCounted opens a public TCP listener whose connections are counted
+// against the listener's traffic statistics.
+func (e *Engine) listenCounted(addr string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return countedListener{Listener: ln, c: e.traffic.port("tcp:" + strconv.Itoa(portOf(addr)))}, nil
+}
+
+// newHTTP3Server builds the QUIC listener's server. quic-go counts every
+// connection's bytes itself; the connection hook hands each one to the traffic
+// statistics.
+func (e *Engine) newHTTP3Server(handler http.Handler, tlsCfg *tls.Config) *http3.Server {
+	return &http3.Server{
+		Addr:        e.cfg.HTTPSAddr,
+		Handler:     handler,
+		TLSConfig:   http3.ConfigureTLSConfig(tlsCfg),
+		ConnContext: e.traffic.quicConnContext("udp:" + strconv.Itoa(portOf(e.cfg.HTTPSAddr))),
+	}
+}
+
+// TrafficReport returns the traffic history over a range: "1h", "6h", "24h"
+// or "7d".
+func (e *Engine) TrafficReport(rng string) (TrafficReport, error) {
+	return e.traffic.report(rng, time.Now(), e.listenerTraffic())
+}
+
+// listenerTraffic describes every listener the engine runs, for the traffic
+// report's port table.
+func (e *Engine) listenerTraffic() []PortTraffic {
+	var mapped map[string]bool
+	if e.upnp != nil {
+		mapped = e.upnp.Mapped()
+	}
+	var out []PortTraffic
+	add := func(p PortTraffic) {
+		p.Key = p.Proto + ":" + strconv.Itoa(p.Port)
+		if e.upnp != nil {
+			exposed := mapped[strings.ToUpper(p.Proto)+":"+strconv.Itoa(p.Port)]
+			p.Exposed = &exposed
+		}
+		out = append(out, p)
+	}
+	if p := portOf(e.cfg.HTTPAddr); p > 0 {
+		detail := "Plain HTTP: redirects to HTTPS and ACME challenges"
+		if e.cfg.DisableTLS {
+			detail = "Plain HTTP"
+		}
+		add(PortTraffic{Proto: "tcp", Port: p, Service: "HTTP", Detail: detail, State: "listening"})
+	}
+	if p := portOf(e.cfg.HTTPSAddr); p > 0 && !e.cfg.DisableTLS {
+		add(PortTraffic{Proto: "tcp", Port: p, Service: "HTTPS", Detail: "HTTP/1.1 and HTTP/2 over TLS", State: "listening"})
+		if !e.cfg.DisableH3 {
+			add(PortTraffic{Proto: "udp", Port: p, Service: "HTTP/3", Detail: "QUIC", State: "listening"})
+		}
+	}
+	for _, l := range e.streams.listeners() {
+		s := l.stream
+		detail := "to " + hostPort(s.ForwardHost, s.ForwardPort)
+		switch {
+		case l.proto == "tcp" && len(s.SNIRoutes) > 0:
+			detail = fmt.Sprintf("TLS passthrough by SNI, %d routes", len(s.SNIRoutes))
+		case l.proto == "tcp" && s.TerminateTLS:
+			detail = "TLS terminated, " + detail
+		}
+		p := PortTraffic{Proto: l.proto, Port: s.ListenPort, Service: strings.ToUpper(l.proto) + " stream", Detail: detail,
+			StreamID: s.ID, Docker: s.ID == 0, State: l.state, Error: l.err}
+		if s.ListenPortEnd > s.ListenPort {
+			p.PortEnd = s.ListenPortEnd
+		}
+		add(p)
+	}
+	return out
 }
 
 // hostPort joins a host and port into a dial/URL address, bracketing IPv6

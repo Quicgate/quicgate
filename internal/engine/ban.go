@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,6 +23,7 @@ type banManager struct {
 	banned   map[string]time.Time // ip -> unban time
 	config   func() banConfig
 	notify   func(string)
+	refused  atomic.Uint64 // requests turned away because their client is banned
 }
 
 type banConfig struct {
@@ -150,10 +152,28 @@ func itoa(n int) string {
 	return string(buf[i:])
 }
 
+// bannedCount reports how many addresses are banned right now.
+func (b *banManager) bannedCount() int {
+	if !b.config().enabled {
+		return 0
+	}
+	now := time.Now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, until := range b.banned {
+		if now.Before(until) {
+			n++
+		}
+	}
+	return n
+}
+
 // wrap rejects banned IPs before any routing happens.
 func (b *banManager) wrap(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if b.blocked(r.RemoteAddr) {
+			b.refused.Add(1)
 			http.Error(w, "temporarily banned", http.StatusForbidden)
 			return
 		}

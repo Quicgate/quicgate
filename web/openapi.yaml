@@ -291,6 +291,13 @@ paths:
       summary: Recent access-log lines (newest first)
       parameters: [ { name: n, in: query, schema: { type: integer, maximum: 2000 } } ]
       responses: { "200": { description: OK } }
+  /api/traffic:
+    get:
+      summary: Traffic history for the overview charts
+      parameters: [ { name: range, in: query, schema: { type: string, enum: ["1h", "6h", "24h", "7d"], default: "1h" } } ]
+      responses:
+        "200": { description: "{range, step, start, lastSpan, series, totals, ports[], hosts[], countries[], geoip, open, banned}; series values are per point, null where there is no data" }
+        "400": { description: unknown range }
   /api/backup:
     get: { summary: Download a full backup (tar.gz), responses: { "200": { description: "application/gzip" } } }
   /api/restore:

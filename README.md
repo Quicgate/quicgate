@@ -113,8 +113,8 @@ every derived route shows why it is or is not routing
 **Dual-stack** — IPv6 clients, IPv6-literal and AAAA upstreams, IPv6 CIDRs in access lists and
 trusted-proxy lists, GeoIP and rate limits on v6 alike
 
-**Ops** — Overview dashboard · JSON access logs with a built-in viewer · Prometheus `/metrics` ·
-one-click backup/restore · declarative JSON import · certificate-renewal alerts (ntfy/Gotify) ·
+**Ops** — Overview with a week of traffic charts (throughput, requests, response time, open ports,
+refusals) · JSON access logs with a built-in viewer · Prometheus `/metrics` · one-click backup/restore · declarative JSON import · certificate-renewal alerts (ntfy/Gotify) ·
 TOTP 2FA · API tokens · OIDC/LDAP admin login · offline guides in the UI · light/dark and a choice of
 themes
 

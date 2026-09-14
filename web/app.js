@@ -260,11 +260,139 @@ function afterLogin(me) {
 }
 
 /* ---- overview ----
-   Numbers that matter, and a list of what needs attention, instead of a wall
-   of charts. Every item links to the page where it can be dealt with. */
+   Traffic first: what went in and out, how requests were answered and what
+   quicgate refused, over a chosen range. Then the ports, the busiest hosts and
+   countries, and the configuration and its health. The engine samples every
+   10 seconds and the page follows along while it is open. */
 function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
 
+const FMT = QGCharts.fmt;
+// Points per line-chart point, per column and per sparkline point: the hour's
+// 10-second samples are drawn as 30-second points, which reads calmer.
+const OV_RANGES = {
+  '1h': { poll: 10, line: 3, columns: 6, spark: 6 },
+  '6h': { poll: 30, line: 1, columns: 1, spark: 2 },
+  '24h': { poll: 60, line: 1, columns: 4, spark: 6 },
+  '7d': { poll: 120, line: 1, columns: 2, spark: 3 },
+};
+const BLOCK_REASONS = {
+  accessList: 'Access lists', banned: 'Auto-ban', rateLimit: 'Rate limits', exploit: 'Exploit filter',
+  bot: 'Bad bots', clientCert: 'Client certificates', sso: 'Single sign-on', forwardAuth: 'Forward auth',
+  streamSource: 'Stream source filters',
+};
+const ov = { range: '1h', charts: null, report: null, tables: {}, timer: null, stateAt: 0, startedAt: 0, version: '', error: '' };
+try { if (OV_RANGES[localStorage.getItem('qg_ov_range')]) ov.range = localStorage.getItem('qg_ov_range'); } catch { /* private mode */ }
+
+function ovCharts() {
+  if (!ov.charts) {
+    ov.charts = {
+      tp: new QGCharts.LineChart($('ov-tp'), { label: 'Throughput, outbound and inbound', height: 260, format: FMT.bits, minMax: 8000, empty: 'No traffic recorded in this range yet.' }),
+      rq: new QGCharts.ColumnChart($('ov-rq'), { label: 'Requests per minute by response status', height: 220, format: (v) => `${FMT.count(v)}/min`, axisFormat: FMT.count, minMax: 1, empty: 'No requests in this range yet.' }),
+      lat: new QGCharts.LineChart($('ov-lat'), { label: 'Response time, 95th and 50th percentile', height: 220, format: FMT.ms, minMax: 10, empty: 'No responses in this range yet.' }),
+    };
+  }
+  return ov.charts;
+}
+
+// ovSpan is the number of seconds point i covers: a full step, except the
+// newest point, which may still be filling.
+function ovSpan(rep, i) { return i === rep.series.in.length - 1 ? rep.lastSpan : rep.step; }
+
+// ovRates turns per-point counts into rates per second, times mul, in groups
+// of g points (g = 1 keeps every point).
+function ovRates(rep, values, g, mul) {
+  const out = [];
+  for (let i = 0; i < values.length; i += g) {
+    let sum = 0;
+    let secs = 0;
+    for (let j = i; j < Math.min(i + g, values.length); j++) {
+      if (values[j] == null) continue;
+      sum += values[j];
+      secs += ovSpan(rep, j);
+    }
+    out.push(secs > 0 ? (sum / secs) * (mul || 1) : null);
+  }
+  return out;
+}
+
+// ovPeaks keeps the largest value of every group of g points, and ovMeans
+// their average.
+function ovPeaks(values, g) {
+  const out = [];
+  for (let i = 0; i < values.length; i += g) {
+    const part = values.slice(i, i + g).filter((v) => v != null);
+    out.push(part.length ? Math.max(...part) : null);
+  }
+  return out;
+}
+function ovMeans(values, g) {
+  const out = [];
+  for (let i = 0; i < values.length; i += g) {
+    const part = values.slice(i, i + g).filter((v) => v != null);
+    out.push(part.length ? part.reduce((a, b) => a + b, 0) / part.length : null);
+  }
+  return out;
+}
+
+function ovSetRange(range) {
+  if (!OV_RANGES[range]) return;
+  ov.range = range;
+  try { localStorage.setItem('qg_ov_range', range); } catch { /* private mode */ }
+  ovRangeButtons();
+  ovLoadTraffic();
+  ovSchedule();
+}
+function ovRangeButtons() {
+  for (const b of $('ov-range').children) {
+    const on = b.dataset.range === ov.range;
+    b.classList.toggle('is-active', on);
+    b.setAttribute('aria-pressed', String(on));
+  }
+}
+$('ov-range').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-range]');
+  if (b) ovSetRange(b.dataset.range);
+});
+
 async function refreshOverview() {
+  ovRangeButtons();
+  ovCharts();
+  await Promise.all([ovLoadState(), ovLoadTraffic()]);
+  ovSchedule();
+}
+
+function ovSchedule() {
+  clearTimeout(ov.timer);
+  ov.timer = setTimeout(async () => {
+    if (!$('page-overview').hidden && !document.hidden) {
+      const jobs = [ovLoadTraffic()];
+      if (Date.now() - ov.stateAt > 30000) jobs.push(ovLoadState());
+      await Promise.all(jobs);
+    }
+    ovSchedule();
+  }, OV_RANGES[ov.range].poll * 1000);
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !$('page-overview').hidden && !$('view-app').hidden) refreshOverview();
+});
+
+function ovSubtitle() {
+  const parts = [];
+  if (ov.version) parts.push(`quicgate ${/^v|^dev/.test(ov.version) ? ov.version : 'v' + ov.version}`);
+  if (ov.startedAt) {
+    const secs = Math.max(0, Date.now() / 1000 - ov.startedAt);
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    parts.push(`up ${d ? `${d} d ${h} h` : h ? `${h} h ${m} min` : `${m} min`}`);
+  }
+  if (ov.error) parts.push(`refresh failed: ${ov.error}`);
+  else if (ov.report) parts.push(`updated ${new Date().toLocaleTimeString([], { hour12: false })}`);
+  $('ov-sub').textContent = parts.join('  ·  ');
+}
+
+/* configuration, health and features */
+async function ovLoadState() {
   let o, routes, streams;
   try {
     [o, routes, streams] = await Promise.all([
@@ -273,27 +401,16 @@ async function refreshOverview() {
       api('GET', '/api/streams').catch(() => []),
     ]);
   } catch (err) {
-    $('ov-attention').innerHTML = `<div class="attn"><span class="sdot sdot--bad"></span><span class="attn__text">${esc(err.message)}</span></div>`;
+    ov.error = err.message;
+    ovSubtitle();
     return;
   }
-  const H = o.hosts || {}, S = o.streams || {}, C = o.certs || {}, U = o.upstreams || {}, L = o.listeners || {}, F = o.features || {};
-  $('ov-sub').textContent = o.version ? `quicgate ${/^v|^dev/.test(o.version) ? o.version : 'v' + o.version}` : '';
-
-  const stat = (page, label, value, sub, bad) =>
-    `<button type="button" class="statstrip__item${bad ? ' is-bad' : ''}" data-goto="${page}">` +
-    `<span class="statstrip__label">${esc(label)}</span><span class="statstrip__value">${esc(value)}</span>` +
-    `<span class="statstrip__sub">${esc(sub)}</span></button>`;
+  ov.stateAt = Date.now();
+  ov.version = o.version || '';
+  ov.startedAt = o.startedAt || 0;
+  const H = o.hosts || {}, S = o.streams || {}, C = o.certs || {}, U = o.upstreams || {}, F = o.features || {};
   const down = U.down || 0, up = U.up || 0;
   const failedCerts = C.failed || 0, pendingCerts = C.pending || 0;
-  const items = [
-    stat('hosts', 'Proxy hosts', String(H.total || 0), `${H.enabled || 0} enabled`),
-    stat('hosts', 'Upstreams', `${up}/${up + down}`, down ? `${down} unreachable` : 'all reachable', down > 0),
-    stat('certs', 'Certificates', String(C.issued || 0), failedCerts ? `${failedCerts} failed` : pendingCerts ? `${pendingCerts} pending` : 'issued', failedCerts > 0),
-    stat('streams', 'Streams', String(S.total || 0), `${S.enabled || 0} enabled`),
-    stat('access', 'Access lists', String(o.accessLists || 0), `${H.withAccessList || 0} hosts behind one`),
-  ];
-  if (o.docker) items.push(stat('docker', 'Docker', `${o.docker.routed}/${o.docker.containers}`, 'containers routed'));
-  $('ov-stats').innerHTML = items.join('');
 
   const attention = [];
   const attn = (level, text, page) => attention.push(
@@ -312,18 +429,276 @@ async function refreshOverview() {
   if (!attention.length) attn('ok', 'Nothing needs attention.', '');
   $('ov-attention').innerHTML = attention.join('');
 
-  const kv = (k, v) => `<div class="kv"><span class="kv__k">${esc(k)}</span><span class="kv__v mono">${v}</span></div>`;
-  const listeners = [kv('HTTP', `${esc(L.http || '')} <span class="hs-muted">redirects and ACME</span>`)];
-  listeners.push(L.tls
-    ? kv('HTTPS', `${esc(L.https || '')} <span class="hs-muted">${L.http3 ? 'h1, h2, h3' : 'h1, h2'}</span>`)
-    : kv('HTTPS', '<span class="hs-muted">off (TLS disabled)</span>'));
-  $('ov-listeners').innerHTML = listeners.join('');
+  const row = (page, label, value, sub, bad) =>
+    `<button type="button" class="kv kv--link" data-goto="${page}"><span class="kv__k">${esc(label)}</span>` +
+    `<span class="kv__v"><span class="kv__num">${esc(value)}</span><span class="kv__sub${bad ? ' is-bad' : ''}">${esc(sub)}</span></span></button>`;
+  const rows = [
+    row('hosts', 'Proxy hosts', String(H.total || 0), `${H.enabled || 0} enabled`),
+    row('hosts', 'Upstreams', `${up}/${up + down}`, down ? `${down} unreachable` : 'all reachable', down > 0),
+    row('certs', 'Certificates', String(C.issued || 0), failedCerts ? `${failedCerts} failed` : pendingCerts ? `${pendingCerts} pending` : 'issued', failedCerts > 0),
+    row('streams', 'Streams', String(S.total || 0), `${S.enabled || 0} enabled`),
+    row('access', 'Access lists', String(o.accessLists || 0), `${H.withAccessList || 0} hosts behind one`),
+  ];
+  if (o.docker) rows.push(row('docker', 'Docker containers', `${o.docker.routed}/${o.docker.containers}`, 'routed'));
+  $('ov-config').innerHTML = rows.join('');
 
+  const kv = (k, v) => `<div class="kv"><span class="kv__k">${esc(k)}</span><span class="kv__v">${v}</span></div>`;
   const feats = [['HTTP/3', 'http3'], ['UPnP port mapping', 'upnp'], ['Auto-ban', 'autoban'], ['GeoIP', 'geoip'],
     ['Forward authentication', 'forwardAuth'], ['Admin OIDC sign-in', 'oidc'], ['Admin LDAP sign-in', 'ldap'], ['Docker labels', 'docker']];
   $('ov-features').innerHTML = feats.map(([label, key]) =>
     kv(label, F[key] ? '<span class="sdot sdot--ok"></span>on' : '<span class="sdot sdot--off"></span><span class="hs-muted">off</span>')).join('');
+  ovSubtitle();
 }
+
+/* traffic */
+async function ovLoadTraffic() {
+  const range = ov.range;
+  let rep;
+  try {
+    rep = await api('GET', `/api/traffic?range=${range}`);
+  } catch (err) {
+    ov.error = err.message;
+    ovSubtitle();
+    return;
+  }
+  if (range !== ov.range) return; // the range changed while this was loading
+  ov.error = '';
+  ov.report = rep;
+  ovRenderKPIs(rep);
+  ovRenderCharts(rep);
+  ovRenderPorts(rep);
+  ovRenderLists(rep);
+  ovSubtitle();
+}
+
+function ovRenderKPIs(rep) {
+  const t = rep.totals, s = rep.series, g = OV_RANGES[ov.range].spark;
+  let secs = 0;
+  s.in.forEach((v, i) => { if (v != null) secs += ovSpan(rep, i); });
+  const perSec = (n) => (secs > 0 ? n / secs : 0);
+  const outRate = ovRates(rep, s.out, 1, 8), inRate = ovRates(rep, s.in, 1, 8);
+  const peak = (vals) => Math.max(0, ...vals.filter((v) => v != null));
+  const blocked = Object.values(t.blocked || {}).reduce((a, b) => a + b, 0);
+  const errPct = t.requests ? (t.status['5xx'] / t.requests) * 100 : 0;
+  const tiles = [
+    { label: 'Outbound', value: FMT.bytes(t.out), sub: `avg ${FMT.bits(perSec(t.out * 8))}`, title: `peak ${FMT.bits(peak(outRate))}`,
+      spark: ovRates(rep, s.out, g, 8), color: 'var(--c-series-1)' },
+    { label: 'Inbound', value: FMT.bytes(t.in), sub: `avg ${FMT.bits(perSec(t.in * 8))}`, title: `peak ${FMT.bits(peak(inRate))}`,
+      spark: ovRates(rep, s.in, g, 8), color: 'var(--c-series-2)' },
+    { label: 'Requests', value: FMT.count(t.requests), sub: `${FMT.count(perSec(t.requests) * 60)} per minute`,
+      spark: ovRates(rep, s.requests, g, 60) },
+    { label: 'Server errors', value: t.requests ? FMT.pct(errPct) : '-', sub: `${FMT.count(t.status['5xx'])} responses`,
+      title: `${FMT.int(t.status['4xx'])} client errors (4xx)`, spark: ovRates(rep, s['5xx'], g, 60), level: errPct >= 5 ? 'bad' : errPct >= 1 ? 'warn' : '' },
+    { label: 'Blocked', value: FMT.count(blocked), sub: rep.banned ? `${FMT.int(rep.banned)} banned now` : 'none banned now',
+      spark: ovRates(rep, s.blocked, g, 60) },
+    { label: 'Response p95', value: t.p95 >= 0 ? FMT.ms(t.p95) : '-', sub: t.p50 >= 0 ? `p50 ${FMT.ms(t.p50)}` : 'no responses yet',
+      title: t.p99 >= 0 ? `p99 ${FMT.ms(t.p99)}` : '', spark: ovPeaks(s.p95, g) },
+    { label: 'Connections', value: FMT.int(rep.open), sub: `open now, peak ${FMT.int(t.peakOpen)}`,
+      title: `${FMT.int(t.connections)} opened in this range`, spark: ovPeaks(s.open, g) },
+  ];
+  const host = $('ov-kpis');
+  host.replaceChildren();
+  for (const k of tiles) {
+    const tile = document.createElement('div');
+    tile.className = 'kpi';
+    if (k.title) tile.title = k.title;
+    const head = document.createElement('div');
+    head.className = 'kpi__label';
+    if (k.level) {
+      const dot = document.createElement('span');
+      dot.className = `sdot sdot--${k.level}`;
+      head.appendChild(dot);
+    }
+    head.appendChild(document.createTextNode(k.label));
+    const value = document.createElement('div');
+    value.className = 'kpi__value';
+    value.textContent = k.value;
+    const sub = document.createElement('div');
+    sub.className = 'kpi__sub';
+    sub.textContent = k.sub;
+    const spark = QGCharts.sparkline(k.spark, { width: 160, height: 34 });
+    if (k.color) spark.style.color = k.color;
+    tile.append(head, value, sub, spark);
+    host.appendChild(tile);
+  }
+}
+
+function ovRenderCharts(rep) {
+  const c = ovCharts(), s = rep.series;
+  const { line, columns: cols } = OV_RANGES[ov.range];
+  const tp = [
+    { label: 'Outbound', color: 'var(--c-series-1)', values: ovRates(rep, s.out, line, 8), area: true },
+    { label: 'Inbound', color: 'var(--c-series-2)', values: ovRates(rep, s.in, line, 8), area: true },
+  ];
+  const statuses = [['2xx', '--c-chart-2xx'], ['3xx', '--c-chart-3xx'], ['4xx', '--c-chart-4xx'], ['5xx', '--c-chart-5xx']];
+  const rq = statuses.map(([k, color]) => ({ label: k, color: `var(${color})`, values: ovRates(rep, s[k], cols, 60) }));
+  const lat = [
+    { label: 'p95', color: 'var(--c-series-1)', values: ovMeans(s.p95, line) },
+    { label: 'p50', color: 'var(--c-series-2)', values: ovMeans(s.p50, line) },
+  ];
+  const tables = {
+    tp: [['Time', 'Outbound', 'Inbound'], tp, FMT.bits, line],
+    rq: [['Time', ...statuses.map(([k]) => `${k} per minute`)], rq, FMT.count, cols],
+    lat: [['Time', 'p95', 'p50'], lat, FMT.ms, line],
+  };
+  const charts = {
+    tp: [c.tp, { start: rep.start, step: rep.step * line, points: tp[0].values.length, series: tp }],
+    rq: [c.rq, { start: rep.start, step: rep.step * cols, points: rq[0].values.length, series: rq,
+      rows: (i) => rq.slice().reverse().map((x) => ({ label: x.label, value: x.values[i] == null ? 'no data' : `${FMT.count(x.values[i])}/min`, color: x.color, shape: 'box' })) }],
+    lat: [c.lat, { start: rep.start, step: rep.step * line, points: lat[0].values.length, series: lat }],
+  };
+  QGCharts.legend($('ov-tp-legend'), tp.map((x) => ({ label: x.label, color: x.color, shape: 'box' })));
+  QGCharts.legend($('ov-rq-legend'), rq.map((x) => ({ label: x.label, color: x.color, shape: 'box' })));
+  QGCharts.legend($('ov-lat-legend'), lat.map((x) => ({ label: x.label, color: x.color, shape: 'line' })));
+  for (const [id, [chart, data]] of Object.entries(charts)) {
+    // The table view is the chart's accessible twin: the same numbers as rows.
+    let box = chart.host.nextElementSibling;
+    if (!box || !box.classList.contains('chartbox--table')) {
+      box = document.createElement('div');
+      box.className = 'chartbox chartbox--table';
+      chart.host.after(box);
+    }
+    box.hidden = !ov.tables[id];
+    chart.host.hidden = !!ov.tables[id];
+    if (ov.tables[id]) {
+      const [head, series, format, group] = tables[id];
+      const rows = [];
+      for (let i = series[0].values.length - 1; i >= 0; i--) {
+        if (series.every((x) => x.values[i] == null)) continue;
+        rows.push([QGCharts.spanLabel(rep.start + i * rep.step * group, rep.step * group),
+          ...series.map((x) => (x.values[i] == null ? '-' : format(x.values[i])))]);
+      }
+      QGCharts.table(box, head, rows.length ? rows : [['No data in this range yet.', ...head.slice(1).map(() => '')]]);
+    }
+    chart.update(data);
+  }
+}
+document.querySelectorAll('[data-chart-table]').forEach((b) => b.addEventListener('click', () => {
+  const id = b.dataset.chartTable;
+  ov.tables[id] = !ov.tables[id];
+  b.setAttribute('aria-pressed', String(ov.tables[id]));
+  b.textContent = ov.tables[id] ? 'Chart' : 'Table';
+  if (ov.report) ovRenderCharts(ov.report);
+}));
+
+function ovRenderPorts(rep) {
+  const ports = rep.ports || [];
+  const showExposure = ports.some((p) => p.exposed != null);
+  const table = $('ov-ports');
+  table.replaceChildren();
+  const head = table.createTHead().insertRow();
+  const cols = [['Port', ''], ['Service', ''], ['Details', ''], ...(showExposure ? [['Router', '']] : []),
+    ['State', ''], ['Inbound', 'num'], ['Outbound', 'num'], ['Connections', 'num'], ['Open', 'num'], ['Traffic', 'ports__sparkcol']];
+  for (const [label, cls] of cols) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    if (cls) th.className = cls;
+    head.appendChild(th);
+  }
+  const body = table.createTBody();
+  if (!ports.length) {
+    const td = body.insertRow().insertCell();
+    td.colSpan = cols.length;
+    td.className = 'hs-muted';
+    td.textContent = 'No listeners.';
+    return;
+  }
+  const cell = (tr, text, cls) => {
+    const td = tr.insertCell();
+    if (cls) td.className = cls;
+    if (text != null) td.textContent = text;
+    return td;
+  };
+  const dot = (td, level, text) => {
+    const d = document.createElement('span');
+    d.className = `sdot sdot--${level}`;
+    td.append(d, document.createTextNode(` ${text}`));
+  };
+  for (const p of ports) {
+    const tr = body.insertRow();
+    cell(tr, `${p.port}${p.portEnd ? '-' + p.portEnd : ''}/${p.proto}`, 'mono nowrap');
+    const svc = cell(tr, p.service, 'nowrap');
+    if (p.docker) {
+      const b = document.createElement('span');
+      b.className = 'badge badge--muted';
+      b.textContent = 'docker';
+      svc.append(' ', b);
+    }
+    cell(tr, p.detail, 'ports__detail');
+    if (showExposure) {
+      const td = cell(tr, null, 'nowrap');
+      if (p.exposed == null) td.textContent = '-';
+      else dot(td, p.exposed ? 'info' : 'off', p.exposed ? 'mapped' : 'not mapped');
+    }
+    const st = cell(tr, null, 'nowrap');
+    dot(st, p.state === 'listening' ? 'ok' : 'bad', p.state);
+    if (p.error) st.title = p.error;
+    cell(tr, FMT.bytes(p.in), 'num nowrap');
+    cell(tr, FMT.bytes(p.out), 'num nowrap');
+    cell(tr, FMT.count(p.connections), 'num nowrap');
+    cell(tr, FMT.int(p.open), 'num nowrap');
+    const sp = cell(tr, null, 'ports__sparkcol');
+    const svg = QGCharts.sparkline((p.spark || []).map((v) => (v == null ? null : v * 8)), { width: 140, height: 26 });
+    const peak = Math.max(0, ...(p.spark || []).filter((v) => v != null)) * 8;
+    sp.title = `peak ${FMT.bits(peak)}`;
+    sp.appendChild(svg);
+  }
+  const listening = ports.filter((p) => p.state === 'listening').length;
+  const exposed = ports.filter((p) => p.exposed).length;
+  $('ov-ports-sub').textContent = `${plural(listening, 'listener', 'listeners')} running` +
+    (showExposure ? `, ${exposed} mapped on the router by UPnP` : '') + '. Traffic is what went through each port in this range.';
+}
+
+function ovRenderLists(rep) {
+  const t = rep.totals;
+  QGCharts.barList($('ov-hosts'), (rep.hosts || []).map((h) => ({
+    label: h.name === '_unmatched' ? 'No matching host' : h.name,
+    value: h.requests,
+    note: h.errors ? `${FMT.pct((h.errors / h.requests) * 100)} 5xx` : '',
+    title: `${FMT.int(h.requests)} requests, ${FMT.bytes(h.out)} sent, ${FMT.int(h.errors)} server errors`,
+  })), { empty: 'No requests in this range yet.' });
+
+  if (!rep.geoip) {
+    const box = $('ov-countries');
+    box.replaceChildren();
+    const p = document.createElement('div');
+    p.className = 'barlist__empty';
+    p.textContent = 'Needs a GeoIP database. ';
+    const a = document.createElement('button');
+    a.type = 'button';
+    a.className = 'linkbtn';
+    a.textContent = 'Set one up';
+    a.addEventListener('click', () => switchPage('settings', 'network'));
+    p.appendChild(a);
+    box.appendChild(p);
+  } else {
+    const names = typeof Intl.DisplayNames === 'function' ? new Intl.DisplayNames(['en'], { type: 'region' }) : null;
+    const country = (code) => {
+      if (code === 'LAN') return 'Local network';
+      if (code === 'unknown') return 'Unknown';
+      try { return names ? `${names.of(code)}` : code; } catch { return code; }
+    };
+    QGCharts.barList($('ov-countries'), (rep.countries || []).map((c) => ({
+      label: country(c.code), value: c.requests, note: /^[A-Z]{2}$/.test(c.code) ? c.code : '',
+      title: `${FMT.int(c.requests)} requests`,
+    })), { empty: 'No requests in this range yet.' });
+  }
+
+  QGCharts.shareBar($('ov-protocols'), [
+    { label: 'HTTP/3', value: t.protocols['HTTP/3'] || 0, color: 'var(--c-series-1)' },
+    { label: 'HTTP/2', value: t.protocols['HTTP/2'] || 0, color: 'var(--c-series-2)' },
+    { label: 'HTTP/1.1', value: t.protocols['HTTP/1.1'] || 0, color: 'var(--c-series-3)' },
+  ], { empty: 'No requests in this range yet.' });
+
+  const blocked = Object.entries(t.blocked || {}).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+  const total = blocked.reduce((a, [, n]) => a + n, 0);
+  $('ov-blocked-sub').textContent = total
+    ? `${FMT.int(total)} refused in this range${rep.banned ? `, ${plural(rep.banned, 'address', 'addresses')} banned now` : ''}.`
+    : 'Requests and stream clients quicgate refused.';
+  QGCharts.barList($('ov-blocked'), blocked.map(([k, n]) => ({ label: BLOCK_REASONS[k] || k, value: n, title: `${FMT.int(n)} refused` })),
+    { empty: 'Nothing refused in this range.' });
+}
+
 $('page-overview').addEventListener('click', (e) => {
   const target = e.target.closest('[data-goto]');
   if (target) switchPage(target.dataset.goto);

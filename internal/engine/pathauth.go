@@ -65,6 +65,7 @@ func (p *pathAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func closedPath(host []string, rule store.AuthRule, why string) http.Handler {
 	log.Printf("engine: host %v path %q: %s; the path is closed", host, rule.Path, why)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		markBlocked(w, blockAccessList)
 		http.Error(w, "forbidden", http.StatusForbidden)
 	})
 }
