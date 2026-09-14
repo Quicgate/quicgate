@@ -203,7 +203,10 @@ func (m *StreamManager) Sync(streams []store.Stream, loadCert certLoader, resolv
 				ps := *spec
 				ps.target = hostPort(s.ForwardHost, fwdPort)
 				ps.tcp.defaultDest = ps.target
-				ps.sig = spec.sig + fmt.Sprintf("|p%d", port)
+				// The port's own target and the range start (which names its
+				// traffic counters) both depend on where the range begins, so
+				// moving the start restarts the ports it shifts.
+				ps.sig = spec.sig + fmt.Sprintf("|p%d->%s|from%d", port, ps.target, s.ListenPort)
 				portSpec = &ps
 			}
 			for _, p := range protos {
@@ -648,6 +651,10 @@ func startUDP(key, addr string, spec *streamSpec, acct streamAcct) (*forwarder, 
 	perIP := map[string]int{} // open sessions per source address
 	maxSessions, maxPerIP := udpMaxSessions, udpMaxSessionsPerIP
 	var limited throttledLog
+	// refusedAt counts a refused sender once a minute rather than every packet,
+	// so one chatty source does not dwarf every other refusal. Only the read
+	// loop uses it.
+	refusedAt := map[string]time.Time{}
 	// forget removes a session; mu must be held.
 	forget := func(k string, s *udpSession) {
 		delete(sessions, k)
@@ -691,7 +698,14 @@ func startUDP(key, addr string, spec *streamSpec, acct streamAcct) (*forwarder, 
 			}
 			acct.port.received(n)
 			if !spec.allowed(clientAddr) {
-				acct.refuse()
+				src, now := clientIP(clientAddr.String()), time.Now()
+				if now.Sub(refusedAt[src]) >= time.Minute {
+					if len(refusedAt) >= 1024 {
+						clear(refusedAt)
+					}
+					refusedAt[src] = now
+					acct.refuse()
+				}
 				continue
 			}
 			ck := clientAddr.String()

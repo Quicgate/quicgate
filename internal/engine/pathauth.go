@@ -62,10 +62,10 @@ func (p *pathAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // cannot be built (a deleted access list, forward auth or SSO the host does not
 // configure, an unknown mode). Falling back to the host's own gate instead
 // would open the path whenever the host itself is public.
-func closedPath(host []string, rule store.AuthRule, why string) http.Handler {
+func closedPath(host []string, rule store.AuthRule, why string, reason blockReason) http.Handler {
 	log.Printf("engine: host %v path %q: %s; the path is closed", host, rule.Path, why)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		markBlocked(w, blockAccessList)
+		markBlocked(w, reason)
 		http.Error(w, "forbidden", http.StatusForbidden)
 	})
 }
@@ -94,7 +94,7 @@ func buildPathAuth(domains []string, rules []store.AuthRule, o store.Options, ac
 			g.handler = inner
 		case "forwardAuth":
 			if o.ForwardAuth == nil || o.ForwardAuth.URL == "" {
-				g.handler = closedPath(domains, r, "forward auth is not configured on this host")
+				g.handler = closedPath(domains, r, "forward auth is not configured on this host", blockForwardAuth)
 				break
 			}
 			g.handler = forwardAuth(o.ForwardAuth, inner)
@@ -104,7 +104,7 @@ func buildPathAuth(domains []string, rules []store.AuthRule, o store.Options, ac
 				gate = ssoFor(*r.OIDC)
 			}
 			if gate == nil {
-				g.handler = closedPath(domains, r, "single sign-on is not configured for this path")
+				g.handler = closedPath(domains, r, "single sign-on is not configured for this path", blockSSO)
 				break
 			}
 			g.handler = gate.wrap(inner)
@@ -114,12 +114,12 @@ func buildPathAuth(domains []string, rules []store.AuthRule, o store.Options, ac
 				acl = acls[*r.AccessListID]
 			}
 			if acl == nil {
-				g.handler = closedPath(domains, r, "its access list does not exist")
+				g.handler = closedPath(domains, r, "its access list does not exist", blockAccessList)
 				break
 			}
 			g.handler = acl.wrap(inner)
 		default:
-			g.handler = closedPath(domains, r, "unknown mode "+r.Mode)
+			g.handler = closedPath(domains, r, "unknown mode "+r.Mode, blockAccessList)
 		}
 		gates = append(gates, g)
 	}

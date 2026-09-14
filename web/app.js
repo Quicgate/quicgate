@@ -294,9 +294,9 @@ function ovCharts() {
   return ov.charts;
 }
 
-// ovSpan is the number of seconds point i covers: a full step, except the
-// newest point, which may still be filling.
-function ovSpan(rep, i) { return i === rep.series.in.length - 1 ? rep.lastSpan : rep.step; }
+// ovSpan is the number of seconds of traffic point i holds: less than a step
+// for the point still filling and for intervals quicgate was only partly up.
+function ovSpan(rep, i) { return rep.series.secs[i] || 0; }
 
 // ovRates turns per-point counts into rates per second, times mul, in groups
 // of g points (g = 1 keeps every point).
