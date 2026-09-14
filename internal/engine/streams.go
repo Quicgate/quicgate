@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	proxyproto "github.com/pires/go-proxyproto"
@@ -45,6 +46,11 @@ type StreamManager struct {
 	mu     sync.Mutex
 	active map[string]*forwarder // key: "tcp:2222"
 	status map[string]StreamStatus
+	synced []store.Stream // the enabled streams of the last Sync
+	// traffic, when set, receives each listener's byte and connection counts.
+	// It is set once, before the first Sync.
+	traffic *trafficStats
+	refused atomic.Uint64 // connections and packets a source filter turned away
 }
 
 func NewStreamManager() *StreamManager {
@@ -98,8 +104,9 @@ type tcpOpts struct {
 
 // streamSpec is the desired state of one forwarder.
 type streamSpec struct {
-	id     int64
-	target string
+	id         int64
+	listenPort int // the stream's first port, which names its traffic counters
+	target     string
 	// Source filter: an access list evaluated with L4 semantics, or inline
 	// CIDRs. filtered records that some filter is configured, so a filter
 	// that yields nothing admits nobody instead of everybody.
@@ -167,10 +174,12 @@ type aclResolver func(id int64) *compiledAccess
 // into a port range; each port becomes its own listener.
 func (m *StreamManager) Sync(streams []store.Stream, loadCert certLoader, resolveACL aclResolver) {
 	desired := map[string]*streamSpec{}
+	var enabled []store.Stream
 	for _, s := range streams {
 		if !s.Enabled {
 			continue
 		}
+		enabled = append(enabled, s)
 		// Build the shared spec once per stream.
 		spec := buildStreamSpec(s, loadCert, resolveACL)
 		protos := []string{s.Protocol}
@@ -204,6 +213,7 @@ func (m *StreamManager) Sync(streams []store.Stream, loadCert certLoader, resolv
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.synced = enabled
 	for key, f := range m.active {
 		if spec, ok := desired[key]; !ok || spec.sig != f.sig || spec.failure != "" {
 			f.stop()
@@ -231,7 +241,8 @@ func (m *StreamManager) Sync(streams []store.Stream, loadCert certLoader, resolv
 			m.status[key] = st
 			continue
 		}
-		f, err := startForwarder(key, spec)
+		acct := streamAcct{port: m.traffic.port(fmt.Sprintf("%s:%d", key[:3], spec.listenPort)), refused: &m.refused}
+		f, err := startForwarder(key, spec, acct)
 		if err != nil {
 			log.Printf("stream: cannot start %s -> %s: %v", key, spec.target, err)
 			st.State, st.Error = "failed", err.Error()
@@ -248,8 +259,9 @@ func (m *StreamManager) Sync(streams []store.Stream, loadCert certLoader, resolv
 func buildStreamSpec(s store.Stream, loadCert certLoader, resolveACL aclResolver) *streamSpec {
 	target := hostPort(s.ForwardHost, s.ForwardPort)
 	spec := &streamSpec{
-		id:     s.ID,
-		target: target,
+		id:         s.ID,
+		listenPort: s.ListenPort,
+		target:     target,
 		tcp: tcpOpts{
 			sendProxy:        s.SendProxyProtocol,
 			acceptProxy:      s.AcceptProxyProtocol,
@@ -346,7 +358,19 @@ func (m *StreamManager) StopAll() {
 	}
 }
 
-func startForwarder(key string, spec *streamSpec) (*forwarder, error) {
+// streamAcct is where a listener reports its traffic. Both fields may be nil.
+type streamAcct struct {
+	port    *portCounters  // bytes and connections on the client side
+	refused *atomic.Uint64 // clients the source filter turned away
+}
+
+func (a streamAcct) refuse() {
+	if a.refused != nil {
+		a.refused.Add(1)
+	}
+}
+
+func startForwarder(key string, spec *streamSpec, acct streamAcct) (*forwarder, error) {
 	var proto, port string
 	if _, err := fmt.Sscanf(key, "tcp:%s", &port); err == nil {
 		proto = "tcp"
@@ -357,9 +381,44 @@ func startForwarder(key string, spec *streamSpec) (*forwarder, error) {
 	}
 	addr := ":" + port
 	if proto == "tcp" {
-		return startTCP(key, addr, spec)
+		return startTCP(key, addr, spec, acct)
 	}
-	return startUDP(key, addr, spec)
+	return startUDP(key, addr, spec, acct)
+}
+
+// streamListener is one enabled stream's listeners for one protocol, as the
+// traffic report shows them.
+type streamListener struct {
+	stream store.Stream
+	proto  string
+	state  string // listening | failed
+	err    string
+}
+
+// listeners reports every enabled stream per protocol with the state of its
+// listeners: failed when any port of it failed to start.
+func (m *StreamManager) listeners() []streamListener {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []streamListener
+	for _, s := range m.synced {
+		protos := []string{s.Protocol}
+		if s.Protocol == "both" {
+			protos = []string{"tcp", "udp"}
+		}
+		last := max(s.ListenPortEnd, s.ListenPort)
+		for _, p := range protos {
+			l := streamListener{stream: s, proto: p, state: "listening"}
+			for port := s.ListenPort; port <= last; port++ {
+				if st, ok := m.status[fmt.Sprintf("%s:%d", p, port)]; ok && st.State != "running" {
+					l.state, l.err = "failed", st.Error
+					break
+				}
+			}
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // throttledLog logs at most once per interval, for limits that attacker
@@ -437,7 +496,7 @@ func (t *connTracker) closeAll() {
 	}
 }
 
-func startTCP(key, addr string, spec *streamSpec) (*forwarder, error) {
+func startTCP(key, addr string, spec *streamSpec, acct streamAcct) (*forwarder, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -459,6 +518,10 @@ func startTCP(key, addr string, spec *streamSpec) (*forwarder, error) {
 					return
 				}
 			}
+			if acct.port != nil {
+				acct.port.opened()
+				conn = &countedConn{Conn: conn, c: acct.port}
+			}
 			if !open.track(conn) {
 				_ = conn.Close()
 				return
@@ -468,7 +531,7 @@ func startTCP(key, addr string, spec *streamSpec) (*forwarder, error) {
 				go func() {
 					defer func() { <-slots }()
 					defer open.untrack(conn)
-					handleTCP(key, conn, spec, open)
+					handleTCP(key, conn, spec, open, acct)
 				}()
 			default:
 				open.untrack(conn)
@@ -486,7 +549,7 @@ func startTCP(key, addr string, spec *streamSpec) (*forwarder, error) {
 
 // handleTCP applies PROXY-accept, SNI routing or TLS termination as
 // configured, then splices the connection to the chosen backend.
-func handleTCP(key string, raw net.Conn, spec *streamSpec, open *connTracker) {
+func handleTCP(key string, raw net.Conn, spec *streamSpec, open *connTracker, acct streamAcct) {
 	defer raw.Close()
 	var clientConn net.Conn = raw
 	clientAddr := raw.RemoteAddr()
@@ -507,6 +570,7 @@ func handleTCP(key string, raw net.Conn, spec *streamSpec, open *connTracker) {
 
 	// Whitelist against the effective client address.
 	if !spec.allowed(clientAddr) {
+		acct.refuse()
 		log.Printf("stream %s: refused %s (not in whitelist)", key, clientAddr)
 		return
 	}
@@ -572,7 +636,7 @@ func handleTCP(key string, raw net.Conn, spec *streamSpec, open *connTracker) {
 	io.Copy(clientConn, backend)
 }
 
-func startUDP(key, addr string, spec *streamSpec) (*forwarder, error) {
+func startUDP(key, addr string, spec *streamSpec, acct streamAcct) (*forwarder, error) {
 	target := spec.target
 	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {
@@ -590,6 +654,7 @@ func startUDP(key, addr string, spec *streamSpec) (*forwarder, error) {
 		if perIP[s.ip]--; perIP[s.ip] <= 0 {
 			delete(perIP, s.ip)
 		}
+		acct.port.closed()
 	}
 
 	go func() {
@@ -624,7 +689,9 @@ func startUDP(key, addr string, spec *streamSpec) (*forwarder, error) {
 				}
 				return
 			}
+			acct.port.received(n)
 			if !spec.allowed(clientAddr) {
+				acct.refuse()
 				continue
 			}
 			ck := clientAddr.String()
@@ -651,6 +718,7 @@ func startUDP(key, addr string, spec *streamSpec) (*forwarder, error) {
 				sess = &udpSession{conn: up, ip: srcIP, lastSeen: time.Now()}
 				sessions[ck] = sess
 				perIP[srcIP]++
+				acct.port.opened()
 				go func(up net.Conn, clientAddr net.Addr, ck string) {
 					rbuf := make([]byte, 65535)
 					for {
@@ -665,7 +733,8 @@ func startUDP(key, addr string, spec *streamSpec) (*forwarder, error) {
 							up.Close()
 							return
 						}
-						pc.WriteTo(rbuf[:rn], clientAddr)
+						wn, _ := pc.WriteTo(rbuf[:rn], clientAddr)
+						acct.port.sent(wn)
 					}
 				}(up, clientAddr, ck)
 			}

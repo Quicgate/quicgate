@@ -97,22 +97,74 @@
     <div id="page-overview">
       <div class="pagehead">
         <div><h1 class="pagehead__title">Overview</h1><p class="pagehead__sub mono" id="ov-sub"></p></div>
-        <div class="pagehead__actions"><button id="btn-ov-refresh" class="btn btn--secondary">Refresh</button></div>
+        <div class="pagehead__actions">
+          <div class="segmented segmented--range" id="ov-range" role="group" aria-label="Time range">
+            <button type="button" data-range="1h">1h</button><button type="button" data-range="6h">6h</button><button type="button" data-range="24h">24h</button><button type="button" data-range="7d">7d</button>
+          </div>
+          <button id="btn-ov-refresh" class="btn btn--secondary">Refresh</button>
+        </div>
       </div>
-      <div class="statstrip" id="ov-stats"></div>
-      <div class="ovgrid">
-        <div class="panel">
-          <div class="panel__head"><h2>Attention</h2><p>Problems quicgate can see right now.</p></div>
-          <div id="ov-attention"></div>
+
+      <div class="panel ov-attention" id="ov-attention"></div>
+
+      <div class="kpis" id="ov-kpis"></div>
+
+      <section class="panel ov-chart">
+        <div class="panel__head panel__head--row">
+          <div><h2>Throughput</h2><p>Bytes on the client side of every listener, TLS and protocol overhead included.</p></div>
+          <div class="chartctl"><div class="legend" id="ov-tp-legend"></div><button type="button" class="btn btn--ghost btn--sm" data-chart-table="tp" aria-pressed="false">Table</button></div>
         </div>
-        <div class="panel">
-          <div class="panel__head"><h2>Listeners</h2><p>Where the engine accepts traffic.</p></div>
-          <div id="ov-listeners"></div>
-        </div>
-        <div class="panel">
+        <div class="chartbox" id="ov-tp"></div>
+      </section>
+
+      <div class="ovgrid ovgrid--2">
+        <section class="panel ov-chart">
+          <div class="panel__head panel__head--row">
+            <div><h2>Requests</h2><p>Per minute, by response status.</p></div>
+            <div class="chartctl"><div class="legend" id="ov-rq-legend"></div><button type="button" class="btn btn--ghost btn--sm" data-chart-table="rq" aria-pressed="false">Table</button></div>
+          </div>
+          <div class="chartbox" id="ov-rq"></div>
+        </section>
+        <section class="panel ov-chart">
+          <div class="panel__head panel__head--row">
+            <div><h2>Response time</h2><p>Time to the first byte of the response.</p></div>
+            <div class="chartctl"><div class="legend" id="ov-lat-legend"></div><button type="button" class="btn btn--ghost btn--sm" data-chart-table="lat" aria-pressed="false">Table</button></div>
+          </div>
+          <div class="chartbox" id="ov-lat"></div>
+        </section>
+      </div>
+
+      <section class="panel">
+        <div class="panel__head"><h2>Open ports</h2><p id="ov-ports-sub">Every port quicgate listens on and what went through it in this range.</p></div>
+        <div class="tablescroll"><table class="table ports" id="ov-ports"></table></div>
+      </section>
+
+      <div class="ovgrid ovgrid--3">
+        <section class="panel">
+          <div class="panel__head"><h2>Busiest hosts</h2><p>Requests per host in this range.</p></div>
+          <div class="barlist" id="ov-hosts"></div>
+        </section>
+        <section class="panel">
+          <div class="panel__head"><h2>Countries</h2><p>Where requests come from.</p></div>
+          <div class="barlist" id="ov-countries"></div>
+        </section>
+        <section class="panel">
+          <div class="panel__head"><h2>HTTP versions</h2><p>Share of requests per protocol.</p></div>
+          <div class="sharebox" id="ov-protocols"></div>
+          <div class="panel__head panel__head--sub"><h2>Blocked</h2><p id="ov-blocked-sub">Requests and stream clients quicgate refused.</p></div>
+          <div class="barlist" id="ov-blocked"></div>
+        </section>
+      </div>
+
+      <div class="ovgrid ovgrid--2 ovgrid--start">
+        <section class="panel">
+          <div class="panel__head"><h2>Configuration</h2><p>What quicgate serves, and its health.</p></div>
+          <div id="ov-config"></div>
+        </section>
+        <section class="panel">
           <div class="panel__head"><h2>Features</h2><p>Optional capabilities and whether they are on.</p></div>
           <div id="ov-features"></div>
-        </div>
+        </section>
       </div>
     </div>
 
@@ -976,6 +1028,7 @@
 </div>
 
 <script src="md.js"></script>
+<script src="charts.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

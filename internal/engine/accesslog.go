@@ -19,17 +19,24 @@ import (
 // can consume it directly. It also keeps counters for the metrics endpoint.
 type accessLogger struct {
 	out       *lumberjack.Logger
-	enc       chan []byte
+	enc       chan logLine
 	total     atomic.Uint64
 	bytes     atomic.Uint64
 	status2xx atomic.Uint64
 	status3xx atomic.Uint64
 	status4xx atomic.Uint64
 	status5xx atomic.Uint64
-	perHost   sync.Map // metric label -> *hostCounters
+	proto     [4]atomic.Uint64                 // requests by HTTP major version (1 to 3)
+	latency   [numLatencyBuckets]atomic.Uint64 // responses by time to first byte
+	blocked   [numBlockReasons]atomic.Uint64   // requests a quicgate control refused, by reason
+	perHost   sync.Map                         // metric label -> *hostCounters
 	// hostLabel maps a request's Host to a bounded metric label (the matched
 	// route, or one label for everything unmatched). Set by the engine.
 	hostLabel func(host string) string
+	// client, when set, is given the client address of every logged request.
+	// It runs on the writer goroutine, off the request path, so it sees the
+	// same requests the log file does (lines dropped under overload included).
+	client func(ip string)
 
 	sendMu sync.RWMutex // held for reading while sending, for writing by Close
 	closed bool
@@ -84,7 +91,7 @@ func promLabel(s string) string {
 }
 
 // MetricsText exposes the Prometheus text for the admin /metrics endpoint.
-func (e *Engine) MetricsText() string { return e.accessLog.promText() }
+func (e *Engine) MetricsText() string { return e.accessLog.promText() + e.traffic.promText() }
 
 func newAccessLogger(dir string) *accessLogger {
 	l := &accessLogger{
@@ -94,16 +101,25 @@ func newAccessLogger(dir string) *accessLogger {
 			MaxBackups: 5,
 			Compress:   true,
 		},
-		enc:  make(chan []byte, 1024),
+		enc:  make(chan logLine, 1024),
 		done: make(chan struct{}),
 	}
 	go func() {
 		defer close(l.done)
 		for line := range l.enc {
-			_, _ = l.out.Write(append(line, '\n'))
+			_, _ = l.out.Write(append(line.data, '\n'))
+			if l.client != nil {
+				l.client(line.ip)
+			}
 		}
 	}()
 	return l
+}
+
+// logLine is one encoded record on its way to the writer.
+type logLine struct {
+	data []byte
+	ip   string
 }
 
 // Close stops accepting lines, writes out the ones already queued and closes
@@ -135,16 +151,23 @@ type accessRecord struct {
 	UA       string `json:"ua,omitempty"`
 }
 
-// statusWriter captures status and byte count without altering behavior.
+// statusWriter captures status, byte count and time to first byte without
+// altering behavior.
 type statusWriter struct {
 	http.ResponseWriter
-	status int
-	bytes  int64
+	status  int
+	bytes   int64
+	start   time.Time
+	ttfb    time.Duration
+	blocked blockReason // set by the quicgate control that refused the request
 }
 
 func (w *statusWriter) WriteHeader(code int) {
-	if w.status == 0 {
+	// An informational response (103 Early Hints) precedes the real one, so it
+	// is neither the status nor the first byte of the response.
+	if w.status == 0 && (code >= 200 || code == http.StatusSwitchingProtocols) {
 		w.status = code
+		w.ttfb = time.Since(w.start)
 	}
 	w.ResponseWriter.WriteHeader(code)
 }
@@ -152,10 +175,20 @@ func (w *statusWriter) WriteHeader(code int) {
 func (w *statusWriter) Write(b []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
+		w.ttfb = time.Since(w.start)
 	}
 	n, err := w.ResponseWriter.Write(b)
 	w.bytes += int64(n)
 	return n, err
+}
+
+// markBlocked notes, for the traffic statistics, that a quicgate control
+// refused this request and why. Gates are handed the access log's writer
+// directly; any other writer (a test recorder) is left alone.
+func markBlocked(w http.ResponseWriter, why blockReason) {
+	if sw, ok := w.(*statusWriter); ok {
+		sw.blocked = why
+	}
 }
 
 // Flush keeps SSE/streaming working through the wrapper.
@@ -178,7 +211,7 @@ func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 func (l *accessLogger) wrap(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		sw := &statusWriter{ResponseWriter: w}
+		sw := &statusWriter{ResponseWriter: w, start: start}
 		next(sw, r)
 		l.total.Add(1)
 		l.bytes.Add(uint64(sw.bytes))
@@ -191,6 +224,15 @@ func (l *accessLogger) wrap(next http.HandlerFunc) http.HandlerFunc {
 			l.status4xx.Add(1)
 		case 5:
 			l.status5xx.Add(1)
+		}
+		if sw.status != 0 {
+			l.latency[latencyBucket(sw.ttfb)].Add(1)
+		}
+		if r.ProtoMajor >= 1 && r.ProtoMajor <= 3 {
+			l.proto[r.ProtoMajor].Add(1)
+		}
+		if sw.blocked != blockNone {
+			l.blocked[sw.blocked].Add(1)
 		}
 		label := "_unmatched"
 		if l.hostLabel != nil {
@@ -231,7 +273,7 @@ func (l *accessLogger) wrap(next http.HandlerFunc) http.HandlerFunc {
 		l.sendMu.RLock()
 		if !l.closed {
 			select {
-			case l.enc <- line:
+			case l.enc <- logLine{data: line, ip: ip}:
 			default: // never block the request path on a slow disk
 			}
 		}

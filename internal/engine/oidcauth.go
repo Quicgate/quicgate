@@ -317,11 +317,13 @@ func (g *oidcGate) wrap(next http.Handler) http.Handler {
 			return
 		}
 		if g.provider.ID == 0 {
+			markBlocked(w, blockSSO)
 			http.Error(w, "OIDC provider not configured", http.StatusForbidden)
 			return
 		}
 		if s := g.session(r); s != nil {
 			if !g.allowed(s.Email, s.Groups) {
+				markBlocked(w, blockSSO)
 				http.Error(w, "forbidden: "+s.Email+" is not permitted here", http.StatusForbidden)
 				return
 			}
@@ -442,10 +444,12 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	idToken, err := provider.Verifier(&oidc.Config{ClientID: g.provider.ClientID}).Verify(ctx, rawID)
 	if err != nil {
+		markBlocked(w, blockSSO)
 		http.Error(w, "id_token verification failed", http.StatusUnauthorized)
 		return
 	}
 	if idToken.Nonce != st.Nonce {
+		markBlocked(w, blockSSO)
 		http.Error(w, "nonce mismatch", http.StatusUnauthorized)
 		return
 	}
@@ -460,6 +464,7 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 		email, _ = claims["preferred_username"].(string)
 	}
 	if email == "" {
+		markBlocked(w, blockSSO)
 		http.Error(w, "identity token carries no email", http.StatusForbidden)
 		return
 	}
@@ -468,6 +473,7 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// that would let anyone claim to be someone@yourcompany.com. Providers that
 	// omit the claim entirely are taken at their word.
 	if v, present := claims["email_verified"]; present && !claimIsTrue(v) {
+		markBlocked(w, blockSSO)
 		http.Error(w, "identity provider reports this address as unverified", http.StatusForbidden)
 		return
 	}
@@ -480,6 +486,7 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !g.allowed(email, groups) {
+		markBlocked(w, blockSSO)
 		http.Error(w, "forbidden: "+email+" is not permitted here", http.StatusForbidden)
 		return
 	}

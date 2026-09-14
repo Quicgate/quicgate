@@ -137,6 +137,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs", s.auth(s.handleLogs))
 	mux.HandleFunc("GET /api/config", s.auth(s.handleEffectiveConfig))
 	mux.HandleFunc("GET /api/overview", s.auth(s.handleOverview))
+	mux.HandleFunc("GET /api/traffic", s.auth(s.handleTraffic))
 	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
 	mux.HandleFunc("POST /api/custom-certs/self-signed", s.auth(s.handleSelfSignedCert))
 	mux.HandleFunc("POST /api/custom-certs/from-file", s.auth(s.handleCertFromFile))
@@ -326,7 +327,8 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	info := s.engine.Info()
 
 	out := map[string]any{
-		"version": info.Version,
+		"version":   info.Version,
+		"startedAt": info.StartedAt,
 		"listeners": map[string]any{
 			"http": info.HTTPAddr, "https": info.HTTPSAddr, "tls": info.TLS, "http3": info.HTTP3,
 		},
@@ -368,6 +370,21 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleTraffic serves the traffic history behind the overview charts for one
+// range (1h by default).
+func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
+	rng := r.URL.Query().Get("range")
+	if rng == "" {
+		rng = "1h"
+	}
+	rep, err := s.engine.TrafficReport(rng)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
 }
 
 // handleDockerStatus reports the Docker label provider's live state, or that it

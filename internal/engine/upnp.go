@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/huin/goupnp/dcps/internetgateway1"
@@ -36,6 +37,26 @@ type UPnPManager struct {
 	mapped  map[string]bool
 	desired []PortMapping
 	done    chan struct{}
+	// published is a copy of mapped for readers that must not wait for a
+	// router round trip in progress under mu.
+	published atomic.Pointer[map[string]bool]
+}
+
+// Mapped reports the forwards in place on the router, keyed "TCP:443".
+func (m *UPnPManager) Mapped() map[string]bool {
+	if p := m.published.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// publish copies mapped for Mapped. mu is held.
+func (m *UPnPManager) publish() {
+	cp := make(map[string]bool, len(m.mapped))
+	for k, v := range m.mapped {
+		cp[k] = v
+	}
+	m.published.Store(&cp)
 }
 
 func NewUPnPManager(leaseSeconds uint32) *UPnPManager {
@@ -143,6 +164,7 @@ func (m *UPnPManager) Sync(desired []PortMapping) {
 		}
 		m.mapped[key] = true
 	}
+	m.publish()
 }
 
 // Close removes every mapping this manager added.
@@ -162,5 +184,6 @@ func (m *UPnPManager) Close() {
 		}
 		delete(m.mapped, key)
 	}
+	m.publish()
 	log.Printf("upnp: all mappings removed")
 }

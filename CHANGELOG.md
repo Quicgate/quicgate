@@ -4,6 +4,42 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.11.0] - 2026-09-14
+
+### Added
+- **Traffic on the Overview.** quicgate now records its own traffic and the
+  Overview charts it for the last hour, 6 hours, day or week:
+  - Throughput in and out, measured on the client side of every listener
+    (HTTP, HTTPS, HTTP/3 and streams), requests per minute by response status,
+    and time to first byte at the 50th and 95th percentile.
+  - A row of headline numbers with sparklines: outbound and inbound volume,
+    requests, the server error rate, blocked requests, response time and open
+    connections.
+  - Open ports: every listener with its service, state, whether UPnP mapped it
+    on the router, bytes in and out, connections and a traffic sparkline.
+  - The busiest hosts, where requests come from (with a GeoIP database), the
+    share of HTTP/1.1, HTTP/2 and HTTP/3, and what quicgate refused, by reason:
+    access lists, auto-ban, rate limits, the exploit filter, bad bots, client
+    certificates, single sign-on, forward auth and stream source filters.
+  - The page follows along while it is open, every chart has a table view, and
+    the history is kept in `traffic.json` in the data directory, so a restart
+    or an upgrade does not wipe it.
+- `GET /api/traffic?range=1h|6h|24h|7d` serves that history, and
+  `GET /api/overview` reports when the engine started.
+- Prometheus metrics per listener (`quicgate_listener_received_bytes_total`,
+  `quicgate_listener_sent_bytes_total`, `quicgate_listener_connections_total`,
+  `quicgate_listener_open_connections`), requests by HTTP version
+  (`quicgate_requests_by_protocol_total`) and refusals by reason
+  (`quicgate_blocked_total`).
+
+### Changed
+- The Overview's configuration numbers moved to a Configuration panel below the
+  traffic, and the Listeners panel became the Open ports table.
+
+### Fixed
+- An informational response such as 103 Early Hints was logged as the request's
+  status. The access log now records the final status.
+
 ## [1.10.0] - 2026-09-13
 
 ### Changed

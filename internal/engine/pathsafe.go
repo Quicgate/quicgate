@@ -42,6 +42,7 @@ func hasDotSegment(p string) bool {
 func rejectTraversal(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if hasDotSegment(r.URL.Path) {
+			markBlocked(w, blockExploit)
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}

@@ -1,6 +1,6 @@
 # Feature status
 
-Status as of **v1.9.1**. Every claim in the README and the guides should map to a row here. The
+Status as of **v1.11.0**. Every claim in the README and the guides should map to a row here. The
 columns mean:
 
 - **Tested locally**: covered by the automated test suite (unit and integration tests, real
@@ -67,7 +67,8 @@ columns mean:
 | API tokens | yes | yes | Full administrator credentials: no scopes, no expiry. |
 | Backup and restore | yes | no | Restores every table and the certificate tree as a unit, or changes nothing. Refuses files that are not quicgate backups or would leave no admin able to sign in. Archives are not encrypted. |
 | Declarative import | yes | no | One transaction, idempotent by natural key; never silently removes protection. (The earlier, non-transactional import was used for a live migration.) |
-| Prometheus metrics | yes | no | Needs an API token to scrape. Per-host labels are bounded by configuration. |
+| Prometheus metrics | yes | no | Needs an API token to scrape. Per-host labels are bounded by configuration; per-listener, per-protocol and per-refusal-reason series are bounded too. |
+| Traffic history and Overview charts | yes | no | Sampled every 10 seconds, rolled up to 5 minutes and an hour, kept for a week in `traffic.json`. Bytes are counted on client sockets for HTTP, HTTPS and streams, and from QUIC's own counters for HTTP/3. Countries need a GeoIP database. |
 | JSON access logs and viewer | yes | yes | |
 | Docker label discovery (multi-host) | yes | no | Dormant unless enabled. |
 | Graceful shutdown on SIGTERM | yes, on Linux | yes (v1.9.0 to v1.9.1 upgrade) | Plain HTTP drains for up to 5 s while HTTPS keeps serving, then HTTPS, streams and UPnP mappings close and the access log is flushed. |

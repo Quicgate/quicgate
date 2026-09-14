@@ -73,7 +73,11 @@ func forwardAuth(fa *store.ForwardAuth, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Not authorized: relay the auth response (often a login redirect).
+		// Not authorized: relay the auth response (often a login redirect, which
+		// is not counted as a refusal).
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			markBlocked(w, blockForwardAuth)
+		}
 		for k, vs := range resp.Header {
 			for _, v := range vs {
 				w.Header().Add(k, v)
@@ -166,6 +170,7 @@ func (r *rateLimiter) allow(remoteAddr string) bool {
 func (r *rateLimiter) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if !r.allow(req.RemoteAddr) {
+			markBlocked(w, blockRateLimit)
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
@@ -240,6 +245,7 @@ func unhex(c byte) int {
 func blockExploits(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if exploitBlocked(r) {
+			markBlocked(w, blockExploit)
 			http.Error(w, "request blocked", http.StatusForbidden)
 			return
 		}
@@ -254,6 +260,7 @@ var badBotRe = regexp.MustCompile(`(?i)(ahrefsbot|semrushbot|mj12bot|dotbot|peta
 func blockBadBots(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if badBotRe.MatchString(r.UserAgent()) {
+			markBlocked(w, blockBot)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
