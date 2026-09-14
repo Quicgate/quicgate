@@ -195,6 +195,16 @@ func (c *countedConn) Close() error {
 	return c.Conn.Close()
 }
 
+// CloseWrite half-closes the connection when the socket can. net/http looks for
+// it before closing a connection whose request body it did not read, so the
+// client receives the response instead of a reset.
+func (c *countedConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 // countedListener wraps every connection it accepts in a countedConn.
 type countedListener struct {
 	net.Listener
@@ -219,7 +229,12 @@ const maxTrackedQUIC = 65536
 type quicTracker struct {
 	mu    sync.Mutex
 	port  *portCounters
-	conns map[*quic.Conn][2]uint64 // bytes received and sent at the last drain
+	conns map[*quic.Conn]quicSeen
+}
+
+type quicSeen struct {
+	in, out uint64 // bytes received and sent at the last drain
+	counted bool   // the handshake completed, so this is a client
 }
 
 func (q *quicTracker) track(c *quic.Conn) {
@@ -229,27 +244,43 @@ func (q *quicTracker) track(c *quic.Conn) {
 		return
 	}
 	if q.conns == nil {
-		q.conns = map[*quic.Conn][2]uint64{}
+		q.conns = map[*quic.Conn]quicSeen{}
 	}
-	q.conns[c] = [2]uint64{}
-	q.port.opened()
+	q.conns[c] = quicSeen{}
 }
 
 // drain moves the bytes every tracked connection carried since the last drain
 // into the listener's counters and forgets the connections that have closed.
+// The HTTP/3 server hands over a connection as soon as it has read a
+// ClientHello, before the client proved its address, so a connection only
+// counts once its handshake completed: spoofed handshakes are not clients.
 func (q *quicTracker) drain() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for c, seen := range q.conns {
+		closed := c.Context().Err() != nil
+		if !seen.counted {
+			select {
+			case <-c.HandshakeComplete():
+				seen.counted = true
+				q.port.opened()
+			default:
+				if closed {
+					delete(q.conns, c)
+				}
+				continue
+			}
+		}
 		st := c.ConnectionStats()
-		q.port.in.Add(delta(st.BytesReceived, seen[0]))
-		q.port.out.Add(delta(st.BytesSent, seen[1]))
-		if c.Context().Err() != nil {
+		q.port.in.Add(delta(st.BytesReceived, seen.in))
+		q.port.out.Add(delta(st.BytesSent, seen.out))
+		if closed {
 			delete(q.conns, c)
 			q.port.closed()
 			continue
 		}
-		q.conns[c] = [2]uint64{st.BytesReceived, st.BytesSent}
+		seen.in, seen.out = st.BytesReceived, st.BytesSent
+		q.conns[c] = seen
 	}
 }
 
@@ -259,6 +290,7 @@ func (q *quicTracker) drain() {
 // of every listener; host dimensions count response body bytes.
 type frame struct {
 	Start    int64                     `json:"t"`
+	Secs     int64                     `json:"s,omitempty"` // seconds of traffic the frame holds, which rates divide by
 	In       uint64                    `json:"in,omitempty"`
 	Out      uint64                    `json:"out,omitempty"`
 	Requests uint64                    `json:"rq,omitempty"`
@@ -283,6 +315,7 @@ type dimFrame struct {
 
 // addCounters adds g's totals, not its dimensions, to f.
 func (f *frame) addCounters(g *frame) {
+	f.Secs += g.Secs
 	f.In += g.In
 	f.Out += g.Out
 	f.Requests += g.Requests
@@ -400,10 +433,14 @@ type trafficStats struct {
 	countryMu sync.Mutex
 	countries map[string]uint64 // requests by client country code, "LAN" or "unknown"
 
+	saveMu  sync.Mutex    // one save at a time
+	runDone chan struct{} // closed when the sampler has stopped; nil if it never ran
+
 	mu         sync.Mutex // guards everything below
 	dims       []string   // dimension keys by id
 	dimIDs     map[string]uint32
 	prev       counterSnapshot
+	lastRead   time.Time // when the counters were last read into a frame
 	levels     [3]historyLevel
 	lastSample int64 // unix end of the newest frame
 	lastSave   time.Time
@@ -415,6 +452,7 @@ func newTrafficStats(l *accessLogger, ban *banManager, streams *StreamManager, g
 		ports:     map[string]*portCounters{},
 		countries: map[string]uint64{},
 		dimIDs:    map[string]uint32{},
+		lastRead:  time.Now(),
 	}
 	for i := range t.levels {
 		t.levels[i].step, t.levels[i].cap = historyLevels[i].step, historyLevels[i].frames
@@ -488,6 +526,15 @@ func (t *trafficStats) countCountry(cc string) {
 	}
 }
 
+// start runs the sampler until ctx ends; finish waits for it to stop.
+func (t *trafficStats) start(ctx context.Context) {
+	t.runDone = make(chan struct{})
+	go func() {
+		defer close(t.runDone)
+		t.run(ctx)
+	}()
+}
+
 // run samples on every 10-second boundary of the clock and saves the history
 // every few minutes, until ctx ends.
 func (t *trafficStats) run(ctx context.Context) {
@@ -500,7 +547,7 @@ func (t *trafficStats) run(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		t.sample(next)
+		t.sample(next, next)
 		t.mu.Lock()
 		due := time.Since(t.lastSave) >= trafficSaveInterval
 		t.mu.Unlock()
@@ -512,19 +559,40 @@ func (t *trafficStats) run(ctx context.Context) {
 	}
 }
 
-// sample closes the interval that ends at end: it stores what every counter
-// added since the previous sample as a frame and rolls that frame up.
-func (t *trafficStats) sample(end time.Time) {
+// finish is the shutdown path: it waits for the sampler to stop, records the
+// traffic since its last sample as a partial frame, and saves the history.
+func (t *trafficStats) finish(now time.Time) error {
+	if t.runDone != nil {
+		<-t.runDone
+	}
+	t.sample(now.Truncate(sampleStep*time.Second).Add(sampleStep*time.Second), now)
+	return t.save()
+}
+
+// sample stores what every counter added since the previous sample as the
+// frame of the 10-second interval ending at end, and rolls it up. readAt is
+// when the counters are read, which is end except for the partial frame taken
+// at shutdown; the frame records the seconds it covers, so rates stay right
+// for intervals quicgate was only partly running.
+func (t *trafficStats) sample(end, readAt time.Time) {
 	t.quic.drain()
 	cur := t.read()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.dims)+len(cur.dims) > maxTrafficDims {
+	fresh := 0
+	for k := range cur.dims {
+		if _, known := t.dimIDs[k]; !known {
+			fresh++
+		}
+	}
+	if fresh > 0 && len(t.dims)+fresh > maxTrafficDims {
 		t.compactDims()
 	}
 	f := t.diff(&cur)
 	f.Start = end.Unix() - sampleStep
+	f.Secs = int64(math.Round(min(max(readAt.Sub(t.lastRead).Seconds(), 1), sampleStep)))
 	t.prev = cur
+	t.lastRead = readAt
 	t.lastSample = end.Unix()
 	t.levels[0].push(f)
 	if done := t.levels[1].add(&f); done != nil {
@@ -693,7 +761,7 @@ type TrafficReport struct {
 	Range     string           `json:"range"`
 	Step      int64            `json:"step"`     // seconds per point
 	Start     int64            `json:"start"`    // unix time the first point starts
-	LastSpan  int64            `json:"lastSpan"` // seconds of data in the last point, which may still be filling
+	LastSpan  int64            `json:"lastSpan"` // seconds of traffic in the newest point, which may still be filling
 	Series    TrafficSeries    `json:"series"`
 	Totals    TrafficTotals    `json:"totals"`
 	Ports     []PortTraffic    `json:"ports"`
@@ -706,6 +774,7 @@ type TrafficReport struct {
 
 // TrafficSeries are the chart lines, one value per step.
 type TrafficSeries struct {
+	Secs      gapSeries `json:"secs"` // seconds of traffic each point holds: divide by it for rates
 	In        gapSeries `json:"in"`
 	Out       gapSeries `json:"out"`
 	Requests  gapSeries `json:"requests"`
@@ -832,32 +901,38 @@ func (t *trafficStats) report(rng string, now time.Time, ports []PortTraffic) (T
 	for j := spec.level - 1; j >= 1; j-- {
 		place(t.levels[j].Pending)
 	}
-	lastSpan := min(max(t.lastSample-(end-step), 0), step)
-	span := func(i int64) int64 {
-		if i == n-1 {
-			return lastSpan
+	// Rates divide by the seconds of traffic a point holds, which is less than a
+	// full step for the interval still filling and for one quicgate was only
+	// partly running in.
+	secs := func(i int) int64 {
+		if s := slots[i].Secs; s > 0 {
+			return s
 		}
-		return step
+		return step // a frame from a history that did not record its seconds yet
 	}
 
 	if ports == nil {
 		ports = []PortTraffic{}
 	}
-	rep := TrafficReport{Range: rng, Step: step, Start: start, LastSpan: lastSpan, Ports: ports, Hosts: []HostTraffic{}, Countries: []CountryTraffic{}}
+	rep := TrafficReport{Range: rng, Step: step, Start: start, Ports: ports, Hosts: []HostTraffic{}, Countries: []CountryTraffic{}}
+	if present[n-1] {
+		rep.LastSpan = secs(int(n - 1))
+	}
 	s := &rep.Series
-	for _, sp := range []*gapSeries{&s.In, &s.Out, &s.Requests, &s.Status2xx, &s.Status3xx, &s.Status4xx, &s.Status5xx, &s.Blocked, &s.Open, &s.P50, &s.P95} {
+	for _, sp := range []*gapSeries{&s.Secs, &s.In, &s.Out, &s.Requests, &s.Status2xx, &s.Status3xx, &s.Status4xx, &s.Status5xx, &s.Blocked, &s.Open, &s.P50, &s.P95} {
 		*sp = make(gapSeries, n)
 	}
 	var total frame
 	dimTotals := map[uint32]*dimFrame{}
 	for i := range slots {
 		if !present[i] {
-			for _, sp := range []gapSeries{s.In, s.Out, s.Requests, s.Status2xx, s.Status3xx, s.Status4xx, s.Status5xx, s.Blocked, s.Open, s.P50, s.P95} {
+			for _, sp := range []gapSeries{s.Secs, s.In, s.Out, s.Requests, s.Status2xx, s.Status3xx, s.Status4xx, s.Status5xx, s.Blocked, s.Open, s.P50, s.P95} {
 				sp[i] = -1
 			}
 			continue
 		}
 		f := &slots[i]
+		s.Secs[i] = float64(secs(i))
 		total.addCounters(f)
 		for _, d := range f.Dims {
 			if dt := dimTotals[d.ID]; dt != nil {
@@ -942,7 +1017,7 @@ func (t *trafficStats) report(rng string, now time.Time, ports []PortTraffic) (T
 			continue
 		}
 		g := int64(i) / spec.spark
-		covered[g] += span(int64(i))
+		covered[g] += secs(i)
 		for _, d := range slots[i].Dims {
 			if fn := value[d.ID]; fn != nil {
 				sums[d.ID][g] += float64(fn(d))
@@ -1007,11 +1082,17 @@ type trafficFile struct {
 
 const trafficFileVersion = 1
 
+// maxTrafficFile bounds the history file that load reads: a week of frames for
+// a large configuration is a few megabytes.
+const maxTrafficFile = 64 << 20
+
 // save writes the history next to the database, atomically.
 func (t *trafficStats) save() error {
 	if t.path == "" {
 		return nil
 	}
+	t.saveMu.Lock()
+	defer t.saveMu.Unlock()
 	t.mu.Lock()
 	data, err := json.Marshal(trafficFile{Version: trafficFileVersion, Dims: t.dims, Levels: t.levels, LastSample: t.lastSample})
 	t.lastSave = time.Now()
@@ -1029,6 +1110,10 @@ func (t *trafficStats) save() error {
 // load restores a saved history. A missing file starts empty; a damaged one,
 // or one from another format version, is logged and ignored.
 func (t *trafficStats) load() {
+	if fi, err := os.Stat(t.path); err == nil && fi.Size() > maxTrafficFile {
+		log.Printf("traffic: ignoring the saved history in %s (%d bytes, more than a history can be)", t.path, fi.Size())
+		return
+	}
 	data, err := os.ReadFile(t.path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -1037,7 +1122,7 @@ func (t *trafficStats) load() {
 		return
 	}
 	var tf trafficFile
-	if err := json.Unmarshal(data, &tf); err != nil || tf.Version != trafficFileVersion {
+	if err := json.Unmarshal(data, &tf); err != nil || tf.Version != trafficFileVersion || len(tf.Dims) > maxTrafficDims {
 		log.Printf("traffic: ignoring the saved history in %s (damaged or from another version)", t.path)
 		return
 	}

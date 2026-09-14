@@ -328,7 +328,13 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 			if c.ban != nil {
 				c.ban.recordFailure(r.RemoteAddr)
 			}
-			markBlocked(w, blockAccessList)
+			// The first 401 a client without credentials gets is a login prompt
+			// (git and Docker always ask that way), not a refusal, as long as
+			// credentials could still admit it.
+			challenge := r.Header.Get("Authorization") == "" && (ipOK || (c.satisfy == "any" && c.restricted))
+			if !challenge || len(c.users) == 0 {
+				markBlocked(w, blockAccessList)
+			}
 			if len(c.users) > 0 && !authOK {
 				w.Header().Set("WWW-Authenticate", `Basic realm="`+c.name+`"`)
 				http.Error(w, "authentication required", http.StatusUnauthorized)

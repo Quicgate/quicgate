@@ -1198,7 +1198,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 	}()
 
-	go e.traffic.run(ctx)
+	e.traffic.start(ctx)
 
 	httpHandler := e.acme.HTTPChallengeHandler(e.wrapRealIP(e.ban.wrap(e.accessLog.wrap(e.serveHTTP))))
 	httpSrv := newPublicServer(e.cfg.HTTPAddr, httpHandler, nil)
@@ -1256,7 +1256,7 @@ func (e *Engine) Run(ctx context.Context) error {
 			e.upnp.Close()
 		}
 		_ = e.accessLog.Close()
-		if err := e.traffic.save(); err != nil {
+		if err := e.traffic.finish(time.Now()); err != nil {
 			log.Printf("engine: save traffic history: %v", err)
 		}
 		log.Printf("engine: shutdown complete")

@@ -33,6 +33,9 @@ func newTestTraffic(t *testing.T, dataDir string) (*trafficStats, *accessLogger)
 	return newTrafficStats(l, nil, nil, nil, dataDir), l
 }
 
+// at is a regular sample's arguments: the counters are read at the interval end.
+func at(end time.Time) (time.Time, time.Time) { return end, end }
+
 func waitUntil(t *testing.T, cond func() bool, what string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -135,10 +138,17 @@ func TestRefusedRequestsAreCountedByReason(t *testing.T) {
 	// missing provider. Both fail closed.
 	missing := int64(999)
 	closed := store.Host{Type: "proxy", Domains: []string{"closed.test"}, Upstream: up, CertMode: "none", Enabled: true}
-	closed.Options.AuthRules = []store.AuthRule{{Path: "/admin/", Mode: "accessList", AccessListID: &missing}}
+	closed.Options.AuthRules = []store.AuthRule{
+		{Path: "/admin/", Mode: "accessList", AccessListID: &missing},
+		{Path: "/sso/", Mode: "oidc"},
+		{Path: "/fwd/", Mode: "forwardAuth"},
+	}
 	sso := store.Host{Type: "proxy", Domains: []string{"sso.test"}, Upstream: up, CertMode: "none", Enabled: true}
 	sso.Options.OIDC = &store.OIDCAuth{ProviderID: missing}
 	e.SetDockerRoutes([]store.Host{closed, sso}, nil)
+	vault := mustCreateACL(t, st, &store.AccessList{Name: "vault", Satisfy: "all", Users: []store.AccessUser{{Username: "family", Password: "right"}}})
+	mustCreateHost(t, st, &store.Host{Type: "proxy", Domains: []string{"vault.test"}, Upstream: up, AccessListID: &vault})
+	reload(t, e)
 
 	serve := e.ban.wrap(e.accessLog.wrap(e.serveHTTPS))
 	do := func(method, host, path, ip string, hdr map[string]string) int {
@@ -162,7 +172,14 @@ func TestRefusedRequestsAreCountedByReason(t *testing.T) {
 		{"GET", "acl.test", "/", nil, http.StatusForbidden},
 		{"OPTIONS", "acl.test", "/", map[string]string{"Origin": "https://app.test", "Access-Control-Request-Method": "POST"}, http.StatusForbidden},
 		{"GET", "closed.test", "/admin/users", nil, http.StatusForbidden},
+		{"GET", "closed.test", "/sso/home", nil, http.StatusForbidden},
+		{"GET", "closed.test", "/fwd/home", nil, http.StatusForbidden},
 		{"GET", "sso.test", "/", nil, http.StatusForbidden},
+		// The login prompt a client without credentials gets is not a refusal;
+		// wrong credentials are.
+		{"GET", "vault.test", "/", nil, http.StatusUnauthorized},
+		{"GET", "vault.test", "/", map[string]string{"Authorization": basic("family", "wrong")}, http.StatusUnauthorized},
+		{"GET", "vault.test", "/", map[string]string{"Authorization": basic("family", "right")}, http.StatusOK},
 		{"GET", "exploit.test", "/?q=union%20select%201", nil, http.StatusForbidden},
 		{"GET", "open.test", "/a/../b", nil, http.StatusBadRequest},
 		{"GET", "bots.test", "/", map[string]string{"User-Agent": "sqlmap/1.7"}, http.StatusForbidden},
@@ -183,26 +200,26 @@ func TestRefusedRequestsAreCountedByReason(t *testing.T) {
 	}
 
 	now := time.Now()
-	e.traffic.sample(now.Truncate(sampleStep * time.Second))
+	e.traffic.sample(at(now.Truncate(sampleStep * time.Second)))
 	rep, err := e.traffic.report("1h", now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]uint64{"accessList": 3, "sso": 1, "exploit": 2, "bot": 1, "rateLimit": 1, "forwardAuth": 1, "banned": 1}
+	want := map[string]uint64{"accessList": 4, "sso": 2, "exploit": 2, "bot": 1, "rateLimit": 1, "forwardAuth": 2, "banned": 1}
 	for i := blockNone + 1; i < numBlockReasons; i++ {
 		name := blockReasonNames[i]
 		if got := rep.Totals.Blocked[name]; got != want[name] {
 			t.Errorf("blocked %s = %d, want %d (all: %v)", name, got, want[name], rep.Totals.Blocked)
 		}
 	}
-	if rep.Totals.Requests != 13 {
-		t.Errorf("requests = %d, want 13 (the banned one never reaches the log)", rep.Totals.Requests)
+	if rep.Totals.Requests != 18 {
+		t.Errorf("requests = %d, want 18 (the banned one never reaches the log)", rep.Totals.Requests)
 	}
 	if rep.Banned != 1 {
 		t.Errorf("banned now = %d, want 1", rep.Banned)
 	}
 	metrics := e.MetricsText()
-	for _, line := range []string{`quicgate_blocked_total{reason="exploit"} 2`, `quicgate_blocked_total{reason="banned"} 1`, `quicgate_requests_by_protocol_total{protocol="HTTP/1.1"} 13`} {
+	for _, line := range []string{`quicgate_blocked_total{reason="exploit"} 2`, `quicgate_blocked_total{reason="banned"} 1`, `quicgate_requests_by_protocol_total{protocol="HTTP/1.1"} 18`} {
 		if !strings.Contains(metrics, line) {
 			t.Errorf("metrics lack %q", line)
 		}
@@ -238,7 +255,7 @@ func TestTrafficHistoryRollsUpAcrossResolutions(t *testing.T) {
 		l.status2xx.Add(2)
 		port.in.Add(100)
 		port.out.Add(1000)
-		ts.sample(hourBoundary.Add(time.Duration(i*sampleStep) * time.Second))
+		ts.sample(at(hourBoundary.Add(time.Duration(i*sampleStep) * time.Second)))
 	}
 	now := hourBoundary.Add(353 * time.Second)
 	ports := func() []PortTraffic { return []PortTraffic{{Key: "tcp:443"}} }
@@ -309,7 +326,7 @@ func TestTrafficReportShowsDowntimeAsGaps(t *testing.T) {
 	port := ts.port("tcp:80")
 	for _, i := range []int{1, 2, 3, 7, 8} {
 		port.out.Add(10)
-		ts.sample(hourBoundary.Add(time.Duration(i*sampleStep) * time.Second))
+		ts.sample(at(hourBoundary.Add(time.Duration(i*sampleStep) * time.Second)))
 	}
 	rep, err := ts.report("1h", hourBoundary.Add(80*time.Second), nil)
 	if err != nil {
@@ -393,7 +410,7 @@ func TestTrafficHistorySurvivesRestart(t *testing.T) {
 	hc.bytes.Add(700)
 	l.perHost.Store("app.example", hc)
 	first.port("udp:443").out.Add(4096)
-	first.sample(hourBoundary.Add(sampleStep * time.Second))
+	first.sample(at(hourBoundary.Add(sampleStep * time.Second)))
 	if err := first.save(); err != nil {
 		t.Fatal(err)
 	}
@@ -529,6 +546,16 @@ func TestStreamTrafficIsCounted(t *testing.T) {
 	}
 	defer ru.Close()
 	waitUntil(t, func() bool { _, _ = ru.Write([]byte("hi")); return sm.refused.Load() >= 2 }, "the filtered UDP packet to be counted as refused")
+	// A refused sender counts once, however many packets it sends.
+	filtered := ts.port(fmt.Sprintf("udp:%d", filteredUDPPort))
+	before := filtered.in.Load()
+	for i := 0; i < 5; i++ {
+		_, _ = ru.Write([]byte("hi"))
+	}
+	waitUntil(t, func() bool { return filtered.in.Load() >= before+10 }, "the later packets to arrive")
+	if n := sm.refused.Load(); n != 2 {
+		t.Fatalf("refusals = %d after more packets from the same refused sender, want 2", n)
+	}
 
 	// Stopping the listeners closes their sessions.
 	sm.StopAll()
@@ -644,11 +671,11 @@ func TestTrafficDimensionTableStaysBounded(t *testing.T) {
 	}
 	host("a.test", 1)
 	host("b.test", 2)
-	ts.sample(hourBoundary.Add(10 * time.Second))
+	ts.sample(at(hourBoundary.Add(10 * time.Second)))
 	host("c.test", 3)
 	host("d.test", 4)
 	host("e.test", 5)
-	ts.sample(hourBoundary.Add(20 * time.Second))
+	ts.sample(at(hourBoundary.Add(20 * time.Second)))
 	rep, err := ts.report("1h", hourBoundary.Add(20*time.Second), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -726,5 +753,166 @@ func TestTrafficPortTableDescribesListeners(t *testing.T) {
 	check(fmt.Sprintf("tcp:%d", busyPort), "TCP stream", "failed", false)
 	if p := byKey[fmt.Sprintf("tcp:%d", free)]; p.Detail != "to 192.0.2.10:25" || p.StreamID != 4 {
 		t.Fatalf("stream row: %+v", p)
+	}
+}
+
+// A counted connection half-closes like the socket it wraps. net/http relies on
+// that to deliver a response before closing a connection whose request body it
+// did not read.
+func TestCountedConnHalfCloses(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := countedListener{Listener: ln, c: &portCounters{}}
+	defer cl.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if c, err := cl.Accept(); err == nil {
+			accepted <- c
+		}
+	}()
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	server := <-accepted
+	defer server.Close()
+	cw, ok := server.(interface{ CloseWrite() error })
+	if !ok {
+		t.Fatal("a counted connection cannot half-close")
+	}
+	if err := cw.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if n, err := client.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+		t.Fatalf("client read after the half-close: %d bytes, %v; want EOF", n, err)
+	}
+	if _, err := client.Write([]byte("still here")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 10)
+	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(server, buf); err != nil || string(buf) != "still here" {
+		t.Fatalf("server read after its half-close: %q, %v", buf, err)
+	}
+}
+
+// freeTCPRange finds n consecutive ports free on every interface.
+func freeTCPRange(t *testing.T, n int) int {
+	t.Helper()
+	for attempt := 0; attempt < 50; attempt++ {
+		first := 20000 + int(time.Now().UnixNano()%20000)
+		ok := true
+		var held []net.Listener
+		for p := first; p < first+n; p++ {
+			ln, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
+			if err != nil {
+				ok = false
+				break
+			}
+			held = append(held, ln)
+		}
+		for _, ln := range held {
+			_ = ln.Close()
+		}
+		if ok {
+			return first
+		}
+	}
+	t.Fatal("no free port range")
+	return 0
+}
+
+// Moving a range's first port restarts the ports whose target and traffic
+// counters depend on it, instead of leaving them on the old offsets.
+func TestRangeStreamEditRestartsShiftedPorts(t *testing.T) {
+	base := freeTCPRange(t, 3)
+	sm := NewStreamManager()
+	t.Cleanup(sm.StopAll)
+	stream := func(from int) []store.Stream {
+		return []store.Stream{{ID: 1, ListenPort: from, ListenPortEnd: base + 2, Protocol: "tcp", ForwardHost: "127.0.0.1", ForwardPort: 7000, Enabled: true}}
+	}
+	key := fmt.Sprintf("tcp:%d", base+1)
+	target := func() string {
+		sm.mu.Lock()
+		defer sm.mu.Unlock()
+		if f := sm.active[key]; f != nil {
+			return f.target
+		}
+		return ""
+	}
+	sm.Sync(stream(base), nil, nil)
+	if got := target(); got != "127.0.0.1:7001" {
+		t.Fatalf("port %d forwards to %q, want 127.0.0.1:7001", base+1, got)
+	}
+	sm.Sync(stream(base+1), nil, nil)
+	if got := target(); got != "127.0.0.1:7000" {
+		t.Fatalf("after moving the range start, port %d forwards to %q, want 127.0.0.1:7000", base+1, got)
+	}
+}
+
+// Rates divide by the seconds of traffic a point holds, so a point quicgate
+// was only partly running in, or the partial interval saved at shutdown and
+// continued after a restart, does not read as a drop.
+func TestTrafficRatesUseCoveredSeconds(t *testing.T) {
+	dir := t.TempDir()
+	first, _ := newTestTraffic(t, dir)
+	port := first.port("tcp:443")
+	first.lastRead = hourBoundary.Add(6 * time.Second) // started 4 seconds before the first boundary
+	port.out.Add(400)
+	first.sample(at(hourBoundary.Add(10 * time.Second)))
+	port.out.Add(1000)
+	first.sample(at(hourBoundary.Add(20 * time.Second)))
+	port.out.Add(300)
+	if err := first.finish(hourBoundary.Add(23 * time.Second)); err != nil { // stopped 3 seconds into the next one
+		t.Fatal(err)
+	}
+	rep, err := first.report("1h", hourBoundary.Add(31*time.Second), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := len(rep.Series.Out)
+	if got, want := rep.Series.Secs[n-3:], (gapSeries{4, 10, 3}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("seconds per point %v, want %v", got, want)
+	}
+
+	// Restarted 2 seconds later, in the same interval: the new frame joins the
+	// partial one.
+	second, _ := newTestTraffic(t, dir)
+	second.lastRead = hourBoundary.Add(25 * time.Second)
+	second.port("tcp:443").out.Add(700)
+	second.sample(at(hourBoundary.Add(30 * time.Second)))
+	rep, err = second.report("1h", hourBoundary.Add(31*time.Second), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n = len(rep.Series.Out)
+	if rep.Series.Secs[n-1] != 8 || rep.Series.Out[n-1] != 1000 || rep.LastSpan != 8 {
+		t.Fatalf("after the restart the newest point holds %v bytes over %v seconds (last span %d), want 1000 over 8", rep.Series.Out[n-1], rep.Series.Secs[n-1], rep.LastSpan)
+	}
+	day, err := second.report("24h", hourBoundary.Add(31*time.Second), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if day.LastSpan != 22 || day.Totals.Out != 2400 {
+		t.Fatalf("24h: last span %d, out %d; want 22 and 2400", day.LastSpan, day.Totals.Out)
+	}
+}
+
+// A history whose dimension table is larger than the engine keeps is refused.
+func TestTrafficHistoryRejectsAnOversizedDimensionTable(t *testing.T) {
+	defer func(n int) { maxTrafficDims = n }(maxTrafficDims)
+	maxTrafficDims = 2
+	dir := t.TempDir()
+	doc := `{"version":1,"dims":["host:a","host:b","host:c"],"levels":[{"frames":[{"t":1800000000,"s":10,"out":5,"d":[{"i":2,"out":5}]}]},{},{}],"lastSample":1800000010}`
+	if err := os.WriteFile(filepath.Join(dir, "traffic.json"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ts, _ := newTestTraffic(t, dir)
+	if len(ts.dims) != 0 || len(ts.levels[0].Frames) != 0 {
+		t.Fatalf("loaded %d dims and %d frames from an oversized table", len(ts.dims), len(ts.levels[0].Frames))
 	}
 }

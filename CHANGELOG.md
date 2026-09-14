@@ -4,6 +4,29 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.11.1] - 2026-09-14
+
+### Fixed
+- Plain HTTP connections half-close again before closing a connection whose
+  request body was not read (for example a refused upload), so the client
+  receives the response instead of a reset. v1.11.0's byte counting had hidden
+  that from the HTTP server.
+- Traffic rates divide by the seconds of traffic a point actually holds, so the
+  point spanning a restart, and the partial interval saved at shutdown, no
+  longer read as a drop. Shutdown now records the traffic since the last
+  sample.
+- The login prompt a client without credentials gets from a basic-auth access
+  list is no longer counted as blocked; wrong credentials still are.
+- A refused UDP sender counts once a minute instead of once per packet.
+- Paths closed because their single sign-on or forward auth is not configured
+  are counted under that reason instead of access lists.
+- HTTP/3 connections count only once their handshake completes, so spoofed
+  handshakes do not inflate the connection numbers.
+- Moving the start of a stream port range restarts the ports it shifts. Before,
+  those ports kept forwarding to their old target port until a restart.
+- A saved traffic history larger than the engine keeps is ignored instead of
+  loaded.
+
 ## [1.11.0] - 2026-09-14
 
 ### Added
