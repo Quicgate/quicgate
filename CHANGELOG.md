@@ -4,6 +4,16 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.12.1] - 2026-09-15
+
+### Fixed
+- Browser password managers no longer fill the saved admin login into the
+  Logs and Proxy hosts search boxes, or into other settings fields. The search
+  boxes sit in forms of their own, the two-factor password fields in forms
+  that name the account, and a basic-auth user's password in an access list
+  counts as a new password for someone else, so the admin login is not
+  offered there either.
+
 ## [1.12.0] - 2026-09-15
 
 ### Added
