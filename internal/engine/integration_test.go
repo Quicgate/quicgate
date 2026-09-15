@@ -36,7 +36,7 @@ func newTestEngine(t *testing.T) (*Engine, *store.Store) {
 	e := New(Config{DisableTLS: true, DataDir: dir}, st)
 	// Close the access log before the temp dir is removed (Windows will not
 	// delete an open file).
-	t.Cleanup(func() { _ = e.accessLog.Close() })
+	t.Cleanup(func() { _ = e.accessLog.Close(); _ = e.ban.closePersist() })
 	return e, st
 }
 

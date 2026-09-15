@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"encoding/json"
 	"log"
+	"os"
 	"net"
 	"net/http"
 	"sort"
@@ -25,6 +27,134 @@ type banManager struct {
 	config   func() banConfig
 	notify   func(string)
 	refused  atomic.Uint64 // requests turned away because their client is banned
+
+	// Persistence: the bans are saved to path after every change, so a restart
+	// or an upgrade does not lift them. Empty path keeps them in memory only.
+	path      string
+	persistMu sync.Mutex // guards saveCh against a send after close
+	saveCh    chan struct{}
+	saverDone chan struct{}
+}
+
+// banFile is the bans as saved on disk.
+type banFile struct {
+	Version int        `json:"version"`
+	Bans    []savedBan `json:"bans"`
+}
+
+type savedBan struct {
+	IP       string    `json:"ip"`
+	Since    time.Time `json:"since"`
+	Until    time.Time `json:"until"`
+	Failures int       `json:"failures"`
+	Host     string    `json:"host"`
+	Reason   string    `json:"reason"`
+}
+
+// maxBanFile bounds the ban file that load reads.
+const maxBanFile = 16 << 20
+
+// persistTo keeps the bans in path: it loads the ones saved there that have
+// not expired yet, and saves after every ban or unban from now on.
+func (b *banManager) persistTo(path string) {
+	b.path = path
+	b.load()
+	ch, done := make(chan struct{}, 1), make(chan struct{})
+	b.saveCh, b.saverDone = ch, done
+	go func() {
+		defer close(done)
+		// The goroutine keeps its own reference: closePersist clears the field.
+		for range ch {
+			if err := b.save(); err != nil {
+				log.Printf("ban: cannot save the bans: %v", err)
+			}
+		}
+	}()
+}
+
+// changed asks the saver to write the bans. Many changes close together make
+// one write. b.mu may be held.
+func (b *banManager) changed() {
+	b.persistMu.Lock()
+	defer b.persistMu.Unlock()
+	if b.saveCh == nil {
+		return
+	}
+	select {
+	case b.saveCh <- struct{}{}:
+	default: // a save is already due and will include this change
+	}
+}
+
+// closePersist stops the saver and writes the bans one last time.
+func (b *banManager) closePersist() error {
+	b.persistMu.Lock()
+	ch := b.saveCh
+	b.saveCh = nil
+	b.persistMu.Unlock()
+	if ch == nil {
+		return nil
+	}
+	close(ch)
+	<-b.saverDone
+	return b.save()
+}
+
+// save writes the bans that are still in force, atomically.
+func (b *banManager) save() error {
+	now := time.Now()
+	doc := banFile{Version: 1, Bans: []savedBan{}}
+	b.mu.Lock()
+	for ip, ban := range b.banned {
+		if now.Before(ban.until) {
+			doc.Bans = append(doc.Bans, savedBan{IP: ip, Since: ban.since, Until: ban.until, Failures: ban.failures, Host: ban.host, Reason: ban.reason})
+		}
+	}
+	b.mu.Unlock()
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	tmp := b.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, b.path)
+}
+
+// load restores saved bans that have not expired. A missing file is no bans; a
+// damaged one is logged and ignored, and entries that do not hold an address
+// are skipped.
+func (b *banManager) load() {
+	if fi, err := os.Stat(b.path); err != nil || fi.Size() > maxBanFile {
+		if err == nil {
+			log.Printf("ban: ignoring %s (%d bytes, more than a ban list can be)", b.path, fi.Size())
+		}
+		return
+	}
+	data, err := os.ReadFile(b.path)
+	if err != nil {
+		log.Printf("ban: cannot read the saved bans: %v", err)
+		return
+	}
+	var doc banFile
+	if err := json.Unmarshal(data, &doc); err != nil || doc.Version != 1 {
+		log.Printf("ban: ignoring the saved bans in %s (damaged or from another version)", b.path)
+		return
+	}
+	now := time.Now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, s := range doc.Bans {
+		ip := net.ParseIP(s.IP)
+		if ip == nil || !now.Before(s.Until) || len(b.banned) >= banMaxTracked {
+			continue
+		}
+		b.banned[ip.String()] = banEntry{since: s.Since, until: s.Until, failures: s.Failures, host: truncate(s.Host, 253), reason: truncate(s.Reason, 300)}
+	}
+	if n := len(b.banned); n > 0 {
+		log.Printf("ban: %d bans restored from %s", n, b.path)
+	}
 }
 
 // failureTrail is an address's recent refusals, and the last one's details.
@@ -150,6 +280,7 @@ func (b *banManager) recordFailure(remoteAddr, host, reason string) {
 		}
 		b.banned[ip] = banEntry{since: now, until: now.Add(cfg.banFor), failures: len(trail.times), host: trail.host, reason: trail.reason}
 		delete(b.failures, ip)
+		b.changed()
 		log.Printf("ban: %s banned for %s (%d failures)", ip, cfg.banFor, cfg.threshold)
 		if b.notify != nil {
 			// The webhook can be slow or unreachable, and every request takes
@@ -237,6 +368,9 @@ func (b *banManager) unban(ip string) bool {
 	_, ok := b.banned[ip]
 	delete(b.banned, ip)
 	delete(b.failures, ip)
+	if ok {
+		b.changed()
+	}
 	return ok
 }
 

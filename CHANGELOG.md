@@ -4,6 +4,14 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.13.0] - 2026-09-15
+
+### Changed
+- Bans survive a restart or an upgrade. Auto-ban saves its bans to `bans.json`
+  in the data directory whenever a ban starts or is lifted, and at shutdown,
+  and restores them at startup, leaving out the ones that expired in the
+  meantime. Before, every restart lifted all bans.
+
 ## [1.12.1] - 2026-09-15
 
 ### Fixed
