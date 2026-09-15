@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,11 +20,37 @@ var banMaxTracked = 65536
 
 type banManager struct {
 	mu       sync.Mutex
-	failures map[string][]time.Time
-	banned   map[string]time.Time // ip -> unban time
+	failures map[string]*failureTrail
+	banned   map[string]banEntry // by client address
 	config   func() banConfig
 	notify   func(string)
 	refused  atomic.Uint64 // requests turned away because their client is banned
+}
+
+// failureTrail is an address's recent refusals, and the last one's details.
+type failureTrail struct {
+	times  []time.Time
+	host   string
+	reason string
+}
+
+// banEntry is one banned address: when and why it was banned.
+type banEntry struct {
+	since, until time.Time
+	failures     int
+	host         string // the host the last refused request asked for
+	reason       string // why that request was refused
+}
+
+// BanInfo describes a banned address for the admin API.
+type BanInfo struct {
+	IP       string    `json:"ip"`
+	Country  string    `json:"country,omitempty"` // with a GeoIP database: ISO code, "LAN" or "unknown"
+	Since    time.Time `json:"since"`
+	Until    time.Time `json:"until"`
+	Failures int       `json:"failures"` // refusals within the window that led to the ban
+	Host     string    `json:"host"`
+	Reason   string    `json:"reason"`
 }
 
 type banConfig struct {
@@ -35,8 +62,8 @@ type banConfig struct {
 
 func newBanManager(config func() banConfig, notify func(string)) *banManager {
 	b := &banManager{
-		failures: map[string][]time.Time{},
-		banned:   map[string]time.Time{},
+		failures: map[string]*failureTrail{},
+		banned:   map[string]banEntry{},
 		config:   config,
 		notify:   notify,
 	}
@@ -49,13 +76,13 @@ func (b *banManager) gc() {
 		time.Sleep(5 * time.Minute)
 		now := time.Now()
 		b.mu.Lock()
-		for ip, until := range b.banned {
-			if now.After(until) {
+		for ip, ban := range b.banned {
+			if now.After(ban.until) {
 				delete(b.banned, ip)
 			}
 		}
-		for ip, times := range b.failures {
-			if len(times) == 0 || now.Sub(times[len(times)-1]) > time.Hour {
+		for ip, trail := range b.failures {
+			if len(trail.times) == 0 || now.Sub(trail.times[len(trail.times)-1]) > time.Hour {
 				delete(b.failures, ip)
 			}
 		}
@@ -79,20 +106,20 @@ func (b *banManager) blocked(remoteAddr string) bool {
 	ip := clientIP(remoteAddr)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	until, ok := b.banned[ip]
+	ban, ok := b.banned[ip]
 	if !ok {
 		return false
 	}
-	if time.Now().After(until) {
+	if time.Now().After(ban.until) {
 		delete(b.banned, ip)
 		return false
 	}
 	return true
 }
 
-// recordFailure notes one auth failure and bans the IP once the threshold is
-// reached within the window.
-func (b *banManager) recordFailure(remoteAddr string) {
+// recordFailure notes one refused request for host, and why it was refused,
+// and bans the address once the threshold is reached within the window.
+func (b *banManager) recordFailure(remoteAddr, host, reason string) {
 	cfg := b.config()
 	if !cfg.enabled {
 		return
@@ -102,22 +129,26 @@ func (b *banManager) recordFailure(remoteAddr string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	cutoff := now.Add(-cfg.window)
-	kept := b.failures[ip][:0]
-	for _, t := range b.failures[ip] {
+	trail := b.failures[ip]
+	if trail == nil {
+		evictOne(b.failures, banMaxTracked)
+		trail = &failureTrail{}
+		b.failures[ip] = trail
+	}
+	kept := trail.times[:0]
+	for _, t := range trail.times {
 		if t.After(cutoff) {
 			kept = append(kept, t)
 		}
 	}
-	kept = append(kept, now)
-	if _, tracked := b.failures[ip]; !tracked {
-		evictOne(b.failures, banMaxTracked)
-	}
-	b.failures[ip] = kept
-	if len(kept) >= cfg.threshold {
+	trail.times = append(kept, now)
+	// The host comes from the request, so it is capped like any client input.
+	trail.host, trail.reason = truncate(host, 253), reason
+	if len(trail.times) >= cfg.threshold {
 		if _, known := b.banned[ip]; !known {
 			evictOne(b.banned, banMaxTracked)
 		}
-		b.banned[ip] = now.Add(cfg.banFor)
+		b.banned[ip] = banEntry{since: now, until: now.Add(cfg.banFor), failures: len(trail.times), host: trail.host, reason: trail.reason}
 		delete(b.failures, ip)
 		log.Printf("ban: %s banned for %s (%d failures)", ip, cfg.banFor, cfg.threshold)
 		if b.notify != nil {
@@ -161,12 +192,73 @@ func (b *banManager) bannedCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	n := 0
-	for _, until := range b.banned {
-		if now.Before(until) {
+	for _, ban := range b.banned {
+		if now.Before(ban.until) {
 			n++
 		}
 	}
 	return n
+}
+
+// list returns the addresses banned now, most recent first. country names an
+// address's country, or is nil to leave it out.
+func (b *banManager) list(country func(ip string) string) []BanInfo {
+	out := []BanInfo{}
+	if !b.config().enabled {
+		return out
+	}
+	now := time.Now()
+	b.mu.Lock()
+	for ip, ban := range b.banned {
+		if now.Before(ban.until) {
+			out = append(out, BanInfo{IP: ip, Since: ban.since, Until: ban.until, Failures: ban.failures, Host: ban.host, Reason: ban.reason})
+		}
+	}
+	b.mu.Unlock()
+	if country != nil {
+		for i := range out {
+			out[i].Country = country(out[i].IP)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Since.Equal(out[j].Since) {
+			return out[i].Since.After(out[j].Since)
+		}
+		return out[i].IP < out[j].IP
+	})
+	return out
+}
+
+// unban lifts a ban and forgets the address's recent refusals. It reports
+// whether the address was banned.
+func (b *banManager) unban(ip string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.banned[ip]
+	delete(b.banned, ip)
+	delete(b.failures, ip)
+	return ok
+}
+
+// Bans lists the addresses banned now, most recent first, with their country
+// when a GeoIP database is loaded.
+func (e *Engine) Bans() []BanInfo {
+	var country func(string) string
+	if e.geo.loaded() {
+		country = func(ip string) string { return clientCountry(ip, e.geo.country) }
+	}
+	return e.ban.list(country)
+}
+
+// Unban lifts the ban on an address. It reports whether the address was
+// banned.
+func (e *Engine) Unban(ip string) bool { return e.ban.unban(ip) }
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 // wrap rejects banned IPs before any routing happens.

@@ -298,6 +298,22 @@ func isCORSPreflight(r *http.Request) bool {
 	return r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != ""
 }
 
+// refusalReason says why the list refused r, as the auto-ban list shows it.
+func (c *compiledAccess) refusalReason(r *http.Request, ipOK, authOK bool) string {
+	creds := "no credentials"
+	if r.Header.Get("Authorization") != "" {
+		creds = "wrong credentials"
+	}
+	switch {
+	case len(c.users) == 0 || authOK:
+		return fmt.Sprintf("address not allowed by access list %q", c.name)
+	case ipOK:
+		return fmt.Sprintf("%s for access list %q", creds, c.name)
+	default:
+		return fmt.Sprintf("address not allowed and %s for access list %q", creds, c.name)
+	}
+}
+
 // wrap gates next behind the access list, mirroring NPM's satisfy semantics.
 func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -312,7 +328,7 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 				return
 			}
 			if c.ban != nil {
-				c.ban.recordFailure(r.RemoteAddr)
+				c.ban.recordFailure(r.RemoteAddr, routeName(r.Host), fmt.Sprintf("CORS preflight from an address access list %q does not allow", c.name))
 			}
 			markBlocked(w, blockAccessList)
 			http.Error(w, "forbidden", http.StatusForbidden)
@@ -326,7 +342,7 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 		}
 		if !allowed {
 			if c.ban != nil {
-				c.ban.recordFailure(r.RemoteAddr)
+				c.ban.recordFailure(r.RemoteAddr, routeName(r.Host), c.refusalReason(r, ipOK, authOK))
 			}
 			// The first 401 a client without credentials gets is a login prompt
 			// (git and Docker always ask that way), not a refusal, as long as

@@ -4,6 +4,17 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.12.0] - 2026-09-15
+
+### Added
+- **See who is banned and why.** Access control lists every address auto-ban
+  is turning away: its country, the reason (address not allowed, no
+  credentials or wrong credentials for which access list), the host it asked
+  for, how many refusals led to the ban, when it started and when it lifts,
+  with a button to lift a ban by hand. The Overview's Blocked tile and panel
+  link there.
+- `GET /api/bans` and `DELETE /api/bans/{ip}`.
+
 ## [1.11.1] - 2026-09-14
 
 ### Fixed
