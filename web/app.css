@@ -520,3 +520,6 @@ html[data-skin="brass"][data-theme="light"] {
 .kpi--link:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 2px; }
 .bans .table th { background: var(--c-bg-2); }
 .bans__why { min-width: 260px; }
+
+/* search boxes live in forms of their own for the password manager; the form takes no space */
+.searchform { display: contents; }

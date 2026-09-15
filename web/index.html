@@ -174,7 +174,7 @@
         <div class="pagehead__actions"><button id="btn-add" class="btn btn--primary">Add host</button></div>
       </div>
       <div class="card card--flush">
-        <div class="toolbar"><input id="host-search" class="search" type="search" placeholder="Filter by domain, upstream or access list"></div>
+        <div class="toolbar"><form class="searchform" role="search" autocomplete="off"><input id="host-search" name="host-filter" class="search" type="search" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore placeholder="Filter by domain, upstream or access list"></form></div>
         <table class="table" id="hosts-table">
           <thead><tr>
             <th>Domains</th><th>Upstream</th><th>TLS</th><th>Access</th><th>Certificate</th><th>Enabled</th><th></th>
@@ -253,7 +253,7 @@
       <div class="card" id="docker-settings-card" style="margin-top:var(--sp-5)" hidden>
         <div class="sectionhead sectionhead--plain"><h2>Settings</h2></div>
         <div class="field-row">
-          <label class="field"><span>Default domain <em class="hs-muted">(optional; a container without quicgate.host becomes name.default-domain)</em></span><input id="dk-domain" placeholder="apps.example.com"></label>
+          <label class="field"><span>Default domain <em class="hs-muted">(optional; a container without quicgate.host becomes name.default-domain)</em></span><input id="dk-domain" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore placeholder="apps.example.com"></label>
           <button id="dk-domain-save" class="btn btn--primary" style="align-self:flex-end">Save</button>
         </div>
         <label class="field" style="margin-top:var(--sp-4)"><span>Docker hosts <em class="hs-muted">(JSON list; restart to apply)</em></span>
@@ -310,7 +310,7 @@
       <div class="card card--flush logview">
         <div class="toolbar">
           <select id="logs-scope" class="toolbar__scope" aria-label="Log scope"></select>
-          <input id="logs-filter" class="search" type="search" placeholder="Search client, host, path or status">
+          <form class="searchform" role="search" autocomplete="off"><input id="logs-filter" name="log-filter" class="search" type="search" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore placeholder="Search client, host, path or status"></form>
           <div class="segmented" id="logs-status" role="group" aria-label="Status">
             <button type="button" class="is-active" data-status="">All</button>
             <button type="button" data-status="2">2xx</button>
@@ -371,7 +371,8 @@
                 <div class="frow__label"><span class="frow__title">Status</span></div>
                 <div class="frow__control"><div id="twofa-status" class="hs-row"></div></div>
               </div>
-              <div id="twofa-setup" hidden>
+              <form id="twofa-setup" class="pmform" hidden>
+                <input class="pm-user" type="text" name="username" autocomplete="username" hidden>
                 <div class="frow">
                   <div class="frow__label"><span class="frow__title">Secret</span><p>Add it to your authenticator app.</p></div>
                   <div class="frow__control"><p class="mono secretbox" id="twofa-secret"></p></div>
@@ -384,15 +385,16 @@
                   <div class="frow__label"><label for="twofa-password">Current password</label></div>
                   <div class="frow__control"><input id="twofa-password" type="password" autocomplete="current-password"></div>
                 </div>
-                <div class="panel__foot"><button id="twofa-confirm" class="btn btn--primary">Enable 2FA</button></div>
-              </div>
-              <div id="twofa-disable" hidden>
+                <div class="panel__foot"><button id="twofa-confirm" type="submit" class="btn btn--primary">Enable 2FA</button></div>
+              </form>
+              <form id="twofa-disable" class="pmform" hidden>
+                <input class="pm-user" type="text" name="username" autocomplete="username" hidden>
                 <div class="frow">
                   <div class="frow__label"><label for="twofa-disable-password">Current password</label><p>Needed to switch the second factor off.</p></div>
                   <div class="frow__control"><input id="twofa-disable-password" type="password" autocomplete="current-password"></div>
                 </div>
-                <div class="panel__foot"><button id="twofa-disable-confirm" class="btn btn--danger">Disable 2FA</button></div>
-              </div>
+                <div class="panel__foot"><button id="twofa-disable-confirm" type="submit" class="btn btn--danger">Disable 2FA</button></div>
+              </form>
               <div id="twofa-error" class="form-error" hidden></div>
             </div>
           </section>
@@ -500,7 +502,7 @@
               <div class="frow">
                 <div class="frow__label"><label for="set-realip-header">Header</label><p>Leave blank to use the connection address.</p></div>
                 <div class="frow__control">
-                  <input id="set-realip-header" class="mono" placeholder="X-Forwarded-For" list="realip-headers">
+                  <input id="set-realip-header" class="mono" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore placeholder="X-Forwarded-For" list="realip-headers">
                   <datalist id="realip-headers"><option value="X-Forwarded-For"></option><option value="CF-Connecting-IP"></option><option value="X-Real-IP"></option></datalist>
                 </div>
               </div>
@@ -523,7 +525,7 @@
               <div class="frow">
                 <div class="frow__label"><label for="geoip-test-ip">Look up an address</label></div>
                 <div class="frow__control">
-                  <div class="inputgroup"><input id="geoip-test-ip" class="mono" placeholder="8.8.8.8"><button type="button" id="geoip-test-btn" class="btn btn--secondary">Look up</button></div>
+                  <div class="inputgroup"><input id="geoip-test-ip" class="mono" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore placeholder="8.8.8.8"><button type="button" id="geoip-test-btn" class="btn btn--secondary">Look up</button></div>
                   <div id="geoip-test-result" class="mono frow__result"></div>
                 </div>
               </div>

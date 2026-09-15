@@ -200,6 +200,11 @@ function closeGuide() {
 }
 $('btn-guide-back').addEventListener('click', closeGuide);
 
+// The search boxes and the 2FA fields sit in forms of their own so the
+// browser's password manager does not treat a search box as a login name.
+// Their buttons act through click handlers; the forms never navigate.
+document.querySelectorAll('form.searchform, form.pmform').forEach((f) => f.addEventListener('submit', (e) => e.preventDefault()));
+
 function show(view) {
   for (const v of views) $(v).hidden = v !== view;
 }
@@ -245,6 +250,9 @@ async function boot() {
 }
 
 function afterLogin(me) {
+  // Password managers match a password field to the account through a
+  // username field in the same form.
+  document.querySelectorAll('.pm-user').forEach((el) => { el.value = me.email; });
   $('me-email').textContent = me.email;
   $('me-email-full').textContent = me.email;
   $('account-sub').textContent = me.email;
@@ -1596,8 +1604,9 @@ function addAclUserRow(user) {
   const row = document.createElement('div');
   row.className = 'hdr-rule';
   row.innerHTML =
-    '<input placeholder="username">' +
-    '<input type="password" placeholder="password">' +
+    // Credentials for someone else: keep the browser's saved admin login out.
+    '<input placeholder="username" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>' +
+    '<input type="password" placeholder="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore>' +
     '<button type="button" class="btn btn--ghost btn--sm">&times;</button>';
   if (user) {
     row.children[0].value = user.username;
