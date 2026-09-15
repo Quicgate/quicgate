@@ -3,6 +3,8 @@ package engine
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +78,67 @@ func TestBansShowWhoAndWhy(t *testing.T) {
 	e.banCfg.Store(&banConfig{})
 	if n := len(e.Bans()); n != 0 {
 		t.Fatalf("%d bans listed with auto-ban off, want 0", n)
+	}
+}
+
+// Bans survive a restart: they are saved when they change and restored at
+// start, without the ones that expired or were lifted.
+func TestBansSurviveRestart(t *testing.T) {
+	dir := t.TempDir()
+	cfg := banConfig{enabled: true, threshold: 1, window: time.Hour, banFor: time.Hour}
+	first := newBanManager(func() banConfig { return cfg }, nil)
+	first.persistTo(filepath.Join(dir, "bans.json"))
+	first.recordFailure("203.0.113.5:1", "acl.test", `address not allowed by access list "lan"`)
+	first.recordFailure("198.51.100.7:1", "vault.test", `wrong credentials for access list "vault"`)
+	waitUntil(t, func() bool {
+		data, _ := os.ReadFile(filepath.Join(dir, "bans.json"))
+		return strings.Contains(string(data), "203.0.113.5") && strings.Contains(string(data), "198.51.100.7")
+	}, "both bans to be saved")
+	first.unban("198.51.100.7")
+	// Lifting a ban is saved straight away too, not only at shutdown.
+	waitUntil(t, func() bool {
+		data, _ := os.ReadFile(filepath.Join(dir, "bans.json"))
+		return strings.Contains(string(data), "203.0.113.5") && !strings.Contains(string(data), "198.51.100.7")
+	}, "the lifted ban to leave the saved file")
+	if err := first.closePersist(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newBanManager(func() banConfig { return cfg }, nil)
+	second.persistTo(filepath.Join(dir, "bans.json"))
+	t.Cleanup(func() { _ = second.closePersist() })
+	bans := second.list(nil)
+	if len(bans) != 1 || bans[0].IP != "203.0.113.5" || bans[0].Host != "acl.test" || bans[0].Reason != `address not allowed by access list "lan"` {
+		t.Fatalf("after a restart: %+v, want only the ban on 203.0.113.5 with its host and reason", bans)
+	}
+	if !second.blocked("203.0.113.5:40000") || second.blocked("198.51.100.7:40000") {
+		t.Fatal("after a restart the restored ban does not apply, or the lifted one came back")
+	}
+
+	// A new ban is saved without waiting for shutdown.
+	second.recordFailure("192.0.2.44:1", "dns.test", "address not allowed")
+	waitUntil(t, func() bool {
+		data, _ := os.ReadFile(filepath.Join(dir, "bans.json"))
+		return strings.Contains(string(data), "192.0.2.44")
+	}, "the new ban to be saved")
+}
+
+// Saved bans that expired, or entries that hold no address, are not restored.
+func TestSavedBansAreValidated(t *testing.T) {
+	dir := t.TempDir()
+	future, past := time.Now().Add(time.Hour).UTC().Format(time.RFC3339), time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	doc := `{"version":1,"bans":[` +
+		`{"ip":"203.0.113.5","since":"` + past + `","until":"` + future + `","failures":5,"host":"a.test","reason":"r"},` +
+		`{"ip":"203.0.113.6","since":"` + past + `","until":"` + past + `","failures":5,"host":"a.test","reason":"expired"},` +
+		`{"ip":"not-an-address","since":"` + past + `","until":"` + future + `","failures":5,"host":"a.test","reason":"bad"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "bans.json"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := newBanManager(func() banConfig { return banConfig{enabled: true} }, nil)
+	b.persistTo(filepath.Join(dir, "bans.json"))
+	t.Cleanup(func() { _ = b.closePersist() })
+	if bans := b.list(nil); len(bans) != 1 || bans[0].IP != "203.0.113.5" {
+		t.Fatalf("restored %+v, want only 203.0.113.5", bans)
 	}
 }
 

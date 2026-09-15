@@ -194,6 +194,9 @@ func New(cfg Config, st *store.Store) *Engine {
 		}
 		return banConfig{}
 	}, e.certs.send)
+	if cfg.DataDir != "" {
+		e.ban.persistTo(cfg.DataDir + "/bans.json")
+	}
 	e.traffic = newTrafficStats(e.accessLog, e.ban, e.streams, e.geo, cfg.DataDir)
 	e.streams.traffic = e.traffic
 	e.accessLog.client = e.traffic.countClient
@@ -1256,6 +1259,9 @@ func (e *Engine) Run(ctx context.Context) error {
 			e.upnp.Close()
 		}
 		_ = e.accessLog.Close()
+		if err := e.ban.closePersist(); err != nil {
+			log.Printf("engine: save bans: %v", err)
+		}
 		if err := e.traffic.finish(time.Now()); err != nil {
 			log.Printf("engine: save traffic history: %v", err)
 		}
