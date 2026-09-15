@@ -291,6 +291,13 @@ paths:
       summary: Recent access-log lines (newest first)
       parameters: [ { name: n, in: query, schema: { type: integer, maximum: 2000 } } ]
       responses: { "200": { description: OK } }
+  /api/bans:
+    get: { summary: Addresses auto-ban is refusing now, with the host and reason, responses: { "200": { description: "[{ip, country, since, until, failures, host, reason}]" } } }
+  /api/bans/{ip}:
+    delete:
+      summary: Lift the ban on an address
+      parameters: [ { name: ip, in: path, required: true, schema: { type: string } } ]
+      responses: { "200": { description: unbanned }, "400": { description: not an IP address }, "404": { description: not banned } }
   /api/traffic:
     get:
       summary: Traffic history for the overview charts

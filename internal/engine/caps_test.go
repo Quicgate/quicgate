@@ -31,22 +31,22 @@ func TestBanManagerTrackingCap(t *testing.T) {
 	t.Cleanup(func() { banMaxTracked = old })
 
 	b := &banManager{
-		failures: map[string][]time.Time{},
-		banned:   map[string]time.Time{},
+		failures: map[string]*failureTrail{},
+		banned:   map[string]banEntry{},
 		config: func() banConfig {
 			return banConfig{enabled: true, threshold: 2, window: time.Hour, banFor: time.Hour}
 		},
 	}
 	for i := 0; i < 10; i++ {
-		b.recordFailure(fmt.Sprintf("198.51.100.%d:1", i)) // one failure each: tracked, not banned
+		b.recordFailure(fmt.Sprintf("198.51.100.%d:1", i), "test.host", "test") // one failure each: tracked, not banned
 	}
 	if n := len(b.failures); n > 3 {
 		t.Fatalf("ban manager tracks failures for %d addresses, cap is 3", n)
 	}
 	for i := 0; i < 10; i++ {
 		addr := fmt.Sprintf("203.0.113.%d:1", i)
-		b.recordFailure(addr)
-		b.recordFailure(addr) // second failure: banned
+		b.recordFailure(addr, "test.host", "test")
+		b.recordFailure(addr, "test.host", "test") // second failure: banned
 	}
 	if n := len(b.banned); n > 3 {
 		t.Fatalf("ban manager holds %d bans, cap is 3", n)

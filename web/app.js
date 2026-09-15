@@ -490,7 +490,7 @@ function ovRenderKPIs(rep) {
     { label: 'Server errors', value: t.requests ? FMT.pct(errPct) : '-', sub: `${FMT.count(t.status['5xx'])} responses`,
       title: `${FMT.int(t.status['4xx'])} client errors (4xx)`, spark: ovRates(rep, s['5xx'], g, 60), level: errPct >= 5 ? 'bad' : errPct >= 1 ? 'warn' : '' },
     { label: 'Blocked', value: FMT.count(blocked), sub: rep.banned ? `${FMT.int(rep.banned)} banned now` : 'none banned now',
-      spark: ovRates(rep, s.blocked, g, 60) },
+      spark: ovRates(rep, s.blocked, g, 60), goto: 'access', title: 'See the banned addresses and why' },
     { label: 'Response p95', value: t.p95 >= 0 ? FMT.ms(t.p95) : '-', sub: t.p50 >= 0 ? `p50 ${FMT.ms(t.p50)}` : 'no responses yet',
       title: t.p99 >= 0 ? `p99 ${FMT.ms(t.p99)}` : '', spark: ovPeaks(s.p95, g) },
     { label: 'Connections', value: FMT.int(rep.open), sub: `open now, peak ${FMT.int(t.peakOpen)}`,
@@ -499,8 +499,12 @@ function ovRenderKPIs(rep) {
   const host = $('ov-kpis');
   host.replaceChildren();
   for (const k of tiles) {
-    const tile = document.createElement('div');
-    tile.className = 'kpi';
+    const tile = document.createElement(k.goto ? 'button' : 'div');
+    tile.className = k.goto ? 'kpi kpi--link' : 'kpi';
+    if (k.goto) {
+      tile.type = 'button';
+      tile.dataset.goto = k.goto;
+    }
     if (k.title) tile.title = k.title;
     const head = document.createElement('div');
     head.className = 'kpi__label';
@@ -692,9 +696,18 @@ function ovRenderLists(rep) {
 
   const blocked = Object.entries(t.blocked || {}).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
   const total = blocked.reduce((a, [, n]) => a + n, 0);
-  $('ov-blocked-sub').textContent = total
-    ? `${FMT.int(total)} refused in this range${rep.banned ? `, ${plural(rep.banned, 'address', 'addresses')} banned now` : ''}.`
-    : 'Requests and stream clients quicgate refused.';
+  const sub = $('ov-blocked-sub');
+  sub.textContent = total
+    ? `${FMT.int(total)} refused in this range${rep.banned ? `, ${plural(rep.banned, 'address', 'addresses')} banned now` : ''}. `
+    : 'Requests and stream clients quicgate refused. ';
+  if (rep.banned) {
+    const link = document.createElement('button');
+    link.type = 'button';
+    link.className = 'linkbtn';
+    link.dataset.goto = 'access';
+    link.textContent = 'See who and why';
+    sub.appendChild(link);
+  }
   QGCharts.barList($('ov-blocked'), blocked.map(([k, n]) => ({ label: BLOCK_REASONS[k] || k, value: n, title: `${FMT.int(n)} refused` })),
     { empty: 'Nothing refused in this range.' });
 }
@@ -1383,7 +1396,80 @@ $('host-form').addEventListener('submit', async (e) => {
 });
 
 /* ---- access lists page ---- */
+/* ---- banned addresses ----
+   Who auto-ban has turned away right now, for which host and why, with a way
+   to lift a ban by hand. */
+function relTime(iso) {
+  const secs = Math.round((new Date(iso).getTime() - Date.now()) / 1000);
+  const abs = Math.abs(secs);
+  const text = abs < 60 ? `${abs} s` : abs < 3600 ? `${Math.round(abs / 60)} min` : abs < 86400 ? `${Math.round(abs / 3600)} h` : `${Math.round(abs / 86400)} d`;
+  return secs < 0 ? `${text} ago` : `in ${text}`;
+}
+
+async function loadBans() {
+  let bans, settings;
+  try {
+    [bans, settings] = await Promise.all([api('GET', '/api/bans'), api('GET', '/api/settings').catch(() => ({}))]);
+  } catch (err) {
+    $('bans-empty').hidden = false;
+    $('bans-empty').textContent = err.message;
+    $('bans-table').hidden = true;
+    return;
+  }
+  const on = settings.ban_enabled === '1';
+  const mins = (s) => Math.round((parseInt(s, 10) || 0) / 60);
+  $('bans-hint').textContent = on
+    ? `after ${settings.ban_threshold || 5} refusals within ${mins(settings.ban_window_sec || 300)} min, for ${mins(settings.ban_duration_sec || 3600)} min`
+    : 'auto-ban is off';
+  $('bans-table').hidden = bans.length === 0;
+  $('bans-empty').hidden = bans.length > 0;
+  $('bans-empty').textContent = on ? 'No addresses are banned right now.' : 'Auto-ban is off, so nobody is banned. Turn it on under Settings, Auto-ban.';
+  const names = typeof Intl.DisplayNames === 'function' ? new Intl.DisplayNames(['en'], { type: 'region' }) : null;
+  const countryName = (code) => {
+    if (!code) return '-';
+    if (code === 'LAN') return 'Local network';
+    if (code === 'unknown') return 'Unknown';
+    try { return names ? names.of(code) : code; } catch { return code; }
+  };
+  const body = $('bans-body');
+  body.replaceChildren();
+  for (const b of bans) {
+    const tr = body.insertRow();
+    const cell = (text, cls, title) => {
+      const td = tr.insertCell();
+      if (cls) td.className = cls;
+      td.textContent = text;
+      if (title) td.title = title;
+      return td;
+    };
+    cell(b.ip, 'mono nowrap');
+    cell(countryName(b.country), 'nowrap');
+    cell(b.reason || '-', 'bans__why');
+    cell(b.host || '-', 'mono');
+    cell(String(b.failures), 'num');
+    cell(relTime(b.since), 'nowrap', new Date(b.since).toLocaleString());
+    cell(relTime(b.until), 'nowrap', new Date(b.until).toLocaleString());
+    const td = tr.insertCell();
+    const btn = document.createElement('button');
+    btn.className = 'btn btn--secondary btn--sm';
+    btn.textContent = 'Unban';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        await api('DELETE', `/api/bans/${encodeURIComponent(b.ip)}`);
+        await loadBans();
+      } catch (err) {
+        btn.disabled = false;
+        $('bans-hint').textContent = `could not unban ${b.ip}: ${err.message}`;
+      }
+    });
+    td.appendChild(btn);
+  }
+}
+$('btn-bans-refresh').addEventListener('click', loadBans);
+
 async function refreshAcls() {
+  loadBans();
   [accessLists, oidcProviders] = await Promise.all([
     api('GET', '/api/access-lists'), api('GET', '/api/oidc-providers').catch(() => []),
   ]);

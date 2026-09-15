@@ -194,7 +194,7 @@ func TestRefusedRequestsAreCountedByReason(t *testing.T) {
 	}
 	// A banned client is turned away before the access log sees it.
 	e.banCfg.Store(&banConfig{enabled: true, threshold: 1, window: time.Minute, banFor: time.Hour})
-	e.ban.recordFailure("192.0.2.9:1")
+	e.ban.recordFailure("192.0.2.9:1", "test.host", "test")
 	if got := do("GET", "open.test", "/", "192.0.2.9", nil); got != http.StatusForbidden {
 		t.Fatalf("banned client: status %d, want 403", got)
 	}

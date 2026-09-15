@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -138,6 +139,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/config", s.auth(s.handleEffectiveConfig))
 	mux.HandleFunc("GET /api/overview", s.auth(s.handleOverview))
 	mux.HandleFunc("GET /api/traffic", s.auth(s.handleTraffic))
+	mux.HandleFunc("GET /api/bans", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.engine.Bans())
+	}))
+	mux.HandleFunc("DELETE /api/bans/{ip}", s.auth(s.handleUnban))
 	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
 	mux.HandleFunc("POST /api/custom-certs/self-signed", s.auth(s.handleSelfSignedCert))
 	mux.HandleFunc("POST /api/custom-certs/from-file", s.auth(s.handleCertFromFile))
@@ -370,6 +375,20 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleUnban lifts the auto-ban on one address.
+func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
+	ip := net.ParseIP(r.PathValue("ip"))
+	if ip == nil {
+		writeErr(w, http.StatusBadRequest, "not an IP address")
+		return
+	}
+	if !s.engine.Unban(ip.String()) {
+		writeErr(w, http.StatusNotFound, "that address is not banned")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "unbanned"})
 }
 
 // handleTraffic serves the traffic history behind the overview charts for one

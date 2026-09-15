@@ -190,7 +190,21 @@
         <div><h1 class="pagehead__title">Access control</h1><p class="pagehead__sub">Access lists and the identity providers used for single sign-on.</p></div>
         <div class="pagehead__actions"><button id="btn-add-acl" class="btn btn--primary">Add access list</button></div>
       </div>
-      <div class="card card--flush">
+      <div class="card card--flush bans" id="bans">
+        <div class="sectionhead">
+          <h2>Banned addresses <span class="sectionhead__hint" id="bans-hint"></span></h2>
+          <button id="btn-bans-refresh" class="btn btn--ghost btn--sm">Refresh</button>
+        </div>
+        <div class="tablescroll">
+          <table class="table" id="bans-table" hidden>
+            <thead><tr><th>Address</th><th>Country</th><th>Why</th><th>Host</th><th class="num">Refusals</th><th>Banned</th><th>Lifts</th><th></th></tr></thead>
+            <tbody id="bans-body"></tbody>
+          </table>
+        </div>
+        <div id="bans-empty" class="empty" hidden></div>
+        <p class="tablenote">Bans are kept in memory: they end when quicgate restarts. Only access-list refusals count toward a ban; change the limits under Settings, Auto-ban.</p>
+      </div>
+      <div class="card card--flush" style="margin-top:var(--sp-5)">
         <div class="sectionhead"><h2>Access lists</h2></div>
         <table class="table" id="acl-table">
           <thead><tr><th>Name</th><th>Satisfy</th><th>IP rules</th><th>Users</th><th></th></tr></thead>
