@@ -37,6 +37,7 @@ type secretColumn struct {
 var secretColumns = []secretColumn{
 	{table: "settings", column: "value", key: "key", where: "key IN ('oidc_client_secret','acme_dns_config','sso_cookie_secret','wg_private_key')"},
 	{table: "wg_sites", column: "psk", key: "id"},
+	{table: "wg_devices", column: "psk", key: "id"},
 	{table: "oidc_providers", column: "client_secret", key: "id"},
 	{table: "custom_certs", column: "key_pem", key: "id"},
 	{table: "users", column: "totp_secret", key: "id"},

@@ -74,6 +74,11 @@ func checkHostRefs(q dbtx, h *Host) error {
 			return err
 		}
 	}
+	if h.Options.Portal != nil {
+		if err := requireRow(q, "oidc_providers", h.Options.Portal.ProviderID, "identity provider"); err != nil {
+			return err
+		}
+	}
 	for _, via := range h.Vias() {
 		if err := requireRow(q, "wg_sites", via, "WireGuard site"); err != nil {
 			return err

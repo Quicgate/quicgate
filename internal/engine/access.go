@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"quicgate/internal/store"
+	"quicgate/internal/wg"
 )
 
 type compiledRule struct {
@@ -20,6 +21,9 @@ type compiledRule struct {
 	net     *net.IPNet      // CIDR or resolved DDNS host
 	country string          // GeoIP country code, if this is a country rule
 	methods map[string]bool // HTTP verbs this rule applies to; nil = all
+	// vpn, when set, makes this a rule about who is at the other end of the
+	// WireGuard tunnel instead of about an address.
+	vpn *store.VPNSubject
 	// unresolved marks a configured rule that cannot be evaluated right now: a
 	// hostname that does not resolve, or a CIDR that does not parse. It matches
 	// nobody when it allows and everybody when it denies, so a failure can only
@@ -43,6 +47,9 @@ type compiledAccess struct {
 	geo      *geoDB
 	ban      *banManager
 	warnings []string // problems found while compiling, surfaced to the operator
+	// vpnMatch decides whether a VPN subject names a peer. Nil (tests, lists
+	// compiled outside an engine) matches nobody.
+	vpnMatch func(store.VPNSubject, wg.Peer) bool
 }
 
 // deniedAccess is the gate used when a host or path names an access list that
@@ -143,6 +150,10 @@ func compileAccess(a store.AccessList, geo *geoDB, ban *banManager, dns *dnsCach
 			c.warnings = append(c.warnings, fmt.Sprintf("access list %q: %s; the rule %s until this is fixed", a.Name, why, effect))
 		}
 		switch {
+		case r.VPN != nil:
+			c.restricted = true
+			subject := *r.VPN
+			c.rules = append(c.rules, compiledRule{allow: allow, vpn: &subject, methods: methods})
 		case r.CIDR != "":
 			c.restricted = true
 			if _, ipnet, err := net.ParseCIDR(r.CIDR); err == nil {
@@ -188,7 +199,20 @@ func compileAccess(a store.AccessList, geo *geoDB, ban *banManager, dns *dnsCach
 // the method differs. Only an access list with no network rules at all imposes
 // no address restriction.
 func (c *compiledAccess) ipAllowed(remoteAddr, method string) bool {
-	return c.evaluate(remoteAddr, method, false)
+	return c.evaluate(remoteAddr, method, false, nil)
+}
+
+// allowedFor is ipAllowed for a request, which may have come through the
+// WireGuard tunnel. Two listeners, two vocabularies (S47): a request from the
+// tunnel is matched against the VPN rules only, and a request from outside
+// against the address rules only. So an "allow 192.168.0.0/16" never admits a
+// peer, whatever address it has, and switching the VPN on cannot change who
+// passes an existing list.
+func (c *compiledAccess) allowedFor(r *http.Request, method string) bool {
+	if p, ok := vpnPeerOf(r); ok {
+		return c.evaluate(r.RemoteAddr, method, false, &p)
+	}
+	return c.evaluate(r.RemoteAddr, method, false, nil)
 }
 
 // l4Allowed evaluates the list for a raw TCP or UDP connection, which has no
@@ -201,7 +225,7 @@ func (c *compiledAccess) l4Allowed(remoteAddr string) bool {
 	if len(c.users) > 0 && (c.satisfy != "any" || !c.restricted) {
 		return false
 	}
-	return c.evaluate(remoteAddr, "", true)
+	return c.evaluate(remoteAddr, "", true, nil)
 }
 
 // l4Warnings explains, for the stream status, why a list may admit fewer
@@ -220,7 +244,7 @@ func (c *compiledAccess) l4Warnings() []string {
 	return out
 }
 
-func (c *compiledAccess) evaluate(remoteAddr, method string, l4 bool) bool {
+func (c *compiledAccess) evaluate(remoteAddr, method string, l4 bool, peer *wg.Peer) bool {
 	if c.denyAll {
 		return false
 	}
@@ -248,6 +272,15 @@ func (c *compiledAccess) evaluate(remoteAddr, method string, l4 bool) bool {
 			} else if !r.methods[method] {
 				continue
 			}
+		}
+		if r.vpn != nil {
+			if peer != nil && c.vpnMatch != nil && c.vpnMatch(*r.vpn, *peer) {
+				return r.allow
+			}
+			continue
+		}
+		if peer != nil {
+			continue // an address rule says nothing about a request from the tunnel
 		}
 		if r.unresolved {
 			if r.allow {
@@ -329,18 +362,18 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 			// credentials alone could admit that request (satisfy any), its
 			// preflight passes wherever it comes from.
 			announced := strings.ToUpper(strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")))
-			if c.ipAllowed(r.RemoteAddr, announced) || (c.satisfy == "any" && c.restricted && len(c.users) > 0 && !c.denyAll) {
+			if c.allowedFor(r, announced) || (c.satisfy == "any" && c.restricted && len(c.users) > 0 && !c.denyAll) {
 				next.ServeHTTP(w, r)
 				return
 			}
-			if c.ban != nil {
+			if c.ban != nil && !viaVPN(r) {
 				c.ban.recordFailure(r.RemoteAddr, routeName(r.Host), fmt.Sprintf("CORS preflight from an address access list %q does not allow", c.name))
 			}
 			markBlocked(w, blockAccessList)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		ipOK := c.ipAllowed(r.RemoteAddr, r.Method)
+		ipOK := c.allowedFor(r, r.Method)
 		authOK := c.authOK(r)
 		allowed := ipOK && authOK
 		if c.satisfy == "any" && c.restricted && len(c.users) > 0 {
@@ -355,7 +388,10 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 			// list refuses whatever it sends.
 			challenge := len(c.users) > 0 && r.Header.Get("Authorization") == "" && (ipOK || (c.satisfy == "any" && c.restricted))
 			if !challenge {
-				if c.ban != nil {
+				// A refusal inside the tunnel is logged with its peer and never
+				// bans: a tunnel address is not a stranger, and the remedy for
+				// a misbehaving device is to revoke it (S18).
+				if c.ban != nil && !viaVPN(r) {
 					c.ban.recordFailure(r.RemoteAddr, routeName(r.Host), c.refusalReason(r, ipOK, authOK))
 				}
 				markBlocked(w, blockAccessList)

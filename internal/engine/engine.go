@@ -38,6 +38,9 @@ type Config struct {
 	DisableH3  bool   // skip the HTTP/3 (QUIC) listener + Alt-Svc; force clients to h2
 	UPnP       bool   // request router port forwards via UPnP IGD
 	Version    string // build version, surfaced in the UI/API
+	// AdminAddr is where the admin UI listens. The engine does not serve it,
+	// but the VPN forwarder must know its port to keep devices away from it.
+	AdminAddr string
 }
 
 // Version returns the running build version.
@@ -159,6 +162,11 @@ type Engine struct {
 	// while wg_enabled is on; wgState is what the last reload made of it.
 	wg      *wg.Manager
 	wgState atomic.Pointer[wgState]
+	// vpnOwners says who each SSO-enrolled device belongs to, for VPN rules
+	// about users and groups. Rebuilt at every reload.
+	vpnOwners atomic.Pointer[map[int64]vpnOwner]
+	flowLog   *flowLogger
+	portal    *portalState
 
 	banCfg        atomic.Pointer[banConfig] // compiled at reload; nil (auto-ban off) before the first
 	caPoolCache   sync.Map
@@ -193,7 +201,15 @@ func New(cfg Config, st *store.Store) *Engine {
 	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager(), health: newHealthChecker(), dns: newDNSCache(), started: time.Now(), wg: wg.New()}
 	e.health.dial = e.dialTargetTimeout
 	e.streams.dial = e.dialTargetTimeout
+	e.wg.SetListeners(wg.Listeners{TCP: []uint16{80, 443, 53}, UDP: []uint16{53}, OnStart: e.serveTunnel})
+	if cfg.DataDir != "" {
+		e.wg.SetStateFile(cfg.DataDir + "/wg-endpoints.json")
+		e.flowLog = newFlowLogger(cfg.DataDir)
+		e.wg.SetFlowLog(e.flowLog.record)
+	}
+	e.portal = newPortalState()
 	go e.reresolveWireGuard()
+	go e.renewLeases()
 	e.acmeStaging = cfg.ACMEStage
 	e.acmeEmail = cfg.ACMEEmail
 	e.certs = newCertTracker(func() string { return st.GetSetting("notify_url", "") })
@@ -319,6 +335,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	access := map[int64]*compiledAccess{}
 	for _, a := range lists {
 		access[a.ID] = compileAccess(a, e.geo, e.ban, e.dns)
+		access[a.ID].vpnMatch = e.vpnSubjectMatches
 	}
 	streams, err := e.store.ListStreams()
 	if err != nil {
@@ -660,6 +677,10 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 		return &route{host: h, proxy: wrapCommon(h.Domains, handler, o, acl, acls, sso, newGate)}
 	case "dead":
 		return &route{host: h, proxy: wrapCommon(h.Domains, deadHandler(), o, acl, acls, sso, newGate)}
+	case "vpn-portal":
+		// The portal does its own login; an access list in front of it still
+		// applies, a host-level OIDC gate would only get in its way.
+		return &route{host: h, proxy: wrapCommon(h.Domains, e.portalHandler(h), o, acl, acls, nil, newGate)}
 	case "static":
 		fs := http.FileServer(http.Dir(h.StaticRoot))
 		return &route{host: h, proxy: wrapCommon(h.Domains, fs, o, acl, acls, sso, newGate)}
@@ -1009,7 +1030,9 @@ func (e *Engine) serveUnmatched(w http.ResponseWriter, r *http.Request) {
 func (e *Engine) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 	t := e.table.Load()
 	rt := t.lookup(r.Host)
-	if rt == nil {
+	// A VPN-only host does not exist for a request from outside the tunnel:
+	// the answer is the one an unknown host gets (S17).
+	if rt == nil || (rt.host.Options.VPNOnly && !viaVPN(r)) {
 		e.serveUnmatched(w, r)
 		return
 	}
@@ -1034,7 +1057,7 @@ func (e *Engine) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		// falls back to h2 for this host, while other hosts keep h3. Needed
 		// for backends whose web clients misbehave over h3 (e.g. Vaultwarden).
 		w.Header().Set("Alt-Svc", "clear")
-	case e.h3 != nil && r.ProtoMajor < 3:
+	case e.h3 != nil && r.ProtoMajor < 3 && !viaVPN(r):
 		// Advertise h3 so browsers upgrade to HTTP/3 on the next request.
 		_ = e.h3.SetQUICHeaders(w.Header())
 	}
@@ -1045,7 +1068,7 @@ func (e *Engine) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 // force-SSL redirect, and direct serving for certMode "none" hosts.
 func (e *Engine) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	rt := e.table.Load().lookup(r.Host)
-	if rt == nil {
+	if rt == nil || (rt.host.Options.VPNOnly && !viaVPN(r)) {
 		e.serveUnmatched(w, r)
 		return
 	}
@@ -1068,7 +1091,13 @@ func (e *Engine) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 // tlsConfig builds the TLS listener config: certmagic certificates plus a
 // per-SNI minimum-version override from the host's typed TLS options.
-func (e *Engine) tlsConfig() *tls.Config {
+func (e *Engine) tlsConfig() *tls.Config { return e.tlsConfigFor(false) }
+
+// tlsConfigFor builds the TLS configuration of the public listeners, or of
+// the listener inside the WireGuard tunnel. The public ones offer no
+// certificate for a VPN-only host: not over TCP and, because HTTP/3 takes
+// its configuration from the same one, not over QUIC either.
+func (e *Engine) tlsConfigFor(tunnel bool) *tls.Config {
 	base := e.magic.TLSConfig()
 	base.NextProtos = append([]string{"h2", "http/1.1"}, base.NextProtos...)
 	base.MinVersion = tls.VersionTLS12
@@ -1088,6 +1117,9 @@ func (e *Engine) tlsConfig() *tls.Config {
 			return nil, nil
 		}
 		o := r.host.Options
+		if o.VPNOnly && !tunnel {
+			return nil, errVPNOnlyName
+		}
 		needClone := o.MinTLSVersion == "1.3" || o.ClientCert != nil
 		if !needClone {
 			return nil, nil

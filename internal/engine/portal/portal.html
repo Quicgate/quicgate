@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>VPN portal</title>
+<link rel="stylesheet" href="/.qg/vpn/portal.css">
+</head>
+<body>
+<main>
+  <header><h1>VPN portal</h1><p id="who" class="muted"></p></header>
+
+  <section id="view-login" hidden>
+    <p>Log in to add a device to the VPN, or to get your devices back when your access has run out.</p>
+    <p><a class="btn primary" href="/.qg/vpn/login">Log in</a></p>
+    <p class="muted">If your device is connected but nothing works, your access has probably run out: switch the tunnel <b>off</b> on the device, log in here, and switch it on again. The same configuration keeps working.</p>
+  </section>
+
+  <section id="view-main" hidden>
+    <div id="lease" class="card"></div>
+
+    <div class="card">
+      <h2>My devices</h2>
+      <table id="devices"><thead><tr><th>Name</th><th>Address</th><th>Last seen</th><th></th></tr></thead><tbody></tbody></table>
+      <p id="devices-empty" class="muted" hidden>No devices yet.</p>
+      <p class="muted">Check "last seen" now and then. A device you do not recognise, or one seen from a place you were not, should be removed: a copied configuration keeps working for as long as your own access does.</p>
+    </div>
+
+    <div class="card" id="add-card">
+      <h2>Add a device</h2>
+      <form id="add-form">
+        <label>Name <input id="d-name" maxlength="64" required placeholder="My phone" autocomplete="off"></label>
+        <div id="key-generate"><label class="check"><input type="radio" name="keymode" id="mode-generate" checked> Make the key here, in this browser. It never leaves this page.</label></div>
+        <label class="check"><input type="radio" name="keymode" id="mode-paste"> I made a tunnel in the WireGuard app already: use its public key.</label>
+        <label id="pubkey-row" hidden>Public key <input id="d-pubkey" class="mono" autocomplete="off" spellcheck="false"></label>
+        <p id="add-error" class="error" hidden></p>
+        <p><button class="btn primary" type="submit">Add device</button></p>
+      </form>
+    </div>
+
+    <div class="card" id="config-card" hidden>
+      <h2>Your configuration</h2>
+      <p><b>It is shown this once.</b> Save it now, or import it into the WireGuard app. If it gets lost, remove the device and add it again.</p>
+      <textarea id="config" rows="13" class="mono" readonly spellcheck="false"></textarea>
+      <p id="config-note" class="muted"></p>
+      <p><button class="btn" type="button" id="btn-copy">Copy</button> <button class="btn" type="button" id="btn-download">Download .conf</button> <button class="btn primary" type="button" id="btn-done">I have saved it</button></p>
+    </div>
+
+    <p><button class="btn" type="button" id="btn-disconnect">Disconnect all my devices</button> <button class="btn" type="button" id="btn-logout">Log out of this page</button></p>
+  </section>
+</main>
+<script src="/.qg/vpn/portal.js"></script>
+</body>
+</html>

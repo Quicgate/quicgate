@@ -52,6 +52,8 @@ type WGStatus struct {
 	Endpoint  string          `json:"endpoint"`
 	Resets    uint64          `json:"resets"`
 	Sites     []wg.SiteStatus `json:"sites"`
+	Devices   []wg.PeerStatus `json:"devices"`
+	LANAccess bool            `json:"lanAccess"`
 }
 
 // WGSettings reads the WireGuard settings with their defaults.
@@ -141,7 +143,12 @@ func (e *Engine) syncWireGuard(ctx context.Context) {
 		fail("sites: %v", err)
 		return
 	}
-	cfg := wg.Config{PrivateKey: private, ListenPort: port, Address: wg.TunnelAddress(network)}
+	lanAccess := e.store.GetSetting("wg_lan_access", "") == "1"
+	cfg := wg.Config{PrivateKey: private, ListenPort: port, Address: wg.TunnelAddress(network), Tunnel: network,
+		Forward: lanAccess, Guard: e.wgGuard()}
+	devices, owners := e.wgDevices(time.Now(), lanAccess)
+	cfg.Devices = devices
+	e.vpnOwners.Store(&owners)
 	for _, s := range stored {
 		site, err := wgSite(s)
 		if err != nil {
@@ -155,14 +162,22 @@ func (e *Engine) syncWireGuard(ctx context.Context) {
 	}
 }
 
-// wgReresolveEvery is how often endpoint names are looked up again.
-const wgReresolveEvery = 5 * time.Minute
+// wgReresolveEvery is how often endpoint names are looked up again, in
+// half-minute ticks.
+const wgReresolveEvery = 10
 
-// reresolveWireGuard keeps sites with a dynamic-DNS endpoint reachable.
+// reresolveWireGuard keeps sites with a dynamic-DNS endpoint reachable, and
+// notes every half minute where the peers are, so that a peer which can only
+// call in is called back at once after a restart.
 func (e *Engine) reresolveWireGuard() {
-	for {
-		time.Sleep(wgReresolveEvery)
-		if st := e.wgState.Load(); st != nil && st.enabled {
+	for tick := 1; ; tick++ {
+		time.Sleep(30 * time.Second)
+		st := e.wgState.Load()
+		if st == nil || !st.enabled {
+			continue
+		}
+		e.wg.Remember()
+		if tick%wgReresolveEvery == 0 {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			e.wg.Reresolve(ctx)
 			cancel()
@@ -186,7 +201,9 @@ func (e *Engine) WGStatus() WGStatus {
 	}
 	if sites := e.wg.Status(); sites != nil {
 		out.Running, out.Sites = true, sites
+		out.Devices = e.wg.DeviceStatus()
 	}
+	out.LANAccess = e.store.GetSetting("wg_lan_access", "") == "1"
 	out.Resets = e.wg.Resets()
 	return out
 }

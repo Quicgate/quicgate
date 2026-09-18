@@ -108,6 +108,7 @@ func main() {
 		DisableTLS: os.Getenv("QG_TLS") == "off",
 		DisableH3:  os.Getenv("QG_H3") == "off",
 		UPnP:       os.Getenv("QG_UPNP") == "1",
+		AdminAddr:  env("QG_ADMIN", ":81"),
 		Version:    version,
 	}, st)
 	log.Printf("quicgate %s starting", version)

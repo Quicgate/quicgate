@@ -102,7 +102,9 @@ func (s *Store) GetWGSite(id int64) (WGSite, error) {
 // another site, the engine rebuilds its network stack first: no address
 // changes owner inside a running stack instance.
 func nextWGAddress(q dbtx, tunnel netip.Prefix) (netip.Addr, error) {
-	rows, err := q.Query("SELECT address FROM wg_sites")
+	// Sites and devices share the tunnel network. A revoked device has no
+	// address any more.
+	rows, err := q.Query("SELECT address FROM wg_sites UNION ALL SELECT address FROM wg_devices WHERE address IS NOT NULL")
 	if err != nil {
 		return netip.Addr{}, err
 	}
@@ -146,6 +148,13 @@ func (s *Store) CreateWGSite(w *WGSite, tunnel netip.Prefix, psk string) error {
 		return err
 	}
 	defer tx.Rollback()
+	var devices int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM wg_devices WHERE public_key=?", w.PublicKey).Scan(&devices); err != nil {
+		return err
+	}
+	if devices > 0 {
+		return errors.New("a device already uses this public key, or did before it was revoked")
+	}
 	addr, err := nextWGAddress(tx, tunnel)
 	if err != nil {
 		return err

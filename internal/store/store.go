@@ -148,6 +148,12 @@ type Options struct {
 
 	// Security group
 	BlockIndexing bool         `json:"blockIndexing"` // send X-Robots-Tag: noindex, nofollow
+	// VPNOnly serves the host inside the WireGuard tunnel only. To everyone
+	// else it does not exist: the public listeners answer as for an unknown
+	// host and offer no certificate for its names.
+	VPNOnly bool `json:"vpnOnly,omitempty"`
+	// Portal configures a host of type vpn-portal.
+	Portal *PortalOptions `json:"portal,omitempty"`
 	BlockExploits bool         `json:"blockExploits"` // filter common attack patterns
 	BlockBadBots  bool         `json:"blockBadBots"`  // block known scraper/bot user-agents
 	RateLimit     *RateLimit   `json:"rateLimit,omitempty"`
@@ -201,6 +207,11 @@ type AccessRule struct {
 	CIDR    string `json:"cidr,omitempty"`
 	Host    string `json:"host,omitempty"`    // hostname, re-resolved periodically
 	Country string `json:"country,omitempty"` // ISO 3166-1 alpha-2, needs GeoIP DB
+	// VPN is the fourth kind of selector: who is at the other end of the
+	// WireGuard tunnel. A request that came through the tunnel is only ever
+	// matched against VPN rules, and a request from outside never is, so
+	// switching the VPN on cannot change who passes an existing list.
+	VPN *VPNSubject `json:"vpn,omitempty"`
 	// Methods scopes the rule to specific HTTP verbs (e.g. keep GET public
 	// but require auth for POST/PUT/DELETE). Empty = every method.
 	Methods []string `json:"methods,omitempty"`
@@ -282,7 +293,7 @@ func (h *Host) Validate() error {
 	if h.Type == "" {
 		h.Type = "proxy"
 	}
-	if h.Type != "proxy" && h.Type != "redirect" && h.Type != "dead" && h.Type != "static" {
+	if h.Type != "proxy" && h.Type != "redirect" && h.Type != "dead" && h.Type != "static" && h.Type != "vpn-portal" {
 		return fmt.Errorf("unsupported host type %q", h.Type)
 	}
 	if len(h.Domains) == 0 {
@@ -335,6 +346,17 @@ func (h *Host) Validate() error {
 			}
 		}
 		if err := validateRewrite(h.Options.PathRewrite); err != nil {
+			return err
+		}
+	case "vpn-portal":
+		h.Redirect, h.Upstream, h.Upstreams, h.Locations, h.StaticRoot = nil, Upstream{}, nil, nil, ""
+		if h.Options.VPNOnly {
+			return errors.New("the portal must be reachable without the VPN: that is where people log in to get it back")
+		}
+		if h.Options.Portal == nil {
+			return errors.New("a VPN portal needs its identity provider and who may enrol")
+		}
+		if err := h.Options.Portal.Validate(); err != nil {
 			return err
 		}
 	case "static":
@@ -632,6 +654,9 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 		return err
 	}
 	if err := s.migrateWG(); err != nil {
+		return err
+	}
+	if err := s.migrateVPN(); err != nil {
 		return err
 	}
 	return s.migrateTokens()

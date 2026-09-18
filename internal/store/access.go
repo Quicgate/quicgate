@@ -56,8 +56,14 @@ func (a *AccessList) Validate(prev *AccessList) error {
 		if strings.TrimSpace(r.Country) != "" {
 			set++
 		}
+		if r.VPN != nil {
+			set++
+			if err := a.Rules[i].VPN.Validate(false); err != nil {
+				return fmt.Errorf("rule %d: %w", i+1, err)
+			}
+		}
 		if set != 1 {
-			return fmt.Errorf("rule %d: set exactly one of CIDR, host or country", i+1)
+			return fmt.Errorf("rule %d: set exactly one of CIDR, host, country or VPN", i+1)
 		}
 		if r.CIDR != "" {
 			cidr := strings.TrimSpace(r.CIDR)

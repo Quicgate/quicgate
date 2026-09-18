@@ -144,6 +144,7 @@ func (s *Server) Handler() http.Handler {
 	}))
 	mux.HandleFunc("DELETE /api/bans/{ip}", s.auth(s.handleUnban))
 	s.registerWireGuard(mux)
+	s.registerVPN(mux)
 	mux.HandleFunc("GET /api/own-addresses", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.engine.OwnAddresses())
 	}))
@@ -201,6 +202,15 @@ var settingsKeys = map[string]bool{
 	"wg_port":     true, // UDP port, default 51820
 	"wg_network":  true, // tunnel network, default 10.77.0.0/24; fixed once a site exists
 	"wg_endpoint": true, // public host:port of this server, written into site configurations
+	// Devices with LAN access (SPEC-wireguard.md part 3).
+	"wg_lan_access":           true, // "1" = devices may reach LAN addresses their policy grants
+	"wg_lease_minutes":        true, // how long one renewal of an owner's authorization lasts, default 10
+	"wg_outage_grace_minutes": true, // extra time when the identity provider cannot be reached, default 0
+	"wg_session_days":         true, // a fresh login is required after this many days, default 30
+	"wg_auth_max_age":         true, // how recent the authentication behind a portal login must be, seconds, default 900
+	"wg_devices_per_user":     true, // default 5
+	"wg_protected_endpoints":  true, // addresses and address:port pairs the forwarder never reaches (aliases of quicgate's own listeners)
+	"wg_no_published_aliases": true, // "1" = the operator confirms no quicgate port is published where a policy can reach
 	// OIDC admin login (additive; password always works)
 	"oidc_enabled":        true,
 	"oidc_issuer":         true,
@@ -270,6 +280,10 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.checkWGSettings(body); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.checkVPNSettings(body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
