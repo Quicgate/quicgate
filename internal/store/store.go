@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"quicgate/internal/seal"
 
 	_ "modernc.org/sqlite"
 )
@@ -495,10 +498,16 @@ func (o *Options) validateAuthRules() error {
 
 type Store struct {
 	db *sql.DB
+	// box seals the secrets at rest (sealed.go). It is nil while the store is
+	// locked, and lockReason then says why.
+	box        *seal.Box
+	lockReason string
 }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	// secure_delete overwrites freed pages, so a replaced secret does not stay
+	// readable in the database file.
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=secure_delete(ON)")
 	if err != nil {
 		return nil, err
 	}
@@ -507,6 +516,7 @@ func Open(path string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}
+	s.initSeal(filepath.Dir(path))
 	return s, nil
 }
 
@@ -734,18 +744,32 @@ func (s *Store) CountUsers() (int, error) {
 	return n, err
 }
 
+// GetUserByEmail returns the account. When its two-factor secret cannot be
+// opened it returns an error and no account: an unreadable secret must never
+// look like "two-factor is off", or a missing key would switch 2FA off.
 func (s *Store) GetUserByEmail(email string) (User, error) {
 	var u User
 	var mc int
+	var totp string
 	err := s.db.QueryRow("SELECT id, email, hash, must_change, totp_secret FROM users WHERE email=?", strings.ToLower(email)).
-		Scan(&u.ID, &u.Email, &u.Hash, &mc, &u.TOTPSecret)
+		Scan(&u.ID, &u.Email, &u.Hash, &mc, &totp)
+	if err != nil {
+		return User{}, err
+	}
 	u.MustChange = mc == 1
-	return u, err
+	if u.TOTPSecret, err = s.openSecret(totp, userTOTPAAD(u.ID)); err != nil {
+		return User{}, fmt.Errorf("two-factor secret of %s: %w", u.Email, err)
+	}
+	return u, nil
 }
 
 // SetTOTPSecret enables 2FA (secret set) or disables it (empty).
 func (s *Store) SetTOTPSecret(id int64, secret string) error {
-	_, err := s.db.Exec("UPDATE users SET totp_secret=? WHERE id=?", secret, id)
+	sealed, err := s.sealSecret(secret, userTOTPAAD(id))
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec("UPDATE users SET totp_secret=? WHERE id=?", sealed, id)
 	return err
 }
 
@@ -765,6 +789,16 @@ func (s *Store) GetSetting(key, def string) string {
 	if err := s.db.QueryRow("SELECT value FROM settings WHERE key=?", key).Scan(&v); err != nil {
 		return def
 	}
+	if secretSettings[key] {
+		// A secret that cannot be opened reads as unset: what needs it then
+		// fails closed (no sign-in, no DNS-01), and SetSetting refuses to
+		// replace it while the store is locked.
+		plain, err := s.openSecret(v, settingAAD(key))
+		if err != nil {
+			return def
+		}
+		return plain
+	}
 	return v
 }
 
@@ -781,6 +815,13 @@ func (s *Store) AllSettings() (map[string]string, error) {
 		if err := rows.Scan(&k, &v); err != nil {
 			return nil, err
 		}
+		if secretSettings[k] {
+			// Callers only show whether a secret is set, never the value. One
+			// that cannot be opened still counts as set.
+			if plain, err := s.openSecret(v, settingAAD(k)); err == nil {
+				v = plain
+			}
+		}
 		out[k] = v
 	}
 	return out, rows.Err()
@@ -788,6 +829,13 @@ func (s *Store) AllSettings() (map[string]string, error) {
 
 // SetSetting upserts one setting.
 func (s *Store) SetSetting(key, value string) error {
+	if secretSettings[key] {
+		sealed, err := s.sealSecret(value, settingAAD(key))
+		if err != nil {
+			return err
+		}
+		value = sealed
+	}
 	_, err := s.db.Exec(
 		"INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
 		key, value)
@@ -897,7 +945,10 @@ func (s *Store) RestoreFrom(dbPath string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return warnings, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return append(warnings, s.sealAfterRestore()...), nil
 }
 
 // columnSet returns the column names of table in an attached schema.

@@ -82,6 +82,23 @@ func main() {
 	}
 	defer st.Close()
 
+	// "quicgate -unseal" prepares a rollback to a version from before secrets
+	// were sealed: it writes them back as plaintext and exits. Any later start
+	// of this version seals them again.
+	if len(os.Args) > 1 && os.Args[1] == "-unseal" {
+		n, err := st.Unseal()
+		if err != nil {
+			log.Fatalf("unseal: %v", err)
+		}
+		log.Printf("unseal: %d secrets are stored in PLAINTEXT again, readable by older versions. Start the older version now; this version would seal them again.", n)
+		return
+	}
+	if ss := st.SealStatus(); ss.Locked {
+		log.Printf("quicgate: the secret store is LOCKED: %s", ss.Reason)
+	} else {
+		log.Printf("quicgate: secrets are sealed with key %s from %s", ss.KeyID, ss.Source)
+	}
+
 	eng := engine.New(engine.Config{
 		HTTPAddr:   env("QG_HTTP", ":80"),
 		HTTPSAddr:  env("QG_HTTPS", ":443"),

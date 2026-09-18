@@ -75,6 +75,15 @@ func New(keys ...[]byte) (*Box, error) {
 	return b, nil
 }
 
+// HasKey reports whether the box holds the key with this id.
+func (b *Box) HasKey(id string) bool {
+	if b == nil {
+		return false
+	}
+	_, ok := b.keys[id]
+	return ok
+}
+
 // Usable reports whether the box can seal.
 func (b *Box) Usable() bool { return b != nil && b.primary != "" }
 

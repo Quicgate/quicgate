@@ -356,6 +356,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		"streams":     map[string]int{"total": len(streams), "enabled": streamsOn},
 		"accessLists": len(lists),
 		"upstreams":   map[string]int{"up": up, "down": down},
+		"secrets":     s.store.SealStatus(),
 		"features": map[string]bool{
 			"http3":       info.HTTP3,
 			"upnp":        info.UPnP,

@@ -65,7 +65,8 @@ columns mean:
 | Admin login through OIDC or LDAP | yes, synthetic IdP | no | PKCE, nonce and one-use sign-in for OIDC; LDAP requires `ldaps://`. Neither asks for the local TOTP code: require MFA at the IdP or directory. |
 | Session revocation (password change, sign out others, SSO key rotation) | yes | no | |
 | API tokens | yes | yes | Full administrator credentials: no scopes, no expiry. |
-| Backup and restore | yes | no | Restores every table and the certificate tree as a unit, or changes nothing. Refuses files that are not quicgate backups or would leave no admin able to sign in. Archives are not encrypted. |
+| Backup and restore | yes | no | Restores every table and the certificate tree as a unit, or changes nothing. Refuses files that are not quicgate backups or would leave no admin able to sign in. Archives are not encrypted as a whole: secrets from the database are sealed inside them and the sealing key is never included, but the certificate tree (ACME and imported private keys) is in the clear. |
+| Secrets encrypted at rest (2FA secrets, OIDC client secrets, DNS credentials, custom certificate keys, SSO cookie key) | yes, including a raw-byte search of the database, WAL and archive | no | XChaCha20-Poly1305, bound to row and column. A missing or wrong key locks the secrets and fails closed; it never replaces them. Rollback to an older version needs `quicgate -unseal`. |
 | Declarative import | yes | no | One transaction, idempotent by natural key; never silently removes protection. (The earlier, non-transactional import was used for a live migration.) |
 | Prometheus metrics | yes | no | Needs an API token to scrape. Per-host labels are bounded by configuration; per-listener, per-protocol and per-refusal-reason series are bounded too. |
 | Traffic history and Overview charts | yes | yes (v1.11.1) | Sampled every 10 seconds, rolled up to 5 minutes and an hour, kept for a week in `traffic.json`. Bytes are counted on client sockets for HTTP, HTTPS and streams, and from QUIC's own counters for HTTP/3. Countries need a GeoIP database. |
@@ -81,7 +82,7 @@ dropped:
 
 - Multiple admin users with roles, and an audit log of configuration changes.
 - Scoped and expiring API tokens.
-- Application-level encryption of stored private keys and provider secrets (use disk encryption
+- Encryption of the ACME certificate files under `certs/` (database secrets are sealed; for the files use disk encryption
   and treat backups as sensitive).
 - Per-location overrides of options other than upstream and path rewrite.
 - Watching from-file certificates for renewal on disk.

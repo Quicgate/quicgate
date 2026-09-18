@@ -4,6 +4,36 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+- **Secrets in the database are encrypted at rest.** Until now the database held them in the
+  clear: the admin's two-factor (TOTP) secret, OIDC client secrets, DNS provider credentials,
+  the private keys of uploaded and self-signed certificates, and the key that signs SSO cookies.
+  A leaked `quicgate.db` or backup archive handed all of them over. They are now sealed with
+  XChaCha20-Poly1305, each value bound to its own row and column so a ciphertext copied elsewhere
+  does not open. The first start of this version seals everything that is stored, then rewrites
+  the database file, because replacing a value in SQLite leaves the old bytes in free pages and
+  in the write-ahead log. Passwords, basic-auth passwords and API tokens were hashes already.
+- The key comes from `QG_SECRET_KEY_FILE` or `QG_SECRET_KEY`; without either, quicgate creates
+  `secret.key` in the data directory. A key in the data directory protects against a leaked
+  database or backup, not against someone who can read the whole directory: keep the key
+  elsewhere if that matters to you. **Backup archives never contain the key.** Keep a copy of it
+  with your backups, stored separately; a restore on another machine needs it.
+- **A missing or wrong key locks the secrets, it never replaces them.** quicgate still starts and
+  proxies. Sealed values are kept untouched, no new key is invented, and what needs a secret
+  fails closed: OIDC sign-in, DNS-01, hosts on a custom certificate, and any login for an
+  account with two-factor (an unreadable 2FA secret is never read as "2FA is off"). The
+  Overview says so under Attention. Put the key back and restart.
+- Restoring a backup from an older version seals what it brings in. Restoring one that another
+  instance sealed keeps those values as they are and warns that its key must be added to the
+  key file (one key per line; the first line seals, all lines open).
+
+### Upgrade note
+- **Rolling back:** a version before this one reads a sealed value as if it were the secret, so
+  certificates fail to load and OIDC logins fail (closed, not open). Before starting an older
+  version, run `quicgate -unseal` once: it writes the secrets back in plaintext and exits.
+
 ## [1.14.1] - 2026-09-18
 
 ### Fixed

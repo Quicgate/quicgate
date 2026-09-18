@@ -85,8 +85,13 @@ func (s *Store) ListCustomCerts() ([]CustomCert, error) {
 
 // GetCustomCertPEM returns the cert + key material for the engine.
 func (s *Store) GetCustomCertPEM(id int64) (certPEM, keyPEM string, err error) {
-	err = s.db.QueryRow("SELECT cert_pem, key_pem FROM custom_certs WHERE id=?", id).Scan(&certPEM, &keyPEM)
-	return
+	if err = s.db.QueryRow("SELECT cert_pem, key_pem FROM custom_certs WHERE id=?", id).Scan(&certPEM, &keyPEM); err != nil {
+		return "", "", err
+	}
+	if keyPEM, err = s.openSecret(keyPEM, customCertKeyAAD(id)); err != nil {
+		return "", "", fmt.Errorf("private key of certificate %d: %w", id, err)
+	}
+	return certPEM, keyPEM, nil
 }
 
 func (s *Store) CreateCustomCert(c *CustomCert) error {
@@ -95,15 +100,36 @@ func (s *Store) CreateCustomCert(c *CustomCert) error {
 	}
 	domainsB, _ := json.Marshal(c.Domains)
 	domains := string(domainsB)
-	res, err := s.db.Exec(
-		"INSERT INTO custom_certs (name, domains, not_after, cert_pem, key_pem, created_at) VALUES (?,?,?,?,?,?)",
-		c.Name, domains, c.NotAfter, c.CertPEM, c.KeyPEM, now())
+	// The sealed key names its row, so the row comes first and the key
+	// follows in the same transaction.
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	c.ID, err = res.LastInsertId()
+	defer tx.Rollback()
+	res, err := tx.Exec(
+		"INSERT INTO custom_certs (name, domains, not_after, cert_pem, key_pem, created_at) VALUES (?,?,?,?,'',?)",
+		c.Name, domains, c.NotAfter, c.CertPEM, now())
+	if err != nil {
+		return err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	sealed, err := s.sealSecret(c.KeyPEM, customCertKeyAAD(id))
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec("UPDATE custom_certs SET key_pem=? WHERE id=?", sealed, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	c.ID = id
 	c.CertPEM, c.KeyPEM = "", ""
-	return err
+	return nil
 }
 
 // UpdateCustomCertPEM replaces the cert/key of an existing entry in place, so
@@ -114,9 +140,13 @@ func (s *Store) UpdateCustomCertPEM(id int64, c *CustomCert) error {
 	}
 	domainsB, _ := json.Marshal(c.Domains)
 	domains := string(domainsB)
+	sealed, err := s.sealSecret(c.KeyPEM, customCertKeyAAD(id))
+	if err != nil {
+		return err
+	}
 	res, err := s.db.Exec(
 		"UPDATE custom_certs SET name=?, domains=?, not_after=?, cert_pem=?, key_pem=? WHERE id=?",
-		c.Name, domains, c.NotAfter, c.CertPEM, c.KeyPEM, id)
+		c.Name, domains, c.NotAfter, c.CertPEM, sealed, id)
 	if err != nil {
 		return err
 	}

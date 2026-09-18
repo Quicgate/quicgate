@@ -55,7 +55,23 @@ func (p *OIDCProvider) Validate() error {
 	return nil
 }
 
-func scanOIDCProvider(row interface{ Scan(...any) error }) (OIDCProvider, error) {
+// scanOIDCProvider reads one provider and opens its client secret. A secret
+// that cannot be opened (locked store) is left empty: the provider then cannot
+// complete a login, which closes every gate that uses it.
+func (s *Store) scanOIDCProvider(row interface{ Scan(...any) error }) (OIDCProvider, error) {
+	p, err := scanOIDCProviderRaw(row)
+	if err != nil {
+		return p, err
+	}
+	plain, err := s.openSecret(p.ClientSecret, providerSecretAAD(p.ID))
+	if err != nil {
+		plain = ""
+	}
+	p.ClientSecret = plain
+	return p, nil
+}
+
+func scanOIDCProviderRaw(row interface{ Scan(...any) error }) (OIDCProvider, error) {
 	var p OIDCProvider
 	var scopes string
 	var skip int
@@ -79,7 +95,7 @@ func (s *Store) ListOIDCProviders() ([]OIDCProvider, error) {
 	defer rows.Close()
 	var out []OIDCProvider
 	for rows.Next() {
-		p, err := scanOIDCProvider(rows)
+		p, err := s.scanOIDCProvider(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -92,12 +108,30 @@ func (s *Store) CreateOIDCProvider(p *OIDCProvider) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
-	res, err := s.db.Exec("INSERT INTO oidc_providers (name, issuer, client_id, client_secret, scopes, groups_claim, session_hours, skip_tls_verify) VALUES (?,?,?,?,?,?,?,?)",
-		p.Name, p.Issuer, p.ClientID, p.ClientSecret, strings.Join(p.Scopes, ","), p.GroupsClaim, p.SessionHours, b2i(p.SkipTLSVerify))
+	// The sealed secret names its row, so the row comes first and the secret
+	// follows in the same transaction.
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	p.ID, _ = res.LastInsertId()
+	defer tx.Rollback()
+	res, err := tx.Exec("INSERT INTO oidc_providers (name, issuer, client_id, client_secret, scopes, groups_claim, session_hours, skip_tls_verify) VALUES (?,?,?,'',?,?,?,?)",
+		p.Name, p.Issuer, p.ClientID, strings.Join(p.Scopes, ","), p.GroupsClaim, p.SessionHours, b2i(p.SkipTLSVerify))
+	if err != nil {
+		return err
+	}
+	id, _ := res.LastInsertId()
+	sealed, err := s.sealSecret(p.ClientSecret, providerSecretAAD(id))
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec("UPDATE oidc_providers SET client_secret=? WHERE id=?", sealed, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	p.ID = id
 	return nil
 }
 
@@ -107,17 +141,24 @@ func (s *Store) UpdateOIDCProvider(p *OIDCProvider) error {
 	}
 	// An empty secret on update keeps the stored one, so the UI never has to
 	// echo the secret back just to save an unrelated field.
-	if p.ClientSecret == "" {
-		row := s.db.QueryRow("SELECT client_secret FROM oidc_providers WHERE id = ?", p.ID)
-		if err := row.Scan(&p.ClientSecret); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return sql.ErrNoRows
-			}
+	// The stored value is kept as it is in that case, sealed or not, also in
+	// a locked store.
+	var stored string
+	if err := s.db.QueryRow("SELECT client_secret FROM oidc_providers WHERE id = ?", p.ID).Scan(&stored); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return sql.ErrNoRows
+		}
+		return err
+	}
+	if p.ClientSecret != "" {
+		sealed, err := s.sealSecret(p.ClientSecret, providerSecretAAD(p.ID))
+		if err != nil {
 			return err
 		}
+		stored = sealed
 	}
 	res, err := s.db.Exec("UPDATE oidc_providers SET name=?, issuer=?, client_id=?, client_secret=?, scopes=?, groups_claim=?, session_hours=?, skip_tls_verify=? WHERE id=?",
-		p.Name, p.Issuer, p.ClientID, p.ClientSecret, strings.Join(p.Scopes, ","), p.GroupsClaim, p.SessionHours, b2i(p.SkipTLSVerify), p.ID)
+		p.Name, p.Issuer, p.ClientID, stored, strings.Join(p.Scopes, ","), p.GroupsClaim, p.SessionHours, b2i(p.SkipTLSVerify), p.ID)
 	if err != nil {
 		return err
 	}

@@ -424,6 +424,9 @@ async function ovLoadState() {
   const attn = (level, text, page) => attention.push(
     `<div class="attn"><span class="sdot sdot--${level}"></span><span class="attn__text">${esc(text)}</span>` +
     (page ? `<button type="button" class="btn btn--ghost btn--sm" data-goto="${page}">View</button>` : '') + '</div>');
+  if (o.secrets && o.secrets.locked) {
+    attn('bad', `The secret store is locked: ${o.secrets.reason}. Stored secrets are kept untouched, and OIDC sign-in, DNS-01, custom certificates and two-factor logins do not work until the key is back.`, '');
+  }
   if (down) attn('bad', `${plural(down, 'upstream is', 'upstreams are')} unreachable`, 'hosts');
   if (failedCerts) attn('bad', `${plural(failedCerts, 'certificate', 'certificates')} failed to issue or renew`, 'certs');
   const closed = (routes || []).filter((r) => (r.warnings || []).length).length;
