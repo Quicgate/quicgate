@@ -176,6 +176,16 @@ handshake, traffic and connections per site
 </details>
 
 <details>
+<summary><b>VPN for people</b> (new in 1.17)</summary>
+
+Hosts that exist inside the WireGuard tunnel only, invisible from outside &middot; devices with
+keys made in the browser &middot; access-list rules about who is on the VPN &middot; a portal where
+people log in with single sign-on and add their own devices, re-checked with the identity provider
+every few minutes &middot; experimental LAN access with per-group policies, a flow log, and no way
+to reach quicgate's own admin port through it
+</details>
+
+<details>
 <summary><b>Docker</b></summary>
 
 Opt a container in with `quicgate.enable=true` and its host (and streams) are derived from labels:
@@ -216,6 +226,7 @@ is tracked row by row in [FEATURES.md](FEATURES.md).
 | Access lists | IP/CIDR + **GeoIP + dynamic DNS** | IP/CIDR | yes |
 | TCP/UDP streams | yes, + PROXY protocol, SNI, TLS termination | basic | via tunnels |
 | Reaching services on remote networks | **WireGuard sites**, any WireGuard peer, no agent (new in 1.16) | no | **yes, mature, with its own agent and user access** |
+| VPN for people's devices | WireGuard devices, SSO portal with re-checked logins, experimental LAN access (new in 1.17) | no | **yes, mature** |
 | Config from container labels | **yes, flat labels + streams** | no | via Traefik labels |
 | Metrics and API | Prometheus + full REST + OpenAPI | none / undocumented REST | via Traefik / REST |
 | Maturity | **young, read the caveats** | battle-tested, huge community | growing fast |
@@ -232,8 +243,10 @@ certificates, access control and SSO) on a modern engine.
 - Not everything has met the real world yet. The built-in OIDC SSO, for one, is tested against a
   synthetic identity provider: try it against yours before you rely on it.
   [FEATURES.md](FEATURES.md) says per feature what is proven live and what is only tested.
-- WireGuard sites are new in 1.16 and tested, not yet proven in production. There is no VPN for
-  people's devices: a site connects a network to quicgate, it does not let your phone into one.
+- WireGuard sites are new in 1.16, and devices, the VPN portal and LAN access are new in 1.17:
+  tested, including adversarial tests, but not yet proven in production. LAN access is marked
+  experimental until the code has had an outside review. It is not a full-tunnel VPN and not a
+  mesh.
 - A single admin account (with 2FA, OIDC or LDAP login), no multi-tenant roles.
 
 ## Performance

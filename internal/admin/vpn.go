@@ -378,6 +378,28 @@ func (s *Server) handleExplainRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"answer": answer})
 }
 
+// vpnOverview is what the overview's Attention list says about the VPN.
+func (s *Server) vpnOverview() map[string]any {
+	st := s.engine.WGStatus()
+	out := map[string]any{"enabled": st.Enabled, "running": st.Running, "error": st.Error, "lanAccess": st.LANAccess,
+		"flowLogDropped": s.engine.FlowLogDropped(), "breakGlass": 0, "breakGlassNoExpiry": 0}
+	devices, err := s.store.ListWGDevices()
+	if err != nil {
+		return out
+	}
+	n, never := 0, 0
+	for _, d := range devices {
+		if d.Kind == "breakglass" && d.RevokedAt == "" {
+			n++
+			if d.ExpiresAt == "" {
+				never++
+			}
+		}
+	}
+	out["breakGlass"], out["breakGlassNoExpiry"] = n, never
+	return out
+}
+
 // inBridgeContainer guesses that quicgate runs in a container on a bridge
 // network: there its published ports live on an address it cannot see. The
 // guess is an aid, never a guarantee (S48).

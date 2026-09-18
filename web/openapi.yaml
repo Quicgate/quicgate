@@ -18,6 +18,28 @@ components:
       scheme: bearer
       description: "API token from POST /api/tokens (Authorization: Bearer qg_...)."
   schemas:
+    VPNSubject:
+      type: object
+      description: Who a VPN rule, a policy or an enrolment is about. A group or a person always names its identity provider.
+      properties:
+        kind: { type: string, enum: [any, site, device, peer, user, group, any-user] }
+        peer: { type: string, description: "kind peer: site:<id> or device:<id>" }
+        provider: { type: integer, description: "kinds user, group, any-user" }
+        sub: { type: string }
+        group: { type: string }
+    VPNRoute:
+      type: object
+      properties:
+        cidr: { type: string, description: IPv4 prefix in private address space }
+        proto: { type: string, enum: [tcp, udp, any] }
+        ports: { type: string, description: '"" = all, else like 22,443,8000-8100' }
+    VPNPolicy:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        subject: { $ref: '#/components/schemas/VPNSubject' }
+        routes: { type: array, items: { $ref: '#/components/schemas/VPNRoute' } }
     Error:
       type: object
       properties:
@@ -238,6 +260,50 @@ paths:
       summary: Delete stream
       parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
       responses: { "200": { description: deleted } }
+  /api/wg/status:
+    get: { summary: "WireGuard endpoint status: running, port, tunnel network, public key, per-site and per-device handshake and traffic. Never a private or preshared key.", responses: { "200": { description: OK } } }
+  /api/wg/sites:
+    get: { summary: List WireGuard sites (without preshared keys), responses: { "200": { description: OK } } }
+    post:
+      summary: Create a site. The response carries the preshared key, this once.
+      requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string}, publicKey: {type: string}, networks: {type: array, items: {type: string}}, endpoint: {type: string}, keepalive: {type: integer}, enabled: {type: boolean}, allowOwnOverlap: {type: boolean} } } } } }
+      responses: { "201": { description: created }, "400": { description: refused by validation } }
+  /api/wg/sites/{id}:
+    put: { summary: "Update a site (the key and the address cannot change)", parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], responses: { "200": { description: ok } } }
+    delete: { summary: "Delete a site; 409 while a host or stream still reaches something through it", parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], responses: { "204": { description: deleted }, "409": { description: in use } } }
+  /api/wg/devices:
+    get: { summary: "List VPN devices, revoked ones included (without preshared keys)", responses: { "200": { description: OK } } }
+    post:
+      summary: Add a device that reaches quicgate's hosts in the tunnel. The response carries the preshared key, this once.
+      requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string}, publicKey: {type: string} } } } } }
+      responses: { "201": { description: created } }
+  /api/wg/devices/{id}/enabled:
+    put: { summary: Switch a device off or on, parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], requestBody: { content: { application/json: { schema: { type: object, properties: { enabled: {type: boolean} } } } } }, responses: { "204": { description: ok } } }
+  /api/wg/devices/{id}:
+    delete: { summary: "Revoke a device. Final: the key can never be registered again.", parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], responses: { "204": { description: revoked } } }
+  /api/wg/breakglass:
+    post:
+      summary: Add a break-glass device (LAN routes without a login). Needs the admin's password and a TOTP code; at most two exist.
+      requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string}, publicKey: {type: string}, password: {type: string}, code: {type: string}, routes: {type: array, items: { $ref: '#/components/schemas/VPNRoute' }}, expiresAt: {type: string, format: date-time}, neverExpires: {type: boolean} } } } } }
+      responses: { "201": { description: created }, "401": { description: wrong password or code } }
+  /api/wg/policies:
+    get: { summary: List LAN policies, responses: { "200": { description: OK } } }
+    post: { summary: Create a LAN policy, requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/VPNPolicy' } } } }, responses: { "200": { description: ok } } }
+  /api/wg/policies/{id}:
+    put: { summary: Update a LAN policy, parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/VPNPolicy' } } } }, responses: { "200": { description: ok } } }
+    delete: { summary: Delete a LAN policy, parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], responses: { "204": { description: deleted } } }
+  /api/wg/explain:
+    post: { summary: "Would these routes let a device reach a destination, and if not, why", requestBody: { content: { application/json: { schema: { type: object, properties: { routes: {type: array, items: { $ref: '#/components/schemas/VPNRoute' }}, proto: {type: string, enum: [tcp, udp]}, dest: {type: string, example: "192.168.1.10:443"} } } } } }, responses: { "200": { description: "{answer}" } } }
+  /api/wg/sessions:
+    get: { summary: "People who logged in at a VPN portal, with their lease. Never a refresh token.", responses: { "200": { description: OK } } }
+  /api/wg/sessions/{id}/end:
+    post: { summary: End a person's login now; their devices stop until they log in again, parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], responses: { "204": { description: ended } } }
+  /api/wg/blocked:
+    get: { summary: List blocked owners, responses: { "200": { description: OK } } }
+  /api/wg/owners/block:
+    post: { summary: "Block a person from the VPN; a login does not undo it", requestBody: { content: { application/json: { schema: { type: object, properties: { provider: {type: integer}, sub: {type: string}, email: {type: string} } } } } }, responses: { "204": { description: blocked } } }
+  /api/wg/owners/unblock:
+    post: { summary: Lift a block, requestBody: { content: { application/json: { schema: { type: object, properties: { provider: {type: integer}, sub: {type: string} } } } } }, responses: { "204": { description: lifted } } }
   /api/certs:
     get: { summary: Managed (ACME) cert status, responses: { "200": { description: "[{domain, status, notAfter, lastError, errorAt}]" } } }
   /api/custom-certs:

@@ -303,7 +303,7 @@ func resolveEndpoint(ctx context.Context, endpoint string) (string, error) {
 // peerIPC renders one peer as wireguard-go configuration. AllowedIPs are
 // always written whole (S41), never patched. endpoint is the endpoint to
 // write, or "" to leave the peer's endpoint as it is.
-func peerIPC(p peer, endpoint string) (string, error) {
+func peerIPC(p peer, endpoint string, located bool) (string, error) {
 	pub, err := keyHex(p.publicKey)
 	if err != nil {
 		return "", fmt.Errorf("%s %q public key: %w", kindOf(p), p.name, err)
@@ -317,7 +317,13 @@ func peerIPC(p peer, endpoint string) (string, error) {
 	if endpoint != "" {
 		fmt.Fprintf(&b, "endpoint=%s\n", endpoint)
 	}
-	fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", p.keepalive)
+	// Keepalives go to a peer quicgate can find. For one it has never heard
+	// from they would only fail, every few seconds, for as long as it is away.
+	keepalive := p.keepalive
+	if !located {
+		keepalive = 0
+	}
+	fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", keepalive)
 	for _, n := range p.prefixes() {
 		fmt.Fprintf(&b, "allowed_ip=%s\n", n)
 	}
@@ -534,7 +540,8 @@ func (m *Manager) syncPeersLocked(ctx context.Context, cfg Config, replaceAll bo
 			endpoint = m.lastSeen[p.publicKey]
 			delete(m.resolved, p.key)
 		}
-		ipc, err := peerIPC(p, endpoint)
+		located := endpoint != "" || m.resolved[p.key] != "" || m.lastSeen[p.publicKey] != ""
+		ipc, err := peerIPC(p, endpoint, located)
 		if err != nil {
 			return err
 		}
@@ -565,6 +572,7 @@ func (m *Manager) rememberLocked() {
 	}
 	changed := false
 	var pub string
+	var found []string // heard from for the first time
 	for _, line := range strings.Split(dump, "\n") {
 		k, v, ok := strings.Cut(line, "=")
 		if !ok {
@@ -578,7 +586,22 @@ func (m *Manager) rememberLocked() {
 			}
 		case "endpoint":
 			if pub != "" && m.lastSeen[pub] != v {
+				if m.lastSeen[pub] == "" {
+					found = append(found, pub)
+				}
 				m.lastSeen[pub], changed = v, true
+			}
+		}
+	}
+	// A site that called in for the first time can be found from now on: its
+	// keepalives start here.
+	for _, pub := range found {
+		for _, p := range m.peers {
+			if p.publicKey != pub || p.keepalive == 0 {
+				continue
+			}
+			if key, err := keyHex(pub); err == nil {
+				_ = m.inst.dev.IpcSet(fmt.Sprintf("public_key=%s\nupdate_only=true\npersistent_keepalive_interval=%d\n", key, p.keepalive))
 			}
 		}
 	}

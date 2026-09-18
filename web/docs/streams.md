@@ -79,9 +79,11 @@ choice next to its upstream. Two typical uses:
 - **Status.** The VPN page shows each site's last handshake, traffic and open connections. "up"
   means a handshake in the last three minutes. A site shows "waiting" until traffic flows:
   WireGuard only shakes hands when there is something to send.
-- **Restarts.** A site with an endpoint is back the moment quicgate is. A site that calls in
-  notices a restart only when its own timer fires: up to about 40 seconds with the default
-  keepalive of 25. Give a site an endpoint wherever it has a reachable address.
+- **Restarts.** A site with an endpoint is back the moment quicgate is. A site that calls in is
+  called back at the address it was last seen at (quicgate remembers it across restarts), which
+  brings it back within seconds. Only when that address changed in the meantime does it take
+  until the site's own timer fires: up to about 40 seconds with the default keepalive of 25.
+  Give a site an endpoint wherever it has a reachable address.
 - **Dynamic DNS.** Endpoint names are looked up again every five minutes. A name that does not
   resolve only affects its own site, which can still call in.
 - **Moving networks.** Giving a site a network that another site had, or changing its key,

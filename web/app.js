@@ -152,7 +152,8 @@ const GUIDES = [
   { id: 'configuration', title: 'Configuration reference', blurb: 'Every env var and setting, real client IP, GeoIP, HTTP/3, IPv6.' },
   { id: 'sso', title: 'Access control & SSO', blurb: 'Access lists, built-in OIDC login, forward auth, per-path rules.' },
   { id: 'docker', title: 'Docker labels', blurb: 'Derive hosts and streams from container labels, multi-host.' },
-  { id: 'streams', title: 'Streams & port forwards', blurb: 'TCP/UDP forwarding, PROXY protocol, SNI routing, UPnP.' },
+  { id: 'streams', title: 'Streams & port forwards', blurb: 'TCP/UDP forwarding, PROXY protocol, SNI routing, UPnP, WireGuard sites.' },
+  { id: 'vpn', title: 'VPN: devices, portal, LAN access', blurb: 'Hosts that exist on the VPN only, devices, single sign-on for the VPN, LAN policies.' },
 ];
 
 function renderGuideIndex() {
@@ -437,6 +438,11 @@ async function ovLoadState() {
   if (o.docker && o.docker.connected < o.docker.endpoints) {
     attn('warn', `${plural(o.docker.endpoints - o.docker.connected, 'Docker host is', 'Docker hosts are')} disconnected`, 'docker');
   }
+  const V = o.vpn || {};
+  if (V.enabled && !V.running) attn('bad', `The WireGuard endpoint is not running: ${V.error || 'unknown error'}`, 'vpn');
+  if (V.breakGlassNoExpiry) attn('warn', `${plural(V.breakGlassNoExpiry, 'break-glass VPN device never expires', 'break-glass VPN devices never expire')}: a lost copy reaches the LAN until somebody revokes it`, 'vpn');
+  else if (V.breakGlass) attn('info', `${plural(V.breakGlass, 'break-glass VPN device exists', 'break-glass VPN devices exist')}: they reach the LAN without a login`, 'vpn');
+  if (V.flowLogDropped) attn('warn', `${V.flowLogDropped} VPN flow records were dropped because the log could not keep up`, 'vpn');
   if (pendingCerts) attn('info', `${plural(pendingCerts, 'certificate is', 'certificates are')} waiting to be issued`, 'certs');
   if (!attention.length) attn('ok', 'Nothing needs attention.', '');
   $('ov-attention').innerHTML = attention.join('');
@@ -868,6 +874,10 @@ function renderHosts() {
       tdUpstream.innerHTML = '<span class="badge badge--danger">404 host</span>';
     } else if (h.type === 'static') {
       tdUpstream.innerHTML = `<span class="badge badge--muted">static</span> ${esc(h.staticRoot)}`;
+    } else if (h.type === 'vpn-portal') {
+      const po = (h.options && h.options.portal) || {};
+      const pv = oidcProviders.find((x) => x.id === po.providerId);
+      tdUpstream.innerHTML = `<span class="badge badge--muted">VPN portal</span> ${esc(pv ? 'login through ' + pv.name : '')}`;
     } else {
       const pool = [h.upstream, ...(h.upstreams || [])];
       // A backend behind a WireGuard site is another machine than the same
@@ -897,7 +907,8 @@ function renderHosts() {
     const acl = accessLists.find((a) => a.id === h.accessListId);
     tdAccess.innerHTML = acl
       ? `<span class="badge">${esc(acl.name)}</span>`
-      : '<span class="badge badge--muted">public</span>';
+      : (h.options && h.options.vpnOnly ? '' : '<span class="badge badge--muted">public</span>');
+    if (h.options && h.options.vpnOnly) tdAccess.innerHTML += ' <span class="badge badge--success" title="Served inside the WireGuard tunnel only">VPN only</span>';
 
     const tdCert = document.createElement('td');
     tdCert.className = 'domain';
@@ -1176,6 +1187,10 @@ function syncHostType() {
   $('f-upstream-row').hidden = t !== 'proxy';
   $('f-redirect-block').hidden = t !== 'redirect';
   $('f-static-block').hidden = t !== 'static';
+  $('f-portal-block').hidden = t !== 'vpn-portal';
+  $('f-via-row').style.display = t === 'proxy' ? '' : 'none'; // only a proxy host has an upstream to reach
+  // The portal is where people get the VPN back: it cannot be VPN only.
+  $('f-vpnonly-row').hidden = t === 'vpn-portal' || !($('f-vpnonly').checked || $('f-vpnonly-row').dataset.offer === '1');
   for (const el of document.querySelectorAll('#modal [data-proxyonly]')) {
     el.style.display = t === 'proxy' ? '' : 'none';
   }
@@ -1260,6 +1275,10 @@ function openModal(h) {
   $('f-fauth-url').value = fa.url || '';
   $('f-fauth-headers').value = (fa.responseHeaders || []).join(',');
   $('f-fauth-skipverify').checked = !!fa.skipTlsVerify;
+  $('f-vpnonly').checked = !!o.vpnOnly;
+  $('f-vpnonly-row').dataset.offer = '0';
+  api('GET', '/api/wg/status').then((st) => { $('f-vpnonly-row').dataset.offer = st.enabled ? '1' : '0'; syncHostType(); }).catch(() => {});
+  fillPortalBlock(h);
   const oi = o.oidc || {};
   $('f-oidc').checked = !!o.oidc;
   $('f-oidc-fields').hidden = !o.oidc;
@@ -1340,6 +1359,8 @@ $('host-form').addEventListener('submit', async (e) => {
     enabled: $('f-enabled').checked,
     accessListId: $('f-accesslist').value ? parseInt($('f-accesslist').value, 10) : null,
     options: {
+      vpnOnly: type !== 'vpn-portal' && $('f-vpnonly').checked,
+      portal: type === 'vpn-portal' ? readPortalOptions() : null,
       preserveHost: $('f-preservehost').checked,
       hostOverride: $('f-hostoverride').value.trim(),
       skipTlsVerify: $('f-skipverify').checked,
@@ -1489,6 +1510,7 @@ async function refreshAcls() {
   loadBans();
   [accessLists, oidcProviders] = await Promise.all([
     api('GET', '/api/access-lists'), api('GET', '/api/oidc-providers').catch(() => []),
+    loadWGSites(), loadVPNPeople(), // a VPN rule names sites, devices and people
   ]);
   renderIdps();
   const body = $('acl-body');
@@ -1502,7 +1524,7 @@ async function refreshAcls() {
     tdSatisfy.innerHTML = `<span class="badge badge--muted">${esc(a.satisfy)}</span>`;
     const tdRules = document.createElement('td');
     tdRules.className = 'domain';
-    tdRules.textContent = (a.rules || []).map((r) => `${r.action} ${r.cidr || r.host || ('country:' + r.country)}`).join('\n') || '-';
+    tdRules.textContent = (a.rules || []).map((r) => `${r.action} ${r.vpn ? 'VPN: ' + describeSubject(r.vpn) : (r.cidr || r.host || ('country:' + r.country))}`).join('\n') || '-';
     tdRules.style.whiteSpace = 'pre';
     const tdUsers = document.createElement('td');
     tdUsers.className = 'domain';
@@ -1573,7 +1595,7 @@ function addAclRuleRow(rule) {
   const chips = verbs.map((v) => `<span class="mchip" data-m="${v}" tabindex="0">${v}</span>`).join('');
   row.innerHTML =
     '<select class="r-action"><option value="allow">allow</option><option value="deny">deny</option></select>' +
-    '<select class="r-kind"><option value="cidr">IP/CIDR</option><option value="host">Hostname (DDNS)</option><option value="country">Country</option></select>' +
+    '<select class="r-kind"><option value="cidr">IP/CIDR</option><option value="host">Hostname (DDNS)</option><option value="country">Country</option><option value="vpn">On the VPN</option></select>' +
     '<span class="r-value-slot"></span>' +
     '<span class="r-methods" title="Click the verbs this rule applies to. None selected = all methods.">' + chips + '</span>' +
     '<button type="button" class="btn btn--ghost btn--sm r-del">&times;</button>';
@@ -1583,7 +1605,9 @@ function addAclRuleRow(rule) {
   const hints = { cidr: '192.168.1.0/24 or single IP', host: 'home.duckdns.org' };
   const setField = (current) => {
     slot.innerHTML = '';
-    slot.appendChild(kind.value === 'country' ? makeCountrySelect(current) : makeTextField(hints[kind.value], current));
+    row._subject = null;
+    if (kind.value === 'vpn') row._subject = makeSubjectPicker(slot, current || null, false);
+    else slot.appendChild(kind.value === 'country' ? makeCountrySelect(current) : makeTextField(hints[kind.value], current));
     updateGeoWarn();
   };
   kind.addEventListener('change', () => setField(''));
@@ -1594,10 +1618,11 @@ function addAclRuleRow(rule) {
   });
   if (rule) {
     action.value = rule.action;
-    if (rule.host) kind.value = 'host';
+    if (rule.vpn) kind.value = 'vpn';
+    else if (rule.host) kind.value = 'host';
     else if (rule.country) kind.value = 'country';
     else kind.value = 'cidr';
-    setField(rule.host || rule.country || rule.cidr || '');
+    setField(rule.vpn || rule.host || rule.country || rule.cidr || '');
     for (const m of rule.methods || []) {
       const c = row.querySelector(`.mchip[data-m="${m}"]`);
       if (c) c.classList.add('on');
@@ -1635,6 +1660,7 @@ async function openAclModal(a) {
   $('acl-rules').innerHTML = '';
   $('acl-users').innerHTML = '';
   try { window.__geoLoaded = !!(await api('GET', '/api/geoip/status')).loaded; } catch { window.__geoLoaded = undefined; }
+  await Promise.all([loadWGSites(), loadVPNPeople()]); // what a VPN rule can name
   for (const r of (a && a.rules) || []) addAclRuleRow(r);
   for (const u of (a && a.users) || []) addAclUserRow(u);
   updateGeoWarn();
@@ -1654,9 +1680,14 @@ $('acl-form').addEventListener('submit', async (e) => {
   for (const row of $('acl-rules').children) {
     const action = row.querySelector('.r-action').value;
     const kind = row.querySelector('.r-kind').value;
-    const val = row.querySelector('.r-value').value.trim();
-    if (!val) continue;
-    const rule = { action, [kind]: val };
+    let rule;
+    if (kind === 'vpn') {
+      rule = { action, vpn: row._subject() };
+    } else {
+      const val = row.querySelector('.r-value').value.trim();
+      if (!val) continue;
+      rule = { action, [kind]: val };
+    }
     const methods = [...row.querySelectorAll('.r-methods .mchip.on')].map((c) => c.dataset.m);
     if (methods.length) rule.methods = methods;
     rules.push(rule);
@@ -2736,6 +2767,8 @@ async function refreshVPN() {
   else if (status.enabled) line = `Not running: ${status.error || 'unknown error'}. Upstreams that name a site answer 502 until this is fixed.`;
   $('wg-status-line').textContent = line;
   $('wg-status-line').classList.toggle('form-error', status.enabled && !status.running);
+  if (!hosts.length) hosts = await api('GET', '/api/hosts').catch(() => []);
+  await refreshVPNDevices(settings, status);
 
   const live = {};
   for (const st of status.sites || []) live[st.id] = st;
@@ -2917,3 +2950,580 @@ $('wgsite-form').addEventListener('submit', async (e) => {
     setError('wgsite-error', err);
   }
 });
+
+/* ---- VPN: devices, people, LAN access ---- */
+let wgDevices = [];
+let vpnPolicies = [];
+let vpnSessions = [];
+let vpnBlocked = [];
+let wgDeviceMode = 'admin'; // or 'breakglass'
+let editingPolicyId = null;
+
+// loadVPNPeople fetches what the subject pickers offer: the devices, and the
+// people who have logged in at a portal.
+async function loadVPNPeople() {
+  [wgDevices, vpnSessions] = await Promise.all([
+    api('GET', '/api/wg/devices').catch(() => []),
+    api('GET', '/api/wg/sessions').catch(() => []),
+  ]);
+}
+
+function providerName(id) {
+  const p = oidcProviders.find((x) => x.id === id);
+  return p ? p.name : `provider ${id}`;
+}
+
+// knownPeople lists everybody quicgate has seen at a portal: a person is
+// picked from it, never typed as an id.
+function knownPeople(provider) {
+  const seen = new Map();
+  for (const s of vpnSessions) if (s.provider === provider) seen.set(s.sub, s.email || s.sub);
+  for (const d of wgDevices) if (d.kind === 'sso' && d.provider === provider && !seen.has(d.sub)) seen.set(d.sub, d.email || d.sub);
+  return [...seen].map(([sub, email]) => ({ sub, email })).sort((a, b) => a.email.localeCompare(b.email));
+}
+
+function knownGroups(provider) {
+  const out = new Set();
+  for (const s of vpnSessions) if (s.provider === provider) for (const g of s.groups || []) out.add(g);
+  return [...out].sort();
+}
+
+function describeSubject(v) {
+  if (!v) return '';
+  switch (v.kind) {
+    case 'any': return 'anyone on the VPN';
+    case 'site': return 'any site';
+    case 'device': return 'any device';
+    case 'peer': {
+      const [kind, id] = String(v.peer || '').split(':');
+      if (kind === 'site') return `site ${wgSiteName(parseInt(id, 10))}`;
+      const d = wgDevices.find((x) => x.id === parseInt(id, 10));
+      return d ? `device ${d.name}` : `device ${id}`;
+    }
+    case 'group': return `group ${v.group} (${providerName(v.provider)})`;
+    case 'user': {
+      const p = knownPeople(v.provider).find((x) => x.sub === v.sub);
+      return `${p ? p.email : v.sub} (${providerName(v.provider)})`;
+    }
+    case 'any-user': return `everybody from ${providerName(v.provider)}`;
+    default: return v.kind;
+  }
+}
+
+// makeSubjectPicker fills box with the controls that choose who a rule, a
+// policy or an enrolment is about, and returns a function that reads them.
+// identityOnly leaves out the kinds that do not name a person.
+function makeSubjectPicker(box, current, identityOnly, fixedProvider) {
+  box.textContent = '';
+  const kinds = [
+    ...(identityOnly ? [] : [['any', 'anyone on the VPN'], ['site', 'any site'], ['device', 'any device'], ['peer', 'one site or device']]),
+    ['group', 'a group'], ['user', 'one person'], ['any-user', 'everybody from'],
+  ];
+  const kind = document.createElement('select');
+  kind.className = 'subj-kind';
+  for (const [v, label] of kinds) kind.add(new Option(label, v));
+  const prov = document.createElement('select');
+  prov.className = 'subj-provider';
+  for (const p of oidcProviders) prov.add(new Option(p.name, String(p.id)));
+  const slot = document.createElement('span');
+  slot.className = 'r-value-slot';
+  box.append(kind, prov, slot);
+
+  let control = null;
+  const providerID = () => fixedProvider ? fixedProvider() : (parseInt(prov.value, 10) || 0);
+  const build = (cur) => {
+    slot.textContent = '';
+    control = null;
+    const identity = ['group', 'user', 'any-user'].includes(kind.value);
+    prov.hidden = !identity || !!fixedProvider;
+    if (kind.value === 'peer') {
+      control = document.createElement('select');
+      control.className = 'r-value';
+      for (const s of wgSites) control.add(new Option(`site ${s.name}`, `site:${s.id}`));
+      for (const d of wgDevices.filter((x) => !x.revokedAt)) control.add(new Option(`device ${d.name}${d.email ? ' of ' + d.email : ''}`, `device:${d.id}`));
+      if (!control.options.length) control.add(new Option('no sites or devices yet', ''));
+      if (cur && cur.peer) control.value = cur.peer;
+    } else if (kind.value === 'user') {
+      control = document.createElement('select');
+      control.className = 'r-value';
+      const people = knownPeople(providerID());
+      for (const p of people) control.add(new Option(p.email, p.sub));
+      if (cur && cur.sub && !people.some((p) => p.sub === cur.sub)) control.add(new Option(cur.sub, cur.sub));
+      if (!control.options.length) control.add(new Option('nobody has logged in at a portal yet', ''));
+      if (cur && cur.sub) control.value = cur.sub;
+    } else if (kind.value === 'group') {
+      control = document.createElement('input');
+      control.className = 'r-value';
+      control.placeholder = 'group name, as the identity provider writes it';
+      control.autocomplete = 'off';
+      const listId = `groups-${Math.random().toString(36).slice(2)}`;
+      const list = document.createElement('datalist');
+      list.id = listId;
+      for (const g of knownGroups(providerID())) list.append(new Option(g));
+      control.setAttribute('list', listId);
+      slot.append(list);
+      if (cur && cur.group) control.value = cur.group;
+    }
+    if (control) slot.append(control);
+  };
+  kind.addEventListener('change', () => build(null));
+  prov.addEventListener('change', () => build(null));
+  if (current) {
+    kind.value = current.kind;
+    if (current.provider) prov.value = String(current.provider);
+  } else if (identityOnly) kind.value = 'group';
+  build(current);
+
+  return () => {
+    const v = { kind: kind.value };
+    if (['group', 'user', 'any-user'].includes(v.kind)) v.provider = providerID();
+    if (v.kind === 'peer') v.peer = control.value;
+    if (v.kind === 'user') v.sub = control.value;
+    if (v.kind === 'group') v.group = control.value.trim();
+    return v;
+  };
+}
+
+// addRouteRow adds one LAN destination to a routes editor.
+function addRouteRow(boxId, route) {
+  const row = document.createElement('div');
+  row.className = 'hdr-rule';
+  row.innerHTML =
+    '<input class="rt-cidr" placeholder="192.168.1.0/24 or one address" autocomplete="off" spellcheck="false">' +
+    '<select class="rt-proto"><option value="any">tcp + udp</option><option value="tcp">tcp</option><option value="udp">udp</option></select>' +
+    '<input class="rt-ports" placeholder="all ports" autocomplete="off" spellcheck="false">' +
+    '<button type="button" class="btn btn--ghost btn--sm">&times;</button>';
+  if (route) {
+    row.querySelector('.rt-cidr').value = route.cidr;
+    row.querySelector('.rt-proto').value = route.proto || 'any';
+    row.querySelector('.rt-ports').value = route.ports || '';
+  }
+  row.querySelector('button').addEventListener('click', () => row.remove());
+  $(boxId).appendChild(row);
+}
+
+function readRoutes(boxId) {
+  const out = [];
+  for (const row of $(boxId).children) {
+    let cidr = row.querySelector('.rt-cidr').value.trim();
+    if (!cidr) continue;
+    if (!cidr.includes('/')) cidr += '/32';
+    out.push({ cidr, proto: row.querySelector('.rt-proto').value, ports: row.querySelector('.rt-ports').value.trim() });
+  }
+  return out;
+}
+
+const describeRoute = (r) => `${r.cidr}${r.ports ? ` ${r.proto === 'any' ? 'tcp+udp' : r.proto} ${r.ports}` : (r.proto && r.proto !== 'any' ? ' ' + r.proto : '')}`;
+
+async function refreshVPNDevices(settings, status) {
+  [vpnPolicies, vpnBlocked] = await Promise.all([
+    api('GET', '/api/wg/policies').catch(() => []),
+    api('GET', '/api/wg/blocked').catch(() => []),
+    loadVPNPeople(),
+  ]);
+  if (!oidcProviders.length) oidcProviders = await api('GET', '/api/oidc-providers').catch(() => []);
+  const portals = hosts.filter((h) => h.type === 'vpn-portal');
+  const usesPeople = portals.length > 0 || vpnSessions.length > 0 || vpnBlocked.length > 0;
+  const lan = settings.wg_lan_access === '1';
+
+  $('wg-network').disabled = wgSites.length > 0 || wgDevices.some((d) => !d.revokedAt);
+  $('btn-add-wgdevice').disabled = !status.running;
+  $('btn-add-wgdevice').title = status.running ? '' : 'Switch WireGuard on first';
+  $('btn-add-breakglass').hidden = !lan;
+  $('btn-add-breakglass').disabled = !status.running;
+
+  // Devices.
+  const live = {};
+  for (const st of status.devices || []) live[st.id] = st;
+  const shown = wgDevices.filter((d) => !d.revokedAt);
+  const body = $('wgdevices-body');
+  body.innerHTML = '';
+  $('wgdevices-empty').hidden = shown.length > 0;
+  $('wgdevices-table').hidden = shown.length === 0;
+  for (const d of shown) {
+    const st = live[d.id];
+    const tr = document.createElement('tr');
+    const cell = (text, cls) => { const td = document.createElement('td'); if (cls) td.className = cls; td.textContent = text; tr.appendChild(td); return td; };
+    cell(d.name, 'domain');
+    const tdOwner = cell('');
+    if (d.kind === 'breakglass') {
+      const expired = d.expiresAt && new Date(d.expiresAt) < new Date();
+      tdOwner.innerHTML = `<span class="badge badge--danger">break-glass</span> <span class="hs-muted">${esc(d.expiresAt ? (expired ? 'expired ' : 'until ') + new Date(d.expiresAt).toLocaleDateString() : 'never expires')}</span>`;
+      tdOwner.title = 'Reaches: ' + (d.routes || []).map(describeRoute).join(', ');
+    } else if (d.kind === 'sso') {
+      tdOwner.textContent = d.email || d.sub;
+      tdOwner.title = `${providerName(d.provider)}, subject ${d.sub}`;
+    } else {
+      tdOwner.innerHTML = '<span class="hs-muted">added by an admin</span>';
+    }
+    cell(d.address, 'mono');
+    const tdState = cell('');
+    let badge = ['badge--muted', 'disabled', ''];
+    if (d.enabled && !status.running) badge = ['badge--danger', 'endpoint down', ''];
+    else if (d.enabled && !st) badge = ['badge--muted', 'no access', d.kind === 'sso' ? 'The owner\'s login ran out, was ended, or no longer allows a device. Logging in at the portal brings it back.' : 'The device has expired.'];
+    else if (d.enabled && st.up) badge = ['badge--success', 'connected', `last handshake ${ago(st.lastHandshake)}${st.endpoint ? ', from ' + st.endpoint : ''}`];
+    else if (d.enabled) badge = ['badge--muted', 'not connected', st.lastHandshake && !st.lastHandshake.startsWith('0001') ? `last handshake ${ago(st.lastHandshake)}` : 'never seen'];
+    tdState.innerHTML = `<span class="badge ${badge[0]}">${esc(badge[1])}</span>`;
+    tdState.title = badge[2];
+    cell(st ? `${fmtBytes(st.rxBytes)} in, ${fmtBytes(st.txBytes)} out${st.connections ? ', ' + st.connections + ' open' : ''}` : '-', 'hs-muted');
+    const tdOn = cell('');
+    const sw = document.createElement('input');
+    sw.type = 'checkbox';
+    sw.checked = d.enabled;
+    sw.title = d.enabled ? 'Switch the device off for now' : 'Switch the device on again';
+    sw.addEventListener('change', async () => {
+      try { await api('PUT', `/api/wg/devices/${d.id}/enabled`, { enabled: sw.checked }); } catch (err) { alert(err.message); }
+      refreshVPN();
+    });
+    const wrap = document.createElement('span');
+    wrap.className = 'switch';
+    wrap.innerHTML = '<span class="switch__slot"></span><span class="switch__knob"></span>';
+    wrap.prepend(sw);
+    tdOn.append(wrap);
+    const tdAct = document.createElement('td');
+    tdAct.className = 'actions';
+    const del = document.createElement('button');
+    del.className = 'btn btn--ghost btn--sm btn--danger-hover';
+    del.textContent = 'Revoke';
+    del.addEventListener('click', async () => {
+      if (!confirm(`Revoke ${d.name}? Its configuration stops working at once and can never be used again.`)) return;
+      try { await api('DELETE', `/api/wg/devices/${d.id}`); refreshVPN(); } catch (err) { alert(err.message); }
+    });
+    tdAct.append(del);
+    tr.appendChild(tdAct);
+    body.appendChild(tr);
+  }
+
+  // People.
+  $('vpn-people-card').hidden = !usesPeople;
+  $('vpn-lease-form').hidden = !usesPeople;
+  const sbody = $('vpnsessions-body');
+  sbody.innerHTML = '';
+  const isBlocked = (s) => vpnBlocked.some((b) => b.provider === s.provider && b.sub === s.sub);
+  for (const s of vpnSessions) {
+    const tr = document.createElement('tr');
+    const cell = (text, cls) => { const td = document.createElement('td'); if (cls) td.className = cls; td.textContent = text; tr.appendChild(td); return td; };
+    cell(s.email || s.sub, 'domain').title = `${providerName(s.provider)}, subject ${s.sub}`;
+    cell((s.groups || []).join(', ') || '-', 'hs-muted');
+    const tdState = cell('');
+    const until = new Date(s.transient && new Date(s.graceUntil) > new Date(s.leaseUntil) ? s.graceUntil : s.leaseUntil);
+    const hard = new Date(s.hardUntil);
+    const liveNow = s.state === 'active' && until > new Date() && hard > new Date();
+    let badge = ['badge--muted', s.state === 'ended' ? 'ended by an admin' : 'ran out', 'A login at the portal starts a new one.'];
+    if (isBlocked(s)) badge = ['badge--danger', 'blocked', 'A login does not bring the devices back until the block is lifted.'];
+    else if (liveNow && s.transient) badge = ['badge--danger', 'provider unreachable', `The last check failed without an answer about the account. Access lasts until ${until.toLocaleTimeString()}.`];
+    else if (liveNow) badge = ['badge--success', 'active', `checked ${ago(s.renewedAt)}, good until ${until.toLocaleTimeString()}`];
+    tdState.innerHTML = `<span class="badge ${badge[0]}">${esc(badge[1])}</span>`;
+    tdState.title = badge[2];
+    cell(liveNow ? hard.toLocaleDateString() : '-', 'hs-muted');
+    const tdAct = document.createElement('td');
+    tdAct.className = 'actions';
+    if (liveNow) {
+      const end = document.createElement('button');
+      end.className = 'btn btn--secondary btn--sm';
+      end.textContent = 'End';
+      end.addEventListener('click', async () => {
+        if (!confirm(`End the login of ${s.email}? Their devices stop until they log in at the portal again.`)) return;
+        try { await api('POST', `/api/wg/sessions/${s.id}/end`); refreshVPN(); } catch (err) { alert(err.message); }
+      });
+      tdAct.append(end, ' ');
+    }
+    if (!isBlocked(s)) {
+      const block = document.createElement('button');
+      block.className = 'btn btn--ghost btn--sm btn--danger-hover';
+      block.textContent = 'Block';
+      block.addEventListener('click', async () => {
+        if (!confirm(`Block ${s.email} from the VPN? Their devices stop now and stay off, whatever the identity provider says, until you lift the block.`)) return;
+        try { await api('POST', '/api/wg/owners/block', { provider: s.provider, sub: s.sub, email: s.email }); refreshVPN(); } catch (err) { alert(err.message); }
+      });
+      tdAct.append(block);
+    }
+    tr.appendChild(tdAct);
+    sbody.appendChild(tr);
+  }
+  $('vpnsessions-table').hidden = vpnSessions.length === 0;
+  const blockedBox = $('vpnblocked');
+  blockedBox.hidden = vpnBlocked.length === 0;
+  blockedBox.textContent = '';
+  if (vpnBlocked.length) {
+    blockedBox.append('Blocked: ');
+    vpnBlocked.forEach((b, i) => {
+      if (i) blockedBox.append(', ');
+      blockedBox.append(`${b.email || b.sub} `);
+      const un = document.createElement('button');
+      un.className = 'btn btn--ghost btn--sm';
+      un.textContent = 'lift';
+      un.addEventListener('click', async () => {
+        try { await api('POST', '/api/wg/owners/unblock', { provider: b.provider, sub: b.sub }); refreshVPN(); } catch (err) { alert(err.message); }
+      });
+      blockedBox.append(un);
+    });
+  }
+  $('vl-lease').value = settings.wg_lease_minutes || '';
+  $('vl-grace').value = settings.wg_outage_grace_minutes || '';
+  $('vl-days').value = settings.wg_session_days || '';
+  $('vl-maxage').value = settings.wg_auth_max_age || '';
+  $('vl-devices').value = settings.wg_devices_per_user || '';
+
+  // LAN access and its policies.
+  $('vpn-lan-form').hidden = !(status.enabled && (usesPeople || lan));
+  $('vlan-enabled').checked = lan;
+  $('vlan-config').hidden = !lan;
+  $('vlan-protected').value = (settings.wg_protected_endpoints || '').split(/[\s,]+/).filter(Boolean).join('\n');
+  $('vlan-waive').checked = settings.wg_no_published_aliases === '1';
+  $('vpn-lan-line').textContent = lan
+    ? 'On. People reach what their policies name; everything else, and this machine itself, is refused. Every flow is written to logs/vpn-flows.log.'
+    : 'Off. Devices reach quicgate\'s own hosts and nothing else.';
+  $('vpn-policies-card').hidden = !lan && vpnPolicies.length === 0;
+  const pbody = $('vpnpolicies-body');
+  pbody.innerHTML = '';
+  $('vpnpolicies-empty').hidden = vpnPolicies.length > 0;
+  $('vpnpolicies-table').hidden = vpnPolicies.length === 0;
+  for (const p of vpnPolicies) {
+    const tr = document.createElement('tr');
+    const cell = (text, cls) => { const td = document.createElement('td'); if (cls) td.className = cls; td.textContent = text; tr.appendChild(td); return td; };
+    cell(p.name, 'domain');
+    cell(describeSubject(p.subject));
+    cell((p.routes || []).map(describeRoute).join('\n'), 'mono').style.whiteSpace = 'pre';
+    const tdAct = document.createElement('td');
+    tdAct.className = 'actions';
+    const edit = document.createElement('button');
+    edit.className = 'btn btn--secondary btn--sm';
+    edit.textContent = 'Edit';
+    edit.addEventListener('click', () => openPolicyModal(p));
+    const del = document.createElement('button');
+    del.className = 'btn btn--ghost btn--sm btn--danger-hover';
+    del.textContent = 'Delete';
+    del.addEventListener('click', async () => {
+      if (!confirm(`Delete policy ${p.name}? Open connections that only it allowed are closed.`)) return;
+      try { await api('DELETE', `/api/wg/policies/${p.id}`); refreshVPN(); } catch (err) { alert(err.message); }
+    });
+    tdAct.append(edit, ' ', del);
+    tr.appendChild(tdAct);
+    pbody.appendChild(tr);
+  }
+}
+
+$('vpn-lease-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  await saveSettings($('vpn-lease-form'), {
+    wg_lease_minutes: $('vl-lease').value, wg_outage_grace_minutes: $('vl-grace').value, wg_session_days: $('vl-days').value,
+    wg_auth_max_age: $('vl-maxage').value, wg_devices_per_user: $('vl-devices').value,
+  });
+  refreshVPN();
+});
+
+$('vlan-enabled').addEventListener('change', () => { $('vlan-config').hidden = !$('vlan-enabled').checked; });
+$('vpn-lan-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const on = $('vlan-enabled').checked;
+  if (on && !confirm('Switch LAN access on? People who log in can then reach the addresses their policies name. The tunnel restarts, which drops open VPN connections for a moment.')) return;
+  await saveSettings($('vpn-lan-form'), {
+    wg_lan_access: on ? '1' : '0',
+    wg_protected_endpoints: $('vlan-protected').value.split(/[\s,]+/).filter(Boolean).join(', '),
+    wg_no_published_aliases: $('vlan-waive').checked ? '1' : '0',
+  });
+  refreshVPN();
+});
+
+/* devices: the admin's own, and break-glass */
+function syncWGDeviceKeyMode() { $('wd-pubkey-field').hidden = !$('wd-key-paste').checked; }
+$('wd-key-generate').addEventListener('change', syncWGDeviceKeyMode);
+$('wd-key-paste').addEventListener('change', syncWGDeviceKeyMode);
+
+async function openWGDeviceModal(mode) {
+  wgDeviceMode = mode;
+  const bg = mode === 'breakglass';
+  $('wgdevice-modal-title').textContent = bg ? 'Add break-glass device' : 'Add device';
+  $('wd-intro').textContent = bg
+    ? 'A break-glass device reaches the LAN without anybody logging in: it is the way back in when the identity provider itself is what broke. Keep its configuration offline, in a safe. There can be two.'
+    : 'This device reaches the hosts quicgate serves in the tunnel. It gets no LAN access.';
+  $('wd-breakglass').hidden = !bg;
+  setError('wgdevice-error', null);
+  $('wgdevice-form').hidden = false;
+  $('wgdevice-created').hidden = true;
+  $('wgdevice-form').reset();
+  $('wd-routes').textContent = '';
+  if (bg) {
+    addRouteRow('wd-routes');
+    const d = new Date(Date.now() + 365 * 86400 * 1000);
+    $('wd-expires').value = d.toISOString().slice(0, 10);
+  }
+  const can = await canMakeKeys();
+  $('wd-key-generate').disabled = !can;
+  $('wd-key-unsupported').hidden = can;
+  $('wd-key-generate').checked = can;
+  $('wd-key-paste').checked = !can;
+  syncWGDeviceKeyMode();
+  $('wgdevice-modal').hidden = false;
+}
+
+function closeWGDeviceModal() {
+  // The configuration holds keys, and the form a password: neither stays.
+  $('wd-config').value = '';
+  $('wgdevice-form').reset();
+  $('wgdevice-modal').hidden = true;
+  refreshVPN();
+}
+$('btn-add-wgdevice').addEventListener('click', () => openWGDeviceModal('admin'));
+$('btn-add-breakglass').addEventListener('click', () => openWGDeviceModal('breakglass'));
+$('wd-add-route').addEventListener('click', () => addRouteRow('wd-routes'));
+$('wd-never').addEventListener('change', () => { $('wd-expires').disabled = $('wd-never').checked; });
+$('wgdevice-modal-close').addEventListener('click', closeWGDeviceModal);
+$('wgdevice-btn-cancel').addEventListener('click', closeWGDeviceModal);
+$('wgdevice-btn-done').addEventListener('click', closeWGDeviceModal);
+$('wgdevice-btn-copy').addEventListener('click', async () => {
+  const ta = $('wd-config');
+  try { await navigator.clipboard.writeText(ta.value); } catch (err) { ta.select(); document.execCommand('copy'); }
+  $('wgdevice-btn-copy').textContent = 'Copied';
+  setTimeout(() => { $('wgdevice-btn-copy').textContent = 'Copy'; }, 1500);
+});
+$('wgdevice-btn-download').addEventListener('click', () => {
+  const url = URL.createObjectURL(new Blob([$('wd-config').value], { type: 'text/plain' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${$('wgdevice-btn-download').dataset.name || 'vpn'}.conf`;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
+$('wgdevice-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  setError('wgdevice-error', null);
+  try {
+    let privateKey = '';
+    let publicKey = $('wd-pubkey').value.trim();
+    if ($('wd-key-generate').checked) {
+      const kp = await makeWGKeypair();
+      privateKey = kp.privateKey;
+      publicKey = kp.publicKey;
+    }
+    const name = $('wd-name').value.trim();
+    let created;
+    if (wgDeviceMode === 'breakglass') {
+      const never = $('wd-never').checked;
+      created = await api('POST', '/api/wg/breakglass', {
+        name, publicKey, routes: readRoutes('wd-routes'), neverExpires: never,
+        expiresAt: never || !$('wd-expires').value ? '' : new Date($('wd-expires').value + 'T23:59:59').toISOString(),
+        password: $('wd-password').value, code: $('wd-code').value.trim(),
+      });
+    } else {
+      created = await api('POST', '/api/wg/devices', { name, publicKey });
+    }
+    $('wd-password').value = '';
+    $('wd-code').value = '';
+    const status = await api('GET', '/api/wg/status');
+    const allowed = [`${status.address}/32`, ...(created.routes || []).map((r) => r.cidr)];
+    $('wd-config').value = [
+      '[Interface]',
+      `PrivateKey = ${privateKey || '(keep the private key that is in the WireGuard app)'}`,
+      `Address = ${created.address}/32`,
+      `DNS = ${status.address}`,
+      '',
+      '[Peer]',
+      '# quicgate',
+      `PublicKey = ${status.publicKey}`,
+      `PresharedKey = ${created.presharedKey}`,
+      ...(status.endpoint ? [`Endpoint = ${status.endpoint}`] : ['# Endpoint = (set "Public address" on the VPN page first)']),
+      `AllowedIPs = ${[...new Set(allowed)].join(', ')}`,
+      'PersistentKeepalive = 25',
+      '',
+    ].join('\n');
+    $('wgdevice-btn-download').dataset.name = name.replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 15) || 'vpn';
+    $('wgdevice-form').hidden = true;
+    $('wgdevice-created').hidden = false;
+  } catch (err) {
+    setError('wgdevice-error', err);
+  }
+});
+
+/* LAN policies */
+let readPolicySubject = null;
+
+function openPolicyModal(p) {
+  editingPolicyId = p ? p.id : null;
+  $('vpnpolicy-modal-title').textContent = p ? `Edit policy ${p.name}` : 'Add policy';
+  setError('vpnpolicy-error', null);
+  $('vp-name').value = p ? p.name : '';
+  readPolicySubject = makeSubjectPicker($('vp-subject'), p ? p.subject : null, true);
+  $('vp-routes').textContent = '';
+  for (const r of (p && p.routes) || [null]) addRouteRow('vp-routes', r);
+  $('vp-try-dest').value = '';
+  $('vp-try-answer').hidden = true;
+  $('vpnpolicy-modal').hidden = false;
+}
+$('btn-add-vpnpolicy').addEventListener('click', () => {
+  if (!oidcProviders.length) { alert('A policy is about people from an identity provider: add one on the Access Lists page first.'); return; }
+  openPolicyModal(null);
+});
+$('vp-add-route').addEventListener('click', () => addRouteRow('vp-routes'));
+$('vpnpolicy-modal-close').addEventListener('click', () => { $('vpnpolicy-modal').hidden = true; });
+$('vpnpolicy-btn-cancel').addEventListener('click', () => { $('vpnpolicy-modal').hidden = true; });
+$('vp-try').addEventListener('click', async () => {
+  const out = $('vp-try-answer');
+  out.hidden = false;
+  try {
+    const r = await api('POST', '/api/wg/explain', { routes: readRoutes('vp-routes'), proto: $('vp-try-proto').value, dest: $('vp-try-dest').value.trim() });
+    out.textContent = r.answer;
+    out.classList.toggle('form-error', r.answer.startsWith('refused'));
+  } catch (err) {
+    out.textContent = err.message;
+    out.classList.add('form-error');
+  }
+});
+$('vpnpolicy-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  setError('vpnpolicy-error', null);
+  const policy = { name: $('vp-name').value.trim(), subject: readPolicySubject(), routes: readRoutes('vp-routes') };
+  try {
+    if (editingPolicyId) await api('PUT', `/api/wg/policies/${editingPolicyId}`, policy);
+    else await api('POST', '/api/wg/policies', policy);
+    $('vpnpolicy-modal').hidden = true;
+    refreshVPN();
+  } catch (err) {
+    setError('vpnpolicy-error', err);
+  }
+});
+
+/* the VPN portal host type */
+function addPortalEnrolRow(subject) {
+  const row = document.createElement('div');
+  row.className = 'hdr-rule';
+  const box = document.createElement('span');
+  box.style.display = 'contents';
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'btn btn--ghost btn--sm';
+  del.innerHTML = '&times;';
+  del.addEventListener('click', () => row.remove());
+  row.append(box, del);
+  row._read = makeSubjectPicker(box, subject, true, () => parseInt($('f-portal-provider').value, 10) || 0);
+  $('f-portal-enrol').appendChild(row);
+}
+$('btn-add-portal-enrol').addEventListener('click', () => addPortalEnrolRow(null));
+
+async function fillPortalBlock(h) {
+  await loadVPNPeople();
+  const po = (h && h.options && h.options.portal) || null;
+  const sel = $('f-portal-provider');
+  sel.innerHTML = '';
+  for (const pv of oidcProviders) sel.add(new Option(pv.name, String(pv.id)));
+  if (po) sel.value = String(po.providerId);
+  $('f-portal-claims').value = (po && po.claimsSource) || 'id_token';
+  $('f-portal-warn').hidden = oidcProviders.length > 0;
+  $('f-portal-enrol').textContent = '';
+  for (const s of (po && po.enrol) || [null]) addPortalEnrolRow(s);
+  const first = (h && h.domains && h.domains[0]) || '<host>';
+  $('f-portal-redirect-hint').textContent = `https://${first}/.qg/vpn/callback`;
+}
+
+function readPortalOptions() {
+  const providerId = parseInt($('f-portal-provider').value, 10) || 0;
+  return {
+    providerId,
+    claimsSource: $('f-portal-claims').value,
+    enrol: [...$('f-portal-enrol').children].map((row) => row._read()).filter((s) => s.kind !== 'group' || s.group),
+  };
+}

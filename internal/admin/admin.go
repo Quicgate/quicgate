@@ -382,6 +382,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		"accessLists": len(lists),
 		"upstreams":   map[string]int{"up": up, "down": down},
 		"secrets":     s.store.SealStatus(),
+		"vpn":         s.vpnOverview(),
 		"features": map[string]bool{
 			"http3":       info.HTTP3,
 			"upnp":        info.UPnP,

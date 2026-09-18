@@ -4,6 +4,72 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.17.0] - 2026-09-18
+
+The rest of the WireGuard work in SPEC-wireguard.md: Release B (devices and a private entrance)
+and Release C (single sign-on for the VPN, LAN access). Everything here is off until you use it,
+and an install that does not switch WireGuard on runs none of it. The new **VPN guide** in the
+built-in help describes all of it.
+
+### Added
+- **Hosts that exist on the VPN only.** Tick "VPN only" on a host and it is served inside the
+  WireGuard tunnel and nowhere else. On the public listeners the name is answered like a name
+  quicgate has never heard of, in HTTP and in the TLS handshake. Devices find such hosts without
+  DNS work: quicgate is the DNS server inside the tunnel and answers its own names itself.
+- **Devices.** Add a phone or a laptop on the VPN page. The browser makes the keypair, the
+  configuration is shown once and can be downloaded as a `.conf` file. Revoking is final: the key
+  can never be registered again and open connections are closed at once.
+- **VPN rules in access lists:** a fourth kind of rule that says who is at the other end of the
+  tunnel (anyone, a site, a device, a group, a person). A request from outside the tunnel never
+  matches one, and a request from inside never matches an IP or country rule, so switching the
+  VPN on cannot change who passes a list you already have.
+- **The VPN portal**, a new host type. People log in with single sign-on and add their own
+  devices. The login must be fresh (`max_age` and a checked `auth_time`) and must come with a
+  refresh token; quicgate then asks the identity provider again every few minutes. A refusal
+  takes the person's devices off at once and closes their connections; an outage extends
+  nothing; after 30 days the person logs in again. Admins can end a login or block a person.
+- **LAN access (experimental).** People who logged in reach the destinations their policies
+  name, on the networks the quicgate machine is on. quicgate is not a router: it terminates each
+  connection in its userspace stack and opens a new one, so nothing on the LAN can reach a
+  device and devices cannot reach each other. Loopback, link-local, multicast, the tunnel itself
+  and every listener of quicgate are refused whatever a policy says, and this machine's own
+  addresses are not covered by a route for the network they are in. Every flow is logged before
+  it is allowed. In Docker on a bridge network, LAN access does not switch on until you list the
+  host's addresses or confirm that no quicgate port is published in reach.
+- **Break-glass devices** for the day the identity provider itself is what broke: LAN routes
+  without a login. They take your password and a two-factor code, there are at most two, and
+  they expire unless you state otherwise. The Overview page reminds you that they exist.
+- The Overview's Attention list reports a WireGuard endpoint that does not run, break-glass
+  devices, and dropped flow-log records.
+
+### Fixed
+- **A `GET` rule in an access list now covers `HEAD`.** Monitors and link previews send HEAD;
+  they were refused by a list that allowed GET, and those refusals counted toward a ban.
+- **A login prompt is not a ban strike.** The 401 that asks a browser for credentials, sent when
+  none were given, no longer counts toward an automatic ban. Wrong credentials still do. Together
+  with the previous item this removes the two ways an ordinary visitor's address could end up
+  banned.
+- A WireGuard site that calls in and had never been heard from made wireguard-go log an error
+  every five seconds, for as long as the site was away. Keepalives now start when the site has
+  been heard from.
+- A dial-in site returns within seconds after quicgate restarts, instead of up to 40: quicgate
+  remembers where each peer was last seen and calls it back.
+- A tunnel address that a deleted site gave up was handed to the next site at once, which
+  forces a rebuild of the network stack and drops every open tunnel connection. Freed addresses
+  now stay out of use until the network has nothing else left.
+- An identity provider can no longer be deleted while the VPN still names it.
+- The key options in the "Add site" dialog were drawn with the browser's default white border,
+  and the hints under several fields were unstyled.
+
+### Notes
+- LAN access is marked experimental in FEATURES.md until the code has had an outside review,
+  and the portal is tested against a synthetic identity provider, not yet against a live
+  Keycloak. The official WireGuard phone apps have not been tested by the project; the key
+  format the browser produces is verified against the WireGuard implementation quicgate embeds.
+- Still not built from SPEC-wireguard.md: the passphrase-wrapped key in backups and a
+  key-rotation action (S36), and cancelling request contexts of requests in flight (S42; their
+  connections are closed, which ends them).
+
 ## [1.16.0] - 2026-09-18
 
 ### Added

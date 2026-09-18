@@ -867,6 +867,30 @@ Each release gets its own adversarial review of the code, separate from this des
 - S49 resource budgets apply to Parts 2 and 3 (inbound traffic). Release A only dials out; its
   only new inbound surface is the WireGuard UDP port.
 
+**Releases B and C as built (1.17.0), and what they left open:**
+
+- Built: the tunnel listener for HTTP, TLS and DNS, bound to the listener and never to an
+  address (S10 to S13, S20); `vpnOnly` with the same public answer as an unknown name (S17);
+  structured VPN subjects as the fourth selector, never mixed with address rules (S14, S47,
+  S53); devices with terminal revocation (S39, S43); the portal as a separate surface with
+  PKCE, nonce, strict cookies and origin checks, a fresh login and a required refresh token
+  (S21 to S23, S51, S54); leases with generation compare-and-swap, transient versus definitive
+  failures, grace and hard limit (S44, S45); policies and the forwarder with the check order,
+  "no record, no flow" and the protection of quicgate's own listeners (S27 to S31, S48);
+  break-glass devices.
+- Found while building and changed: freed tunnel addresses are tombstoned without an instance
+  id and stay out of use until the network is exhausted, which is stricter than S40 asks (a
+  restart does not free them) and needs no bookkeeping. A reused address still forces a reset.
+  Keepalives to a dial-in peer start when it has been heard from. Dial-in peers are called back
+  at their last authenticated address after a restart, which closes the 40 s gap noted above.
+  An identity provider cannot be deleted while a policy, a portal, a VPN rule or a live device
+  names it.
+- Not built: the real-client key test of S21 against the official mobile apps (browser keys are
+  verified against the embedded implementation instead); load and flood tests for S49 (the
+  budgets are fixed constants); S36 and S42 as above; live qualification of Keycloak for S45.
+- The external review of the built code, which section 15 makes the condition for dropping the
+  "experimental" mark from LAN access, has not happened yet.
+
 
 ## 16. Review record (2026-09-18, design only)
 

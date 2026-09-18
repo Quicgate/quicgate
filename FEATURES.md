@@ -1,6 +1,6 @@
 # Feature status
 
-Status as of **v1.11.1**. Every claim in the README and the guides should map to a row here. The
+Status as of **v1.17.0**. Every claim in the README and the guides should map to a row here. The
 columns mean:
 
 - **Tested locally**: covered by the automated test suite (unit and integration tests, real
@@ -55,7 +55,13 @@ columns mean:
 | SNI passthrough routing | yes | no | |
 | Listener status (running or failed) | yes | no | |
 | UPnP router port mapping | no | yes | Only maps ports to the quicgate host itself (router restriction). |
-| WireGuard sites (upstreams and streams reached through a WireGuard peer) | yes: two real WireGuard devices over loopback, a request proxied end to end, mutation checks on no-fallback, connection closing and ownership reset | no | Userspace (wireguard-go on gVisor netstack), unprivileged. IPv4 only. TCP and UDP. Never a fallback to the local network. A dial-in site returns up to 40 s after a quicgate restart. Browser key generation needs HTTPS or localhost. The device-VPN and LAN-access parts of the design are not built. |
+| WireGuard sites (upstreams and streams reached through a WireGuard peer) | yes: two real WireGuard devices over loopback, a request proxied end to end, mutation checks on no-fallback, connection closing and ownership reset | no | Userspace (wireguard-go on gVisor netstack), unprivileged. IPv4 only. TCP and UDP. Never a fallback to the local network. A dial-in site is called back at its last address after a restart (up to 40 s only if that address changed). Browser key generation needs HTTPS or localhost. |
+| Hosts served on the VPN only, tunnel DNS | yes: a real WireGuard device over loopback; mutation checks on the public refusal (HTTP and TLS) and on the subject match | no | To everyone outside the tunnel the name does not exist. Certificates for such a name need DNS-01 or an upload. |
+| VPN devices (added by an admin) | yes, including revocation, key reuse and address reuse | no | Keys made in the browser are verified against the embedded WireGuard implementation. The official iOS and Android apps have not been tested by the project. |
+| VPN rules in access lists | yes | no | A request from outside the tunnel never matches a VPN rule; one from inside never matches an address or country rule. |
+| VPN portal with single sign-on, authorization leases | yes: synthetic identity provider with refresh-token rotation; fresh-login check, refusal, outage and grace, hard limit, another subject, missing groups, the renewal-versus-admin race, blocking; mutation checks | no | Needs refresh tokens (`offline_access`), `auth_time` and `max_age` from the provider. Not yet qualified against a live Keycloak. |
+| LAN access for people who logged in (**experimental**) | yes: forwarder end to end over real WireGuard devices, decision table, own-address and listener protection | no | Experimental until the code has had an outside review. Userspace proxying, not routing: the destination sees quicgate's address. TCP and UDP, IPv4, no ICMP. In Docker on a bridge network the host's addresses must be declared. Load and flood behaviour (spec S49) is limited by fixed budgets and not load-tested. |
+| Break-glass VPN devices | yes | no | Password and TOTP to create, at most two, expiry unless waived. |
 
 ## Administration and operations
 
@@ -96,4 +102,5 @@ dropped:
 
 Clustering and high availability, Kubernetes ingress and a plugin marketplace. (Tunnelling to
 networks quicgate cannot reach directly was on this list until 1.16, which added WireGuard
-sites; the design, its threat model and its review record are in SPEC-wireguard.md.)
+sites, and 1.17 added devices, the portal and LAN access; the design, its threat model and its
+review record are in SPEC-wireguard.md.)

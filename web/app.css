@@ -526,5 +526,13 @@ html[data-skin="brass"][data-theme="light"] {
 
 /* VPN: the one-time site configuration. Keys must not wrap: a wrapped key
    copied by hand is a broken key. */
-#w-config { width: 100%; white-space: pre; overflow: auto; resize: vertical; }
-#wgsites-note { padding: var(--sp-3) var(--sp-4); border-top: 1px solid var(--c-border); color: var(--c-text-muted); font-size: var(--fs-sm); }
+#w-config, #wd-config { width: 100%; white-space: pre; overflow: auto; resize: vertical; }
+
+/* who a VPN rule, a LAN policy or an enrolment is about */
+.hdr-rule select.subj-kind { flex: 0 0 170px; }
+.hdr-rule select.subj-provider { flex: 0 0 150px; }
+.hdr-rule .rt-cidr { flex: 2; }
+.hdr-rule select.rt-proto { flex: 0 0 110px; }
+.hdr-rule .rt-ports { flex: 1; }
+.form-hint { margin: var(--sp-2) 0; font-size: var(--fs-xs); color: var(--c-text-muted); }
+.form-hint code { font-family: var(--font-mono); }

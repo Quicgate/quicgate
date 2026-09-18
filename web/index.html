@@ -208,7 +208,7 @@
       <div class="card card--flush" style="margin-top:var(--sp-5)">
         <div class="sectionhead"><h2>Access lists</h2></div>
         <table class="table" id="acl-table">
-          <thead><tr><th>Name</th><th>Satisfy</th><th>IP rules</th><th>Users</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Satisfy</th><th>Rules</th><th>Users</th><th></th></tr></thead>
           <tbody id="acl-body"></tbody>
         </table>
         <div id="acl-empty" class="empty" hidden>No access lists. Add one, then assign it to a proxy host.</div>
@@ -243,8 +243,7 @@
 
     <div id="page-vpn" hidden>
       <div class="pagehead">
-        <div><h1 class="pagehead__title">VPN</h1><p class="pagehead__sub">WireGuard sites: reach upstreams on networks quicgate is not on, through an ordinary WireGuard peer at the other end.</p></div>
-        <div class="pagehead__actions"><button id="btn-add-wgsite" class="btn btn--primary">Add site</button></div>
+        <div><h1 class="pagehead__title">VPN</h1><p class="pagehead__sub">WireGuard, inside quicgate. Sites reach upstreams on other networks; devices reach hosts that are served in the tunnel only, and, for people who log in, parts of this network.</p></div>
       </div>
       <form class="panel" id="wg-form">
         <div class="panel__head"><h2>WireGuard endpoint</h2><p id="wg-status-line">Off. Nothing listens and no upstream can use a site.</p></div>
@@ -262,7 +261,7 @@
             <div class="frow__control"><input id="wg-endpoint" class="mono" placeholder="vpn.example.com:51820" autocomplete="off" spellcheck="false"></div>
           </div>
           <div class="frow">
-            <div class="frow__label"><label for="wg-network">Tunnel network</label><p>Addresses used inside the tunnel. It cannot change once a site exists.</p></div>
+            <div class="frow__label"><label for="wg-network">Tunnel network</label><p>Addresses used inside the tunnel. It cannot change once a site or a device exists.</p></div>
             <div class="frow__control"><input id="wg-network" class="mono input--narrow" placeholder="10.77.0.0/24" autocomplete="off" spellcheck="false"></div>
           </div>
           <div class="frow">
@@ -273,12 +272,87 @@
         <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
       </form>
       <div class="card card--flush">
+        <div class="sectionhead"><h2>Sites <span class="sectionhead__hint">other networks, for upstreams</span></h2><button id="btn-add-wgsite" class="btn btn--secondary btn--sm">Add site</button></div>
         <table class="table" id="wgsites-table">
           <thead><tr><th>Site</th><th>Networks</th><th>Endpoint</th><th>Status</th><th>Traffic</th><th>Enabled</th><th></th></tr></thead>
           <tbody id="wgsites-body"></tbody>
         </table>
         <div id="wgsites-empty" class="empty" hidden>No sites. A site is a WireGuard peer at another location (a router, a small Linux box, a VPS); hosts and streams can then reach addresses on its networks.</div>
-        <div class="card__foot-note" id="wgsites-note" hidden>A site without an endpoint has to call quicgate. After quicgate restarts such a site needs up to 40 seconds to return; hosts that go through it answer 502 until then. Give a site an endpoint wherever it has a reachable address.</div>
+        <div class="tablenote" id="wgsites-note" hidden>A site without an endpoint has to call quicgate. After a restart quicgate calls such a site back at the address it was last seen at, so it returns within seconds; if that address changed meanwhile, it takes until the site's own keepalive fires (up to about 40 seconds), and hosts that go through it answer 502 until then. Give a site an endpoint wherever it has a reachable address.</div>
+      </div>
+      <div class="card card--flush" style="margin-top:var(--sp-5)">
+        <div class="sectionhead"><h2>Devices <span class="sectionhead__hint">phones and laptops</span></h2>
+          <span><button id="btn-add-breakglass" class="btn btn--ghost btn--sm" hidden>Add break-glass device</button> <button id="btn-add-wgdevice" class="btn btn--secondary btn--sm">Add device</button></span></div>
+        <table class="table" id="wgdevices-table">
+          <thead><tr><th>Device</th><th>Owner</th><th>Address</th><th>Status</th><th>Traffic</th><th>Enabled</th><th></th></tr></thead>
+          <tbody id="wgdevices-body"></tbody>
+        </table>
+        <div id="wgdevices-empty" class="empty" hidden>No devices. A device you add here reaches the hosts quicgate serves in the tunnel, such as hosts marked "VPN only". People add their own devices at a VPN portal host, after logging in with single sign-on.</div>
+        <p class="tablenote">A device added here by an admin never gets LAN access: that takes a person's login at the portal, or a break-glass device. Revoking is final: the key and the configuration cannot be used again.</p>
+      </div>
+
+      <div class="card card--flush" style="margin-top:var(--sp-5)" id="vpn-people-card" hidden>
+        <div class="sectionhead"><h2>People <span class="sectionhead__hint">logged in through a VPN portal</span></h2></div>
+        <table class="table" id="vpnsessions-table">
+          <thead><tr><th>Person</th><th>Groups</th><th>Access</th><th>Log in again by</th><th></th></tr></thead>
+          <tbody id="vpnsessions-body"></tbody>
+        </table>
+        <div id="vpnblocked" class="tablenote" hidden></div>
+        <p class="tablenote">quicgate asks the identity provider again every few minutes. When the provider says no, the person's devices stop at once; when it cannot be reached, they keep working for the outage grace below and no longer. "End" takes the devices off until the person logs in again; "Block" keeps them off whatever the provider says.</p>
+      </div>
+
+      <form class="panel" id="vpn-lease-form" style="margin-top:var(--sp-5)" hidden>
+        <div class="panel__head"><h2>Logins</h2><p>How long a login at the portal is good for. The identity provider has to issue refresh tokens to quicgate (scope <code>offline_access</code>) and state <code>auth_time</code>.</p></div>
+        <div class="frow">
+          <div class="frow__label"><label for="vl-lease">Check every</label><p>Minutes between two checks with the identity provider. A disabled account loses the VPN within this time.</p></div>
+          <div class="frow__control"><input id="vl-lease" type="number" min="2" max="1440" placeholder="10" class="input--narrow"></div>
+        </div>
+        <div class="frow">
+          <div class="frow__label"><label for="vl-grace">Outage grace</label><p>Minutes the devices keep working while the identity provider cannot be reached. 0 means none. A refusal never gets a grace.</p></div>
+          <div class="frow__control"><input id="vl-grace" type="number" min="0" max="60" placeholder="0" class="input--narrow"></div>
+        </div>
+        <div class="frow">
+          <div class="frow__label"><label for="vl-days">Log in again after</label><p>Days. However often the checks succeed, the person logs in at the portal again after this.</p></div>
+          <div class="frow__control"><input id="vl-days" type="number" min="1" max="90" placeholder="30" class="input--narrow"></div>
+        </div>
+        <div class="frow">
+          <div class="frow__label"><label for="vl-maxage">Fresh login</label><p>Seconds. A login at the portal counts only when the person authenticated at the provider this recently, so a session left open in a browser is not enough.</p></div>
+          <div class="frow__control"><input id="vl-maxage" type="number" min="60" max="86400" placeholder="900" class="input--narrow"></div>
+        </div>
+        <div class="frow">
+          <div class="frow__label"><label for="vl-devices">Devices per person</label></div>
+          <div class="frow__control"><input id="vl-devices" type="number" min="1" max="50" placeholder="5" class="input--narrow"></div>
+        </div>
+        <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
+      </form>
+
+      <form class="panel" id="vpn-lan-form" style="margin-top:var(--sp-5)" hidden>
+        <div class="panel__head"><h2>LAN access <span class="badge badge--muted">experimental</span></h2><p id="vpn-lan-line">Off. Devices reach quicgate's own hosts and nothing else.</p></div>
+        <div class="frow">
+          <div class="frow__label"><label for="vlan-enabled">Enabled</label><p>Lets people who logged in reach the addresses their policies name, on the networks this machine is on. quicgate connects on their behalf: the destination sees quicgate's address. Switching this restarts the tunnel.</p></div>
+          <div class="frow__control"><span class="switch"><input type="checkbox" id="vlan-enabled"><span class="switch__slot"></span><span class="switch__knob"></span></span></div>
+        </div>
+        <div id="vlan-config" hidden>
+          <div class="frow">
+            <div class="frow__label"><label for="vlan-protected">Protected endpoints</label><p>Addresses no policy may ever reach, one per line: <code>192.168.1.2</code> or <code>192.168.1.2:81</code>. quicgate's own addresses, its admin port and the default gateway are protected already. In Docker on a bridge network, list the Docker host's addresses here: quicgate cannot see them itself.</p></div>
+            <div class="frow__control"><textarea id="vlan-protected" rows="3" class="mono" spellcheck="false" placeholder="192.168.1.2"></textarea></div>
+          </div>
+          <div class="frow" id="vlan-waive-row">
+            <div class="frow__label"><label for="vlan-waive">No published ports in reach</label><p>Confirm instead of listing addresses: no port of this quicgate is published on an address a policy can reach.</p></div>
+            <div class="frow__control"><label class="check"><input type="checkbox" id="vlan-waive"><span>I checked</span></label></div>
+          </div>
+        </div>
+        <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
+      </form>
+
+      <div class="card card--flush" style="margin-top:var(--sp-5)" id="vpn-policies-card" hidden>
+        <div class="sectionhead"><h2>LAN policies <span class="sectionhead__hint">who may reach what</span></h2><button id="btn-add-vpnpolicy" class="btn btn--secondary btn--sm">Add policy</button></div>
+        <table class="table" id="vpnpolicies-table">
+          <thead><tr><th>Policy</th><th>For</th><th>May reach</th><th></th></tr></thead>
+          <tbody id="vpnpolicies-body"></tbody>
+        </table>
+        <div id="vpnpolicies-empty" class="empty" hidden>No policies: nobody reaches anything on the LAN. A policy gives a group, a person or everybody from one identity provider a list of destinations.</div>
+        <p class="tablenote">A person gets the routes of every policy that names them. There are no deny rules: what no policy grants is refused, and so is this machine itself, whatever a policy says.</p>
       </div>
     </div>
 
@@ -725,7 +799,7 @@
         <details><summary>How is an access list evaluated?</summary>
           <p>IP rules are checked <b>top to bottom, first match wins</b>. If no rule matches, the request is <b>denied</b>. A list with no IP rules imposes no IP restriction. Basic-auth users are checked separately; <b>Satisfy</b> decides whether a request needs IP <em>or</em> login (<code>any</code>) or IP <em>and</em> login (<code>all</code>).</p></details>
         <details><summary>Allow just GET from everywhere (public read-only)?</summary>
-          <p>One rule: <code>allow</code> · <code>IP/CIDR</code> <code>0.0.0.0/0</code> · click the <b>GET</b> chip (and <b>HEAD</b> — browsers and monitors send it). Everything else matches no rule and gets a 403. Add a twin rule with <code>::/0</code> if you serve IPv6.</p></details>
+          <p>One rule: <code>allow</code> · <code>IP/CIDR</code> <code>0.0.0.0/0</code> · click the <b>GET</b> chip (a GET rule covers <b>HEAD</b> too, which browsers and monitors send). Everything else matches no rule and gets a 403. Add a twin rule with <code>::/0</code> if you serve IPv6.</p></details>
         <details><summary>What do the method chips do?</summary>
           <p>They scope a rule to specific HTTP verbs. None selected = the rule applies to every method. Lit chips = only those verbs. Combine with <code>Satisfy: any</code> + a basic-auth user to get "reads public, writes require login": <code>allow 0.0.0.0/0</code> with <b>GET, HEAD</b> lit.</p></details>
         <details><summary>Country / dynamic-DNS rules?</summary>
@@ -735,7 +809,7 @@
         <details><summary>When do I use a proxy host vs a stream?</summary>
           <p><b>Proxy host</b> = HTTP(S) reverse proxy (L7): TLS, HTTP/3, headers, paths, access lists. Use it for websites and APIs. <b>Stream</b> = raw TCP/UDP forward (L4): use it for non-HTTP services (game servers, databases, mail, SSH). Streams see the raw connection, not HTTP.</p></details>
         <details><summary>Reuse an allowlist on a stream?</summary>
-          <p>On a stream, set <b>Source restriction</b> to an existing access list instead of retyping CIDRs — its allow CIDR/host rules become the source filter (only IP rules apply at L4; basic-auth/GeoIP/method rules are ignored there).</p></details>
+          <p>On a stream, set <b>Source restriction</b> to an existing access list instead of retyping CIDRs: its allow CIDR/host rules become the source filter (only IP rules apply at L4; basic-auth/GeoIP/method rules are ignored there).</p></details>
 
         <h3>Docker labels</h3>
         <details><summary>How do I route a container by labels?</summary>
@@ -757,9 +831,9 @@
 
         <h3>Security &amp; ops</h3>
         <details><summary>Is it safe to expose the admin UI?</summary>
-          <p><b>No.</b> Never expose the admin port (81) to the internet. Put it behind quicgate itself with an access list, a VPN, or a firewall rule — treat it like any other private service. Change the default <code>admin@example.com</code>/<code>changeme</code> on first run and enable 2FA (account menu &rarr; Account &amp; security).</p></details>
+          <p><b>No.</b> Never expose the admin port (81) to the internet. Put it behind quicgate itself with an access list, a VPN, or a firewall rule: treat it like any other private service. Change the default <code>admin@example.com</code>/<code>changeme</code> on first run and enable 2FA (account menu &rarr; Account &amp; security).</p></details>
         <details><summary>How do I script quicgate / use the API?</summary>
-          <p>Create a bearer token under <b>your account menu → API tokens</b> and send <code>Authorization: Bearer &lt;token&gt;</code>. Everything the UI does is a REST call — see the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>. <code>POST /api/import</code> does idempotent bulk config-as-code.</p></details>
+          <p>Create a bearer token under <b>your account menu → API tokens</b> and send <code>Authorization: Bearer &lt;token&gt;</code>. Everything the UI does is a REST call: see the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>. <code>POST /api/import</code> does idempotent bulk config-as-code.</p></details>
         <details><summary>SSO in front of a host?</summary>
           <p>Two ways. <b>Built-in OIDC</b> (no extra service): add your IdP under <b>Access control &rarr; Identity providers</b>, then enable <b>OIDC SSO</b> on the host's Security tab. quicgate runs the OpenID Connect login itself, keeps a signed per-host session, checks the allowed emails/domains/groups you set, and can pass the identity upstream as <code>Remote-User</code> / <code>Remote-Email</code> / <code>Remote-Groups</code> (spoofed inbound copies are always stripped). Register the redirect URI <code>https://&lt;host&gt;/.qg/oidc/callback</code> at the IdP; sign out at <code>/.qg/oidc/logout</code>. Or use <b>Forward authentication</b> against an Authelia / Authentik verify endpoint if you already run one.</p></details>
         <details><summary>Can one path be public while the rest of the host needs auth?</summary>
@@ -788,7 +862,7 @@
         <label class="check"><input type="checkbox" id="a-passauth"><span>Pass Authorization header to upstream</span></label>
       </div>
       <fieldset class="group">
-        <legend>IP rules (ordered, first match wins, no match denies) — the methods box scopes a rule to specific verbs (e.g. gate POST/PUT, leave GET public)</legend>
+        <legend>Rules (ordered, first match wins, no match denies). The methods box scopes a rule to specific verbs, for example to gate POST and PUT and leave GET public. A VPN rule matches requests that come through the WireGuard tunnel, and only those.</legend>
         <div id="acl-rules" class="hdr-rules"></div>
         <div id="acl-geo-warn" class="form-error" hidden>Country rules need a GeoIP database, which is not currently loaded, so they will never match. See Settings &rarr; Client IP &amp; GeoIP.</div>
         <button type="button" class="btn btn--ghost btn--sm" id="btn-add-aclrule">+ Add rule</button>
@@ -847,7 +921,7 @@
         <label class="field"><span>Endpoint <em>(host:port where quicgate can call the site; empty when the site calls in)</em></span><input id="w-endpoint" class="mono" autocomplete="off" spellcheck="false" placeholder="office.example.com:51820"></label>
         <label class="field field--sm"><span>Keepalive (s)</span><input id="w-keepalive" type="number" min="0" max="3600" value="25"></label>
       </div>
-      <fieldset class="fieldset" id="w-key-block">
+      <fieldset class="group" id="w-key-block">
         <legend>The site's key</legend>
         <label class="check"><input type="radio" name="w-keymode" id="w-key-generate" value="generate" checked><span>Make a keypair here, in this browser. The private key never reaches quicgate; it is shown once in the configuration below.</span></label>
         <label class="check"><input type="radio" name="w-keymode" id="w-key-paste" value="paste"><span>I have a keypair already: paste its public key.</span></label>
@@ -871,6 +945,88 @@
         <button type="button" class="btn btn--primary" id="wgsite-btn-done">I have saved it</button>
       </div>
     </div>
+  </div>
+</div>
+
+<div id="wgdevice-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="card-head"><h2 id="wgdevice-modal-title">Add device</h2><button id="wgdevice-modal-close" class="btn btn--ghost btn--sm">&times;</button></div>
+    <form id="wgdevice-form">
+      <p class="form-hint" id="wd-intro"></p>
+      <label class="field"><span>Name</span><input id="wd-name" required maxlength="64" autocomplete="off" placeholder="My phone"></label>
+      <fieldset class="group">
+        <legend>The device's key</legend>
+        <label class="check"><input type="radio" name="wd-keymode" id="wd-key-generate" checked><span>Make a keypair here, in this browser. The private key never reaches quicgate; it is shown once in the configuration below.</span></label>
+        <label class="check"><input type="radio" name="wd-keymode" id="wd-key-paste"><span>The WireGuard app made a tunnel already: paste its public key.</span></label>
+        <p id="wd-key-unsupported" class="form-hint" hidden>This browser cannot make WireGuard keys on this page (it needs HTTPS, or a recent browser). Create an empty tunnel in the WireGuard app and paste its public key.</p>
+        <label class="field" id="wd-pubkey-field" hidden><span>Public key</span><input id="wd-pubkey" class="mono" autocomplete="off" spellcheck="false"></label>
+      </fieldset>
+      <div id="wd-breakglass" hidden>
+        <fieldset class="group">
+          <legend>What it may reach on the LAN</legend>
+          <div id="wd-routes" class="hdr-rules"></div>
+          <button type="button" class="btn btn--ghost btn--sm" id="wd-add-route">+ Add destination</button>
+        </fieldset>
+        <div class="field-row">
+          <label class="field field--sm"><span>Expires on</span><input id="wd-expires" type="date"></label>
+          <label class="check"><input type="checkbox" id="wd-never"><span>It never expires. I know that a lost copy then works until somebody revokes it.</span></label>
+        </div>
+        <fieldset class="group">
+          <legend>Confirm it is you</legend>
+          <div class="field-row">
+            <label class="field"><span>Your password</span><input id="wd-password" type="password" autocomplete="current-password"></label>
+            <label class="field field--sm"><span>Two-factor code</span><input id="wd-code" class="mono" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></label>
+          </div>
+        </fieldset>
+      </div>
+      <div id="wgdevice-error" class="form-error" hidden></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn--secondary" id="wgdevice-btn-cancel">Cancel</button>
+        <button type="submit" class="btn btn--primary">Add device</button>
+      </div>
+    </form>
+    <div id="wgdevice-created" hidden>
+      <p><b>The device is saved.</b> This is its WireGuard configuration. It holds the private key and the preshared key, and <b>it is shown this once</b>. Download it and import the file into the WireGuard app. If it gets lost, revoke the device and add it anew.</p>
+      <textarea id="wd-config" rows="13" class="mono" readonly spellcheck="false"></textarea>
+      <div class="modal-actions">
+        <button type="button" class="btn btn--secondary" id="wgdevice-btn-copy">Copy</button>
+        <button type="button" class="btn btn--secondary" id="wgdevice-btn-download">Download .conf</button>
+        <button type="button" class="btn btn--primary" id="wgdevice-btn-done">I have saved it</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="vpnpolicy-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="card-head"><h2 id="vpnpolicy-modal-title">Add policy</h2><button id="vpnpolicy-modal-close" class="btn btn--ghost btn--sm">&times;</button></div>
+    <form id="vpnpolicy-form">
+      <label class="field"><span>Name</span><input id="vp-name" required autocomplete="off" placeholder="Operations"></label>
+      <fieldset class="group">
+        <legend>For whom</legend>
+        <div id="vp-subject" class="hdr-rule"></div>
+      </fieldset>
+      <fieldset class="group">
+        <legend>May reach</legend>
+        <div id="vp-routes" class="hdr-rules"></div>
+        <button type="button" class="btn btn--ghost btn--sm" id="vp-add-route">+ Add destination</button>
+        <p class="form-hint">Private IPv4 ranges only. Leave the ports empty for every port; otherwise write them like <code>22,443,8000-8100</code>.</p>
+      </fieldset>
+      <fieldset class="group">
+        <legend>Try it</legend>
+        <div class="hdr-rule">
+          <select id="vp-try-proto"><option>tcp</option><option>udp</option></select>
+          <input id="vp-try-dest" class="mono" placeholder="192.168.1.10:443" autocomplete="off" spellcheck="false">
+          <button type="button" class="btn btn--secondary btn--sm" id="vp-try">Would this pass?</button>
+        </div>
+        <p id="vp-try-answer" class="form-hint" hidden></p>
+      </fieldset>
+      <div id="vpnpolicy-error" class="form-error" hidden></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn--secondary" id="vpnpolicy-btn-cancel">Cancel</button>
+        <button type="submit" class="btn btn--primary">Save</button>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -968,6 +1124,7 @@
               <option value="redirect">Redirection</option>
               <option value="dead">404 (dead) host</option>
               <option value="static">Static files</option>
+              <option value="vpn-portal">VPN portal</option>
             </select></label>
         </div>
         <label class="field" id="f-static-block" hidden><span>Root directory <em>(inside the container; mount a volume)</em></span>
@@ -982,6 +1139,21 @@
         </div>
         <label class="field" id="f-via-row" hidden><span>Reach through <em>(applies to the pool and the locations of this host too)</em></span>
           <select id="f-via"><option value="0">the local network</option></select></label>
+        <div id="f-portal-block" hidden>
+          <p class="form-hint">The page where people log in with single sign-on and add their own devices to the VPN. It has to be reachable without the VPN. Register this redirect URI at the identity provider: <code id="f-portal-redirect-hint">https://&lt;host&gt;/.qg/vpn/callback</code></p>
+          <div class="field-row">
+            <label class="field field--sm"><span>Identity provider</span><select id="f-portal-provider"></select></label>
+            <label class="field field--sm"><span>Read groups from</span>
+              <select id="f-portal-claims"><option value="id_token">the ID token</option><option value="userinfo">the UserInfo endpoint</option></select></label>
+          </div>
+          <div id="f-portal-warn" class="form-error" hidden>No identity providers exist yet: add one on the Access Lists page first.</div>
+          <fieldset class="group">
+            <legend>Who may add devices</legend>
+            <div id="f-portal-enrol" class="hdr-rules"></div>
+            <button type="button" class="btn btn--ghost btn--sm" id="btn-add-portal-enrol">+ Add</button>
+            <p class="form-hint">Choose "the UserInfo endpoint" when the provider leaves the groups out of the tokens it sends on a refresh: without groups on a refresh, group members lose their devices at the next check.</p>
+          </fieldset>
+        </div>
         <div id="f-redirect-block" hidden>
           <div class="field-row">
             <label class="field field--sm"><span>HTTP code</span>
@@ -994,6 +1166,7 @@
         </div>
         <label class="field field--sm"><span>Access list</span>
           <select id="f-accesslist"><option value="">Publicly accessible</option></select></label>
+        <label class="check" id="f-vpnonly-row" hidden><input type="checkbox" id="f-vpnonly"><span>VPN only <em>(served inside the WireGuard tunnel and nowhere else; to everyone outside, this name does not exist)</em></span></label>
         <label class="check"><input type="checkbox" id="f-maintenance"><span>Maintenance mode <em>(serve a 503 page instead of proxying)</em></span></label>
         <label class="field" id="f-maintenance-html-field" hidden><span>Maintenance page <em>(HTML; blank = built-in 503)</em></span>
           <textarea id="f-maintenance-html" rows="3" class="mono"></textarea></label>
@@ -1039,7 +1212,7 @@
               <label class="field"><span>Allowed groups <em>(from the groups claim)</em></span><input id="f-oidc-groups" class="mono" placeholder="admins"></label>
             </div>
             <p class="hs-muted" style="font-size:var(--fs-xs)">All three empty = any authenticated user. Register this redirect URI at the IdP: <code id="f-oidc-redirect-hint">https://&lt;host&gt;/.qg/oidc/callback</code>. Sign out at <code>/.qg/oidc/logout</code>.</p>
-            <div id="f-oidc-warn" class="form-error" hidden>No identity providers exist yet — add one on the Access Lists page first.</div>
+            <div id="f-oidc-warn" class="form-error" hidden>No identity providers exist yet: add one on the Access Lists page first.</div>
           </div>
         </fieldset>
         <fieldset class="group" data-proxyonly>

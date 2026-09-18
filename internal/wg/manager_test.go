@@ -522,3 +522,55 @@ func TestUnresolvableEndpointOnlyAffectsItsSite(t *testing.T) {
 		t.Fatalf("resolving an endpoint caused %d resets", r)
 	}
 }
+
+// keepaliveOf reads what the device holds for the fixture's only peer.
+func keepaliveOf(t *testing.T, m *Manager) string {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	dump, err := m.inst.dev.IpcGet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(dump, "\n") {
+		if v, ok := strings.CutPrefix(line, "persistent_keepalive_interval="); ok {
+			return v
+		}
+	}
+	return "0"
+}
+
+// A site that calls in and has not been heard from gets no keepalives: they
+// have nowhere to go, and wireguard-go reports each one as an error, every few
+// seconds, for as long as the site is away. They start once it is found.
+func TestKeepalivesWaitUntilThePeerIsFound(t *testing.T) {
+	f := newFixture(t)
+	r := startRemote(t, f.serverPub, f.serverPort, netip.MustParseAddr("10.77.0.2"), netip.MustParseAddr("192.168.50.10"), true)
+	dialIn := f.site(1, "office", r, "10.77.0.2", "192.168.50.0/24")
+	dialIn.Endpoint, dialIn.Keepalive = "", 25
+	f.cfg.Sites = []Site{dialIn}
+	if err := f.m.Apply(context.Background(), f.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := keepaliveOf(t, f.m); got != "0" {
+		t.Fatalf("keepalive before the site was ever heard from = %s, want 0", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	c, err := f.m.DialContext(ctx, 1, "tcp", "192.168.50.10:7")
+	if err != nil {
+		t.Fatalf("dial through the site: %v", err)
+	}
+	c.Close()
+	f.m.Remember()
+	if got := keepaliveOf(t, f.m); got != "25" {
+		t.Fatalf("keepalive once the site called in = %s, want 25", got)
+	}
+	// And it stays on across a reload.
+	if err := f.m.Apply(context.Background(), f.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := keepaliveOf(t, f.m); got != "25" {
+		t.Fatalf("keepalive after a reload = %s, want 25", got)
+	}
+}
