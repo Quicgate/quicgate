@@ -4,7 +4,7 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.15.0] - 2026-09-18
 
 ### Security
 - **Secrets in the database are encrypted at rest.** Until now the database held them in the
