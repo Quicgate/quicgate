@@ -1,6 +1,10 @@
 # quicgate roadmap
 
 Where quicgate stands, what is open, and what comes next. Updated 2026-09-18 for v1.17.0.
+quicgate is live, running a homelab's whole ingress every day, and under active development.
+Feedback shapes this list: tell us what works, what does not and what you miss, good or bad, in
+an [issue](https://github.com/Quicgate/quicgate/issues).
+
 [FEATURES.md](FEATURES.md) stays the status matrix per feature (tested, qualified live, deferred,
 not a goal); [CHANGELOG.md](CHANGELOG.md) has the detail per release.
 

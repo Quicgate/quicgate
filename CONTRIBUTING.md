@@ -70,8 +70,9 @@ validation), `engine/` (apply it), `web/` (expose it), and `web/openapi.yaml`.
 
 ## Bugs and ideas
 
-Open an [issue](https://github.com/Quicgate/quicgate/issues). For **security**
-problems, do **not** use issues — follow [SECURITY.md](SECURITY.md) instead.
+Open an [issue](https://github.com/Quicgate/quicgate/issues). Feedback counts as a contribution, good or bad: what you
+liked, what confused you, what broke, what you miss. It does not have to be a bug. For **security**
+problems, do **not** use issues: follow [SECURITY.md](SECURITY.md) instead.
 
 Because this is a hobby project with one maintainer, responses may take a few
 days. Thanks for your patience, and for helping make a small proxy manager

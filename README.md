@@ -36,6 +36,12 @@
   </picture>
 </p>
 
+> **Live, and under active development.** quicgate runs a real homelab's whole ingress every
+> day, and it gets new releases most weeks. We would love to hear how it works for you, good or
+> bad: what you like, what broke, what is confusing, what is missing.
+> [Open an issue](https://github.com/Quicgate/quicgate/issues), it does not have to be a bug. See the [roadmap](ROADMAP.md) for
+> what is done and what comes next.
+
 ## Why quicgate
 
 Most homelabs end up with the same pile: a proxy, something to manage it, something for
@@ -239,7 +245,9 @@ certificates, access control and SSO) on a modern engine.
 
 ### Honest caveats
 
-- Young project with one production deployment (mine), so expect rough edges. Issues are welcome.
+- Young project, live in production in one homelab and under active development, so expect rough
+  edges. Feedback is wanted, good or bad: tell us in an [issue](https://github.com/Quicgate/quicgate/issues) what worked, what did not and
+  what you miss. A report that says "this confused me" is as useful as a bug.
 - Not everything has met the real world yet. The built-in OIDC SSO, for one, is tested against a
   synthetic identity provider: try it against yours before you rely on it.
   [FEATURES.md](FEATURES.md) says per feature what is proven live and what is only tested.
