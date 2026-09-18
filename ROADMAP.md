@@ -1,19 +1,119 @@
 # quicgate roadmap
 
-Sourced 2026-07-23 from the Nginx Proxy Manager issue tracker (reaction counts verified via the GitHub API). Each item: what, evidence, value for a homelab-focused NPM successor.
+Where quicgate stands, what is open, and what comes next. Updated 2026-09-18 for v1.17.0.
+[FEATURES.md](FEATURES.md) stays the status matrix per feature (tested, qualified live, deferred,
+not a goal); [CHANGELOG.md](CHANGELOG.md) has the detail per release.
 
-## STATUS: the roadmap items are built (2026-07-23)
+## Done
+
+**The original roadmap (July 2026).** Every item sourced from the Nginx Proxy Manager issue
+tracker, C1 to A5 in the tables at the end of this file, was built by 1.0.0 on 2026-07-23. Two
+sub-items were deferred on purpose: the next ACME renewal attempt time (C6) and an optional full
+WAF (S7).
+
+**Since then**, none of which was on that roadmap:
+
+| Release | What it added |
+|---|---|
+| 1.1 to 1.3 | Method chips for access rules, streams that reuse an access list, Docker label discovery, several Docker hosts |
+| 1.4 to 1.6 | GeoIP status, the Overview dashboard, real client IP behind trusted proxies, sticky sessions, maintenance mode |
+| 1.7, 1.8 | Built-in OIDC single sign-on for hosts, per-path authentication and providers, built-in guides, a second theme |
+| 1.9 | The remediation of an external security review: client certificates bound to the host, a cache that never crosses identities, fail-closed handling of DNS and configuration errors, and more |
+| 1.10 to 1.13 | A redesigned admin interface, traffic history and charts on the Overview, a view of who is banned and why |
+| 1.14 | The never-ban list, with this machine's own and the router's public address |
+| 1.15 | Secrets sealed at rest (XChaCha20-Poly1305), including two-factor secrets, with a mandatory migration and a downgrade command |
+| 1.16 | WireGuard sites: upstreams and streams on networks quicgate is not on |
+| 1.17 | The rest of [SPEC-wireguard.md](SPEC-wireguard.md): hosts that exist on the VPN only, devices, VPN rules in access lists, a single sign-on portal with re-checked logins, experimental LAN access, break-glass devices |
+
+That also reverses one earlier non-goal: "no tunnelling".
+
+## Proven in production, and not yet
+
+quicgate has been the only ingress of a homelab since the summer of 2026: 42 hosts with automatic
+certificates, 8 TCP streams, HTTP/3, UPnP. What that deployment really exercises:
+
+- **Used every day:** proxying over HTTP/1.1, HTTP/2 and HTTP/3, HTTP-01 certificates and their
+  renewal, access lists with address and method-scoped rules (31 of 42 hosts), auto-ban and the
+  never-ban list, exploit and bad-bot filters, HSTS, TCP streams, UPnP mapping, API tokens, the
+  traffic overview, sealed secrets, API backups before every upgrade, unattended upgrades from
+  the `:1` image tag.
+- **Built and tested, but not used there, so not proven:** load balancing and locations, the
+  response cache, rate limiting, built-in OIDC and forward authentication, client certificates,
+  custom and DNS-01 certificates, country and dynamic-DNS rules, UDP streams, PROXY protocol, SNI
+  routing and TLS termination on streams, Docker labels, LDAP, restoring a backup, and everything
+  WireGuard.
+
+## Next
+
+In order. The theme is the same as in July: be the reliable one. After 1.17 the largest risk is
+not a missing feature, it is code that nobody else has looked at and nobody has used yet.
+
+### 1. Qualify what is built
+
+1. **An outside review of the WireGuard code** (1.16 and 1.17). Until then LAN access stays
+   marked experimental. The design was reviewed twice; the code was not.
+2. **The VPN portal against a real identity provider.** Keycloak first: refresh tokens
+   (`offline_access`), `auth_time`, `max_age`, and groups in a refreshed ID token or at UserInfo.
+   Then write the working client settings into the VPN guide.
+3. **The official WireGuard apps** on iOS and Android: import a generated configuration, and the
+   paste-a-public-key path. Browser-made keys are verified against the embedded implementation
+   only.
+4. **Use it at home:** one VPN-only host and one device first, then the portal, then LAN access
+   with one narrow policy. Each step moves a row in FEATURES.md to "qualified live".
+5. **Built-in OIDC for hosts against Keycloak,** which has waited since 1.7, and **DNS-01 with a
+   real TransIP key** for the first wildcard.
+6. **Restore a backup into a fresh instance,** on a schedule. Backups are taken before every
+   upgrade; a restore has only ever run in tests.
+
+### 2. Finish the WireGuard design
+
+What SPEC-wireguard.md asks for and 1.17 does not have:
+
+- a passphrase-wrapped copy of the sealing key inside backups, and a key-rotation action (S36);
+- cancelling the request contexts of requests in flight when a site or a device goes away (S42;
+  today their connections are closed, which ends them through the error path);
+- load and flood tests for the fixed resource budgets (S49);
+- IPv6 inside the tunnel, which the design left out on purpose for the first version.
+
+### 3. Deferred for longer
+
+From FEATURES.md, still wanted, no date:
+
+- several admin users with roles, and an audit log of configuration changes (with a VPN that
+  reaches a LAN, "who changed this policy" starts to matter);
+- scoped and expiring API tokens;
+- managed ACME certificates for TLS termination on streams;
+- health checks that look at more than "answered" (status, body, thresholds);
+- options per location beyond upstream and path rewrite;
+- watching from-file certificates for renewal on disk;
+- refusing HTTP/3 per host instead of only not advertising it;
+- encryption of the ACME files under `certs/`;
+- the next renewal attempt time in the UI, and an optional WAF.
+
+### Not goals
+
+Unchanged: a free-text configuration box, FTP, clustering and high availability (a cold standby
+restored from a backup is the answer), Kubernetes ingress, a plugin marketplace. New: a
+full-tunnel VPN (internet through quicgate) and a mesh between devices.
+
+---
+
+# The original roadmap (historical)
+
+Sourced 2026-07-23 from the Nginx Proxy Manager issue tracker (reaction counts verified via the GitHub API). Each item: what, evidence, value for a homelab-focused NPM successor. Everything in these tables is built; the phase notes record how.
+
+## Status on 2026-07-23: the roadmap items are built
 
 The items below were built and deployed across five phases. Built is not the same as proven against every real environment, and a September 2026 security review found and fixed defects in several of them; [FEATURES.md](FEATURES.md) is the current status matrix (built, tested locally, qualified live, deferred, non-goal).
-- **Phase 1** — dark/light theme (U1), host search (U2), noindex (S9), ACME staging (C9).
-- **Phase 2** — backup/restore (A1), renewal visibility (C6), failure webhooks (A4), JSON access logs (L3).
-- **Phase 3** — redirect/dead hosts (P4), default site (A5), rate limit (S8), block-exploits (S7), gzip, DNS-01 wildcards (C2), custom cert upload (C3), custom locations via path rewrite groundwork (P3).
-- **Phase 4** — load balancing + health checks (P1/P2), static hosting (P6), forward-auth (S2), mTLS (C8), dynamic-DNS + GeoIP access rules (S6/S5), auto-ban (S1), 2FA (S4), API tokens (A3), log viewer (L1), Prometheus metrics (L2), self-signed/from-file/custom-CA certs (C1/C4/C5), effective-config viewer (U3), declarative import (A2), OIDC + LDAP admin login (S3/S10).
-- **Phase 5** — PROXY protocol send+accept (T5), TLS termination (T3), SNI routing + passthrough (T2/C7), port ranges (T4), websocket support confirmed (P9).
+- **Phase 1**: dark/light theme (U1), host search (U2), noindex (S9), ACME staging (C9).
+- **Phase 2**: backup/restore (A1), renewal visibility (C6), failure webhooks (A4), JSON access logs (L3).
+- **Phase 3**: redirect/dead hosts (P4), default site (A5), rate limit (S8), block-exploits (S7), gzip, DNS-01 wildcards (C2), custom cert upload (C3), custom locations via path rewrite groundwork (P3).
+- **Phase 4**: load balancing + health checks (P1/P2), static hosting (P6), forward-auth (S2), mTLS (C8), dynamic-DNS + GeoIP access rules (S6/S5), auto-ban (S1), 2FA (S4), API tokens (A3), log viewer (L1), Prometheus metrics (L2), self-signed/from-file/custom-CA certs (C1/C4/C5), effective-config viewer (U3), declarative import (A2), OIDC + LDAP admin login (S3/S10).
+- **Phase 5**: PROXY protocol send+accept (T5), TLS termination (T3), SNI routing + passthrough (T2/C7), port ranges (T4), websocket support confirmed (P9).
 
 Post-completion audit (2026-07-23) found and fixed one genuine miss and several skipped sub-parts:
-- **P3** (custom locations + path rewrite) was marked done but never built — now implemented and verified.
-- **A3** documentation half was missing — added [API.md](API.md) + OpenAPI/Swagger (`/docs.html`, `/openapi.yaml`).
+- **P3** (custom locations + path rewrite) was marked done but never built: now implemented and verified.
+- **A3** documentation half was missing: added [API.md](API.md) + OpenAPI/Swagger (`/docs.html`, `/openapi.yaml`).
 - Filled skipped extras: **S7** bad-bot/scraper blocking, **P5** per-host custom 502 page, **L1** per-host log filter, **L2** per-host Prometheus counters.
 
 Genuinely deferred (small, low-value, or optional): **C6** next-attempt renewal time (certmagic manages retries internally, not cleanly surfaceable), **S7** Coraza WAF (flagged optional in the roadmap itself).

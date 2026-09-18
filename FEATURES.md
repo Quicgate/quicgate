@@ -34,12 +34,12 @@ columns mean:
 | Access lists: CIDR rules, basic auth, satisfy any/all | yes | yes (CIDR) | |
 | Hostname (dynamic DNS) rules | yes, including resolver failure | no | Last-known-good addresses for 24 h; never widens on failure. |
 | GeoIP country rules | yes | database loading only | Country rules never widen access while the database is not loaded. |
-| Method-scoped rules, CORS preflight pass-through | yes | no | Preflights skip credential checks, never address rules. |
+| Method-scoped rules, CORS preflight pass-through | yes | partly (method-scoped rules) | Preflights skip credential checks, never address rules. |
 | Built-in OIDC SSO for hosts, per-path providers and policies | yes, synthetic IdP | no | Qualify against your IdP (Keycloak, Entra ID, Authentik) before relying on it. |
 | Forward authentication | yes | no | |
 | Path authentication (per-URL overrides) | yes | no | A rule whose gate cannot be built closes its path. |
 | Rate limiting, bad-bot and exploit filters | yes | partly (filters) | Run before authentication. The exploit filter is a coarse tripwire, not a WAF. |
-| Auto-ban | yes | no | Ban notifications are sent in the background. Never-ban list, optionally with the machine's own and the router's public address. |
+| Auto-ban | yes | yes (it banned its own operator once: that led to the never-ban list in 1.14 and the HEAD and login-prompt fixes in 1.17) | Ban notifications are sent in the background. Never-ban list, optionally with the machine's own and the router's public address. |
 | Trusted proxies and real client IP | yes | no | |
 
 ## Streams and ports
@@ -72,8 +72,8 @@ columns mean:
 | Admin login through OIDC or LDAP | yes, synthetic IdP | no | PKCE, nonce and one-use sign-in for OIDC; LDAP requires `ldaps://`. Neither asks for the local TOTP code: require MFA at the IdP or directory. |
 | Session revocation (password change, sign out others, SSO key rotation) | yes | no | |
 | API tokens | yes | yes | Full administrator credentials: no scopes, no expiry. |
-| Backup and restore | yes | no | Restores every table and the certificate tree as a unit, or changes nothing. Refuses files that are not quicgate backups or would leave no admin able to sign in. Archives are not encrypted as a whole: secrets from the database are sealed inside them and the sealing key is never included, but the certificate tree (ACME and imported private keys) is in the clear. |
-| Secrets encrypted at rest (2FA secrets, OIDC client secrets, DNS credentials, custom certificate keys, SSO cookie key) | yes, including a raw-byte search of the database, WAL and archive | no | XChaCha20-Poly1305, bound to row and column. A missing or wrong key locks the secrets and fails closed; it never replaces them. Rollback to an older version needs `quicgate -unseal`. |
+| Backup and restore | yes | partly (a backup is taken before every upgrade; a restore has only run in tests) | Restores every table and the certificate tree as a unit, or changes nothing. Refuses files that are not quicgate backups or would leave no admin able to sign in. Archives are not encrypted as a whole: secrets from the database are sealed inside them and the sealing key is never included, but the certificate tree (ACME and imported private keys) is in the clear. |
+| Secrets encrypted at rest (2FA secrets, OIDC client secrets, DNS credentials, custom certificate keys, SSO cookie key) | yes, including a raw-byte search of the database, WAL and archive | yes (v1.15.0 migrated a live database) | XChaCha20-Poly1305, bound to row and column. A missing or wrong key locks the secrets and fails closed; it never replaces them. Rollback to an older version needs `quicgate -unseal`. |
 | Declarative import | yes | no | One transaction, idempotent by natural key; never silently removes protection. (The earlier, non-transactional import was used for a live migration.) |
 | Prometheus metrics | yes | no | Needs an API token to scrape. Per-host labels are bounded by configuration; per-listener, per-protocol and per-refusal-reason series are bounded too. |
 | Traffic history and Overview charts | yes | yes (v1.11.1) | Sampled every 10 seconds, rolled up to 5 minutes and an hour, kept for a week in `traffic.json`. Bytes are counted on client sockets for HTTP, HTTPS and streams, and from QUIC's own counters for HTTP/3. Countries need a GeoIP database. |
