@@ -1190,7 +1190,7 @@ function syncHostType() {
   $('f-portal-block').hidden = t !== 'vpn-portal';
   $('f-via-row').style.display = t === 'proxy' ? '' : 'none'; // only a proxy host has an upstream to reach
   // The portal is where people get the VPN back: it cannot be VPN only.
-  $('f-vpnonly-row').hidden = t === 'vpn-portal' || !($('f-vpnonly').checked || $('f-vpnonly-row').dataset.offer === '1');
+  $('f-vpnonly-row').hidden = t === 'vpn-portal';
   for (const el of document.querySelectorAll('#modal [data-proxyonly]')) {
     el.style.display = t === 'proxy' ? '' : 'none';
   }
@@ -1276,8 +1276,13 @@ function openModal(h) {
   $('f-fauth-headers').value = (fa.responseHeaders || []).join(',');
   $('f-fauth-skipverify').checked = !!fa.skipTlsVerify;
   $('f-vpnonly').checked = !!o.vpnOnly;
-  $('f-vpnonly-row').dataset.offer = '0';
-  api('GET', '/api/wg/status').then((st) => { $('f-vpnonly-row').dataset.offer = st.enabled ? '1' : '0'; syncHostType(); }).catch(() => {});
+  const vpnOnlyText = '(served inside the WireGuard tunnel and nowhere else; to everyone outside, this name does not exist)';
+  $('f-vpnonly-hint').textContent = vpnOnlyText;
+  api('GET', '/api/wg/status').then((st) => {
+    // Without the endpoint a VPN-only host would be reachable by nobody.
+    $('f-vpnonly').disabled = !st.enabled && !$('f-vpnonly').checked;
+    if (!st.enabled) $('f-vpnonly-hint').textContent = '(a host served inside the WireGuard tunnel only. Switch WireGuard on first, on the VPN page)';
+  }).catch(() => {});
   fillPortalBlock(h);
   const oi = o.oidc || {};
   $('f-oidc').checked = !!o.oidc;
@@ -2775,6 +2780,7 @@ async function refreshVPN() {
   const body = $('wgsites-body');
   body.innerHTML = '';
   $('wgsites-empty').hidden = wgSites.length > 0;
+  $('wgsites-table').hidden = wgSites.length === 0;
   $('wgsites-note').hidden = !wgSites.some((s) => !s.endpoint);
   for (const s of wgSites) {
     const st = live[s.id];
@@ -3123,7 +3129,7 @@ async function refreshVPNDevices(settings, status) {
   ]);
   if (!oidcProviders.length) oidcProviders = await api('GET', '/api/oidc-providers').catch(() => []);
   const portals = hosts.filter((h) => h.type === 'vpn-portal');
-  const usesPeople = portals.length > 0 || vpnSessions.length > 0 || vpnBlocked.length > 0;
+  const shownDevices = wgDevices.filter((d) => !d.revokedAt);
   const lan = settings.wg_lan_access === '1';
 
   $('wg-network').disabled = wgSites.length > 0 || wgDevices.some((d) => !d.revokedAt);
@@ -3135,7 +3141,7 @@ async function refreshVPNDevices(settings, status) {
   // Devices.
   const live = {};
   for (const st of status.devices || []) live[st.id] = st;
-  const shown = wgDevices.filter((d) => !d.revokedAt);
+  const shown = shownDevices;
   const body = $('wgdevices-body');
   body.innerHTML = '';
   $('wgdevices-empty').hidden = shown.length > 0;
@@ -3195,8 +3201,32 @@ async function refreshVPNDevices(settings, status) {
   }
 
   // People.
-  $('vpn-people-card').hidden = !usesPeople;
-  $('vpn-lease-form').hidden = !usesPeople;
+  // Nothing on this page hides because it is not in use yet: a part that is
+  // not set up says what it is for and what it needs.
+  const vpnOnlyHosts = hosts.filter((h) => h.options && h.options.vpnOnly).length;
+  const vm = (id, text, on, blocked) => {
+    $(id).textContent = text;
+    $(id).parentElement.classList.toggle('is-on', !!on);
+    $(id).parentElement.classList.toggle('is-blocked', !!blocked);
+  };
+  const off = !status.enabled;
+  vm('vm-endpoint', off ? 'Off.' : (status.running ? `On, UDP ${status.port}${status.endpoint ? '' : '. No public address yet: devices need one.'}` : 'On, but not running.'), status.running);
+  vm('vm-sites', off ? 'Needs the endpoint.' : plural(wgSites.length, 'site', 'sites') + '.', wgSites.length > 0, off);
+  vm('vm-devices', off ? 'Needs the endpoint.' : `${plural(shownDevices.length, 'device', 'devices')}, ${plural(vpnOnlyHosts, 'VPN-only host', 'VPN-only hosts')}.`, shownDevices.length > 0, off);
+  let peopleLine = 'Needs the endpoint.';
+  if (!off) {
+    if (!oidcProviders.length) peopleLine = 'Needs an identity provider first (Access lists page).';
+    else if (!portals.length) peopleLine = 'No portal host yet.';
+    else peopleLine = `Portal at ${portals[0].domains[0]}. ${plural(vpnSessions.length, 'person', 'people')}. LAN access ${lan ? 'on' : 'off'}, ${plural(vpnPolicies.length, 'policy', 'policies')}.`;
+  }
+  vm('vm-people', peopleLine, portals.length > 0, off);
+  $('vm-add-portal').hidden = portals.length > 0;
+  for (const id of ['vpn-people-card', 'vpn-lease-form', 'vpn-policies-card']) $(id).classList.toggle('is-waiting', off);
+  const sessionsEmpty = $('vpnsessions-empty');
+  sessionsEmpty.hidden = vpnSessions.length > 0;
+  sessionsEmpty.textContent = portals.length
+    ? `Nobody has logged in yet. People log in at https://${portals[0].domains[0]}/ and add their own devices there.`
+    : 'Nobody can log in yet: there is no VPN portal. A portal is a host of type "VPN portal" (step 4 above adds one). People log in there with single sign-on and add their own devices; quicgate then checks with the identity provider every few minutes whether they may still be on the VPN.';
   const sbody = $('vpnsessions-body');
   sbody.innerHTML = '';
   const isBlocked = (s) => vpnBlocked.some((b) => b.provider === s.provider && b.sub === s.sub);
@@ -3266,15 +3296,18 @@ async function refreshVPNDevices(settings, status) {
   $('vl-devices').value = settings.wg_devices_per_user || '';
 
   // LAN access and its policies.
-  $('vpn-lan-form').hidden = !(status.enabled && (usesPeople || lan));
+  for (const el of $('vpn-lan-form').querySelectorAll('input, textarea, button')) el.disabled = off;
   $('vlan-enabled').checked = lan;
   $('vlan-config').hidden = !lan;
   $('vlan-protected').value = (settings.wg_protected_endpoints || '').split(/[\s,]+/).filter(Boolean).join('\n');
   $('vlan-waive').checked = settings.wg_no_published_aliases === '1';
   $('vpn-lan-line').textContent = lan
     ? 'On. People reach what their policies name; everything else, and this machine itself, is refused. Every flow is written to logs/vpn-flows.log.'
-    : 'Off. Devices reach quicgate\'s own hosts and nothing else.';
-  $('vpn-policies-card').hidden = !lan && vpnPolicies.length === 0;
+    : (off ? 'Off, and it needs the endpoint first. Devices would reach quicgate\'s own hosts and nothing else.' : 'Off. Devices reach quicgate\'s own hosts and nothing else.');
+  $('btn-add-vpnpolicy').disabled = off;
+  $('vpnpolicies-empty').textContent = lan
+    ? 'No policies: nobody reaches anything on the LAN. A policy gives a group, a person or everybody from one identity provider a list of destinations.'
+    : 'No policies. They take effect once LAN access is on: a policy gives a group, a person or everybody from one identity provider a list of destinations on this network.';
   const pbody = $('vpnpolicies-body');
   pbody.innerHTML = '';
   $('vpnpolicies-empty').hidden = vpnPolicies.length > 0;
@@ -3527,3 +3560,26 @@ function readPortalOptions() {
     enrol: [...$('f-portal-enrol').children].map((row) => row._read()).filter((s) => s.kind !== 'group' || s.group),
   };
 }
+
+/* the VPN page's map */
+$('vpnmap').addEventListener('click', (e) => {
+  const a = e.target.closest('a');
+  if (!a) return;
+  e.preventDefault();
+  if (a.dataset.scroll) $(a.dataset.scroll).scrollIntoView({ behavior: 'smooth', block: 'start' });
+  else if (a.dataset.gotoPage) switchPage(a.dataset.gotoPage);
+});
+$('vm-guide').addEventListener('click', async (e) => { e.preventDefault(); switchPage('help'); await openGuide('vpn'); });
+$('vm-add-portal').addEventListener('click', async (e) => {
+  e.preventDefault();
+  if (!oidcProviders.length) {
+    alert('A portal logs people in through an identity provider. Add one first: Access lists page, Identity providers.');
+    switchPage('access');
+    return;
+  }
+  switchPage('hosts');
+  await refresh();
+  openModal(null);
+  $('f-type').value = 'vpn-portal';
+  syncHostType();
+});

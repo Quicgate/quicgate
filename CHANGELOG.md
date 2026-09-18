@@ -4,6 +4,20 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.17.1] - 2026-09-18
+
+### Changed
+- **The VPN page shows everything it can do, from the start.** In 1.17.0 the parts about people
+  (logins, LAN access, policies) stayed hidden until a portal host existed, the "VPN only" option
+  was hidden in the host editor until WireGuard was on, and the portal was only findable as a
+  host type. With WireGuard off that left a page with two empty tables and no hint of the rest.
+  Now the page opens with a map of the four parts in the order they build on each other (the
+  endpoint, sites, devices and VPN-only hosts, people with the portal and LAN access), each with
+  its state, what it still needs, and links to the right place, including "Add a VPN portal
+  host". Every section is always there and says what it is for while it is empty.
+- "VPN only" is always shown in the host editor. While WireGuard is off it is disabled and says
+  so, because a VPN-only host would then be reachable by nobody.
+
 ## [1.17.0] - 2026-09-18
 
 The rest of the WireGuard work in SPEC-wireguard.md: Release B (devices and a private entrance)

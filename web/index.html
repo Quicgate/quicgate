@@ -245,6 +245,38 @@
       <div class="pagehead">
         <div><h1 class="pagehead__title">VPN</h1><p class="pagehead__sub">WireGuard, inside quicgate. Sites reach upstreams on other networks; devices reach hosts that are served in the tunnel only, and, for people who log in, parts of this network.</p></div>
       </div>
+      <div class="vpnmap" id="vpnmap">
+        <div class="vpnmap__step" data-step="endpoint">
+          <div class="vpnmap__n">1</div>
+          <h3>The endpoint</h3>
+          <p>WireGuard runs inside quicgate. Switch it on below and give it a public address. Everything else on this page needs it.</p>
+          <p class="vpnmap__state" id="vm-endpoint"></p>
+          <p><a href="#" class="vpnmap__link" data-scroll="wg-form">Endpoint settings</a></p>
+        </div>
+        <div class="vpnmap__step" data-step="sites">
+          <div class="vpnmap__n">2</div>
+          <h3>Sites</h3>
+          <p>quicgate reaches upstreams on <b>another network</b>, through a router or a small box there. Hosts and streams then get a "Reach through" choice.</p>
+          <p class="vpnmap__state" id="vm-sites"></p>
+          <p><a href="#" class="vpnmap__link" data-scroll="vpn-sites-card">Sites</a></p>
+        </div>
+        <div class="vpnmap__step" data-step="devices">
+          <div class="vpnmap__n">3</div>
+          <h3>Devices and VPN-only hosts</h3>
+          <p>A phone or a laptop reaches hosts that exist <b>inside the tunnel only</b>. Add a device here, then tick "VPN only" on a host, or use an "On the VPN" rule in an access list.</p>
+          <p class="vpnmap__state" id="vm-devices"></p>
+          <p><a href="#" class="vpnmap__link" data-scroll="vpn-devices-card">Devices</a> &middot; <a href="#" class="vpnmap__link" data-goto-page="hosts">Hosts</a> &middot; <a href="#" class="vpnmap__link" data-goto-page="access">Access lists</a></p>
+        </div>
+        <div class="vpnmap__step" data-step="people">
+          <div class="vpnmap__n">4</div>
+          <h3>People, the portal and LAN access</h3>
+          <p>People log in with <b>single sign-on</b> at a portal host and add their own devices. With LAN access on, policies say what they may reach on this network.</p>
+          <p class="vpnmap__state" id="vm-people"></p>
+          <p><a href="#" class="vpnmap__link" id="vm-add-portal">Add a VPN portal host</a> &middot; <a href="#" class="vpnmap__link" data-scroll="vpn-people-card">People</a> &middot; <a href="#" class="vpnmap__link" data-scroll="vpn-lan-form">LAN access</a></p>
+        </div>
+      </div>
+      <p class="vpnmap__guide"><a href="#" id="vm-guide">Read the VPN guide</a> for what each part does, what it never does, and what the identity provider has to support.</p>
+
       <form class="panel" id="wg-form">
         <div class="panel__head"><h2>WireGuard endpoint</h2><p id="wg-status-line">Off. Nothing listens and no upstream can use a site.</p></div>
         <div class="frow">
@@ -271,7 +303,7 @@
         </div>
         <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
       </form>
-      <div class="card card--flush">
+      <div class="card card--flush" id="vpn-sites-card">
         <div class="sectionhead"><h2>Sites <span class="sectionhead__hint">other networks, for upstreams</span></h2><button id="btn-add-wgsite" class="btn btn--secondary btn--sm">Add site</button></div>
         <table class="table" id="wgsites-table">
           <thead><tr><th>Site</th><th>Networks</th><th>Endpoint</th><th>Status</th><th>Traffic</th><th>Enabled</th><th></th></tr></thead>
@@ -280,7 +312,7 @@
         <div id="wgsites-empty" class="empty" hidden>No sites. A site is a WireGuard peer at another location (a router, a small Linux box, a VPS); hosts and streams can then reach addresses on its networks.</div>
         <div class="tablenote" id="wgsites-note" hidden>A site without an endpoint has to call quicgate. After a restart quicgate calls such a site back at the address it was last seen at, so it returns within seconds; if that address changed meanwhile, it takes until the site's own keepalive fires (up to about 40 seconds), and hosts that go through it answer 502 until then. Give a site an endpoint wherever it has a reachable address.</div>
       </div>
-      <div class="card card--flush" style="margin-top:var(--sp-5)">
+      <div class="card card--flush" style="margin-top:var(--sp-5)" id="vpn-devices-card">
         <div class="sectionhead"><h2>Devices <span class="sectionhead__hint">phones and laptops</span></h2>
           <span><button id="btn-add-breakglass" class="btn btn--ghost btn--sm" hidden>Add break-glass device</button> <button id="btn-add-wgdevice" class="btn btn--secondary btn--sm">Add device</button></span></div>
         <table class="table" id="wgdevices-table">
@@ -291,17 +323,18 @@
         <p class="tablenote">A device added here by an admin never gets LAN access: that takes a person's login at the portal, or a break-glass device. Revoking is final: the key and the configuration cannot be used again.</p>
       </div>
 
-      <div class="card card--flush" style="margin-top:var(--sp-5)" id="vpn-people-card" hidden>
+      <div class="card card--flush" style="margin-top:var(--sp-5)" id="vpn-people-card">
         <div class="sectionhead"><h2>People <span class="sectionhead__hint">logged in through a VPN portal</span></h2></div>
         <table class="table" id="vpnsessions-table">
           <thead><tr><th>Person</th><th>Groups</th><th>Access</th><th>Log in again by</th><th></th></tr></thead>
           <tbody id="vpnsessions-body"></tbody>
         </table>
+        <div id="vpnsessions-empty" class="empty" hidden></div>
         <div id="vpnblocked" class="tablenote" hidden></div>
         <p class="tablenote">quicgate asks the identity provider again every few minutes. When the provider says no, the person's devices stop at once; when it cannot be reached, they keep working for the outage grace below and no longer. "End" takes the devices off until the person logs in again; "Block" keeps them off whatever the provider says.</p>
       </div>
 
-      <form class="panel" id="vpn-lease-form" style="margin-top:var(--sp-5)" hidden>
+      <form class="panel" id="vpn-lease-form" style="margin-top:var(--sp-5)">
         <div class="panel__head"><h2>Logins</h2><p>How long a login at the portal is good for. The identity provider has to issue refresh tokens to quicgate (scope <code>offline_access</code>) and state <code>auth_time</code>.</p></div>
         <div class="frow">
           <div class="frow__label"><label for="vl-lease">Check every</label><p>Minutes between two checks with the identity provider. A disabled account loses the VPN within this time.</p></div>
@@ -326,7 +359,7 @@
         <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
       </form>
 
-      <form class="panel" id="vpn-lan-form" style="margin-top:var(--sp-5)" hidden>
+      <form class="panel" id="vpn-lan-form" style="margin-top:var(--sp-5)">
         <div class="panel__head"><h2>LAN access <span class="badge badge--muted">experimental</span></h2><p id="vpn-lan-line">Off. Devices reach quicgate's own hosts and nothing else.</p></div>
         <div class="frow">
           <div class="frow__label"><label for="vlan-enabled">Enabled</label><p>Lets people who logged in reach the addresses their policies name, on the networks this machine is on. quicgate connects on their behalf: the destination sees quicgate's address. Switching this restarts the tunnel.</p></div>
@@ -345,7 +378,7 @@
         <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
       </form>
 
-      <div class="card card--flush" style="margin-top:var(--sp-5)" id="vpn-policies-card" hidden>
+      <div class="card card--flush" style="margin-top:var(--sp-5)" id="vpn-policies-card">
         <div class="sectionhead"><h2>LAN policies <span class="sectionhead__hint">who may reach what</span></h2><button id="btn-add-vpnpolicy" class="btn btn--secondary btn--sm">Add policy</button></div>
         <table class="table" id="vpnpolicies-table">
           <thead><tr><th>Policy</th><th>For</th><th>May reach</th><th></th></tr></thead>
@@ -1166,7 +1199,7 @@
         </div>
         <label class="field field--sm"><span>Access list</span>
           <select id="f-accesslist"><option value="">Publicly accessible</option></select></label>
-        <label class="check" id="f-vpnonly-row" hidden><input type="checkbox" id="f-vpnonly"><span>VPN only <em>(served inside the WireGuard tunnel and nowhere else; to everyone outside, this name does not exist)</em></span></label>
+        <label class="check" id="f-vpnonly-row"><input type="checkbox" id="f-vpnonly"><span>VPN only <em id="f-vpnonly-hint">(served inside the WireGuard tunnel and nowhere else; to everyone outside, this name does not exist)</em></span></label>
         <label class="check"><input type="checkbox" id="f-maintenance"><span>Maintenance mode <em>(serve a 503 page instead of proxying)</em></span></label>
         <label class="field" id="f-maintenance-html-field" hidden><span>Maintenance page <em>(HTML; blank = built-in 503)</em></span>
           <textarea id="f-maintenance-html" rows="3" class="mono"></textarea></label>
