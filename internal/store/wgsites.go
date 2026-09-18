@@ -97,36 +97,61 @@ func (s *Store) GetWGSite(id int64) (WGSite, error) {
 	return s.scanWGSite(s.db.QueryRow("SELECT "+wgSiteCols+" FROM wg_sites WHERE id=?", id))
 }
 
-// nextWGAddress returns the lowest free host address of the tunnel network,
-// after quicgate's own (the first). When an address comes back into use for
-// another site, the engine rebuilds its network stack first: no address
-// changes owner inside a running stack instance.
+// nextWGAddress returns the lowest host address of the tunnel network, after
+// quicgate's own (the first), that nobody has had. An address that a deleted
+// site or a revoked device gave up stays out of use (S40) until the network
+// has nothing else left; taking one of those makes the engine rebuild its
+// network stack first, which drops everybody's connections, so it is the last
+// resort and not the rule.
 func nextWGAddress(q dbtx, tunnel netip.Prefix) (netip.Addr, error) {
 	// Sites and devices share the tunnel network. A revoked device has no
 	// address any more.
-	rows, err := q.Query("SELECT address FROM wg_sites UNION ALL SELECT address FROM wg_devices WHERE address IS NOT NULL")
+	used, err := addrSet(q, "SELECT address FROM wg_sites UNION ALL SELECT address FROM wg_devices WHERE address IS NOT NULL")
 	if err != nil {
 		return netip.Addr{}, err
 	}
-	defer rows.Close()
-	used := map[netip.Addr]bool{}
-	for rows.Next() {
-		var a string
-		if err := rows.Scan(&a); err != nil {
-			return netip.Addr{}, err
-		}
-		if ip, err := netip.ParseAddr(a); err == nil {
-			used[ip] = true
-		}
+	freed, err := addrSet(q, "SELECT address FROM wg_freed")
+	if err != nil {
+		return netip.Addr{}, err
 	}
 	tunnel = tunnel.Masked()
 	last := lastAddr(tunnel)
+	var second netip.Addr
 	for a := tunnel.Addr().Next().Next(); tunnel.Contains(a) && a != last; a = a.Next() {
-		if !used[a] {
+		switch {
+		case used[a]:
+		case !freed[a]:
 			return a, nil
+		case !second.IsValid():
+			second = a
 		}
 	}
+	if second.IsValid() {
+		if _, err := q.Exec("DELETE FROM wg_freed WHERE address=?", second.String()); err != nil {
+			return netip.Addr{}, err
+		}
+		return second, nil
+	}
 	return netip.Addr{}, fmt.Errorf("the tunnel network %s has no free address left", tunnel)
+}
+
+func addrSet(q dbtx, query string) (map[netip.Addr]bool, error) {
+	rows, err := q.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[netip.Addr]bool{}
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		if ip, err := netip.ParseAddr(a); err == nil {
+			out[ip] = true
+		}
+	}
+	return out, rows.Err()
 }
 
 // lastAddr is the broadcast address of an IPv4 prefix.
@@ -210,14 +235,22 @@ func (s *Store) DeleteWGSite(id int64) error {
 	if len(users) > 0 {
 		return fmt.Errorf("%w by %s", ErrWGSiteInUse, strings.Join(users, ", "))
 	}
-	res, err := s.db.Exec("DELETE FROM wg_sites WHERE id=?", id)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("INSERT OR IGNORE INTO wg_freed (address) SELECT address FROM wg_sites WHERE id=?", id); err != nil {
+		return err
+	}
+	res, err := tx.Exec("DELETE FROM wg_sites WHERE id=?", id)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return sql.ErrNoRows
 	}
-	return nil
+	return tx.Commit()
 }
 
 // wgSiteUsers names the hosts and streams that reach something via the site.

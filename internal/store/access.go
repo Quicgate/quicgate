@@ -202,6 +202,9 @@ func createAccessList(q dbtx, a *AccessList) error {
 	if err := a.Validate(nil); err != nil {
 		return err
 	}
+	if err := checkAccessListRefs(q, a); err != nil {
+		return err
+	}
 	rules, users := a.marshalParts()
 	res, err := q.Exec("INSERT INTO access_lists (name, satisfy, pass_auth, rules, users) VALUES (?,?,?,?,?)",
 		a.Name, a.Satisfy, b2i(a.PassAuth), rules, users)
@@ -220,6 +223,9 @@ func updateAccessList(q dbtx, a *AccessList) error {
 		return err
 	}
 	if err := a.Validate(&prev); err != nil {
+		return err
+	}
+	if err := checkAccessListRefs(q, a); err != nil {
 		return err
 	}
 	rules, users := a.marshalParts()

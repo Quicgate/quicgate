@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -114,6 +115,36 @@ func checkHostRefs(q dbtx, h *Host) error {
 	return nil
 }
 
+// checkAccessListRefs verifies what a list's VPN rules name. A rule that
+// names nothing never matches, which is safe, and also never what was meant.
+func checkAccessListRefs(q dbtx, a *AccessList) error {
+	for i, r := range a.Rules {
+		if r.VPN == nil {
+			continue
+		}
+		var err error
+		switch {
+		case r.VPN.Provider > 0:
+			err = requireRow(q, "oidc_providers", r.VPN.Provider, "identity provider")
+		case r.VPN.Kind == "peer":
+			kind, id, _ := strings.Cut(r.VPN.Peer, ":")
+			n, _ := strconv.ParseInt(id, 10, 64)
+			if kind == "site" {
+				err = requireRow(q, "wg_sites", n, "site")
+			} else {
+				var live int
+				if err = q.QueryRow("SELECT COUNT(*) FROM wg_devices WHERE id=? AND revoked_at=''", n).Scan(&live); err == nil && live == 0 {
+					err = fmt.Errorf("peer %s does not reference an existing device", r.VPN.Peer)
+				}
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("rule %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
 // checkStreamRefs verifies every object a stream names.
 func checkStreamRefs(q dbtx, st *Stream) error {
 	if st.AccessListID != nil {
@@ -220,11 +251,53 @@ func oidcProviderUsers(q dbtx, id int64) ([]string, error) {
 		if h.Options.OIDC != nil && h.Options.OIDC.ProviderID == id {
 			users = append(users, hostLabel(h))
 		}
+		if h.Options.Portal != nil && h.Options.Portal.ProviderID == id {
+			users = append(users, hostLabel(h)+" (VPN portal)")
+		}
 		for _, r := range h.Options.AuthRules {
 			if r.OIDC != nil && r.OIDC.ProviderID == id {
 				users = append(users, hostLabel(h)+" path "+r.Path)
 			}
 		}
+	}
+	// The VPN names people by provider and subject: with the provider gone,
+	// a policy, a rule or a device would name nobody, or one day somebody else.
+	lists, err := listAccessLists(q)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range lists {
+		for _, r := range a.Rules {
+			if r.VPN != nil && r.VPN.Provider == id {
+				users = append(users, "access list "+a.Name)
+				break
+			}
+		}
+	}
+	prows, err := q.Query("SELECT name, subject FROM vpn_policies")
+	if err != nil {
+		return nil, err
+	}
+	defer prows.Close()
+	for prows.Next() {
+		var name, subject string
+		if err := prows.Scan(&name, &subject); err != nil {
+			return nil, err
+		}
+		var sub VPNSubject
+		if json.Unmarshal([]byte(subject), &sub) == nil && sub.Provider == id {
+			users = append(users, "VPN policy "+name)
+		}
+	}
+	if err := prows.Err(); err != nil {
+		return nil, err
+	}
+	var devices int
+	if err := q.QueryRow("SELECT COUNT(*) FROM wg_devices WHERE provider=? AND revoked_at=''", id).Scan(&devices); err != nil {
+		return nil, err
+	}
+	if devices > 0 {
+		users = append(users, fmt.Sprintf("%d VPN devices of its users (revoke them first)", devices))
 	}
 	var admin string
 	err = q.QueryRow("SELECT value FROM settings WHERE key = ?", "admin_oidc_provider_id").Scan(&admin)

@@ -249,6 +249,9 @@ CREATE TABLE IF NOT EXISTS wg_devices (
   expires_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS wg_freed (
+  address TEXT PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS vpn_policies (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT UNIQUE NOT NULL COLLATE NOCASE,
@@ -417,20 +420,29 @@ func (s *Store) SetWGDeviceEnabled(id int64, enabled bool) error {
 // so it can never be registered again. owner, when set, restricts the call to
 // that person's devices: the portal may only revoke its own.
 func (s *Store) RevokeWGDevice(id int64, owner *VPNSubject) error {
-	q := "UPDATE wg_devices SET revoked_at=?, enabled=0, address=NULL WHERE id=? AND revoked_at=''"
-	args := []any{now(), id}
+	where := " WHERE id=? AND revoked_at=''"
+	args := []any{id}
 	if owner != nil {
-		q += " AND kind='sso' AND provider=? AND sub=?"
+		where += " AND kind='sso' AND provider=? AND sub=?"
 		args = append(args, owner.Provider, owner.Sub)
 	}
-	res, err := s.db.Exec(q, args...)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// The address stays out of use: see nextWGAddress.
+	if _, err := tx.Exec("INSERT OR IGNORE INTO wg_freed (address) SELECT address FROM wg_devices"+where+" AND address IS NOT NULL", args...); err != nil {
+		return err
+	}
+	res, err := tx.Exec("UPDATE wg_devices SET revoked_at=?, enabled=0, address=NULL"+where, append([]any{now()}, args...)...)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return sql.ErrNoRows
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ---- policies ----
