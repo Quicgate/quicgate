@@ -6,6 +6,7 @@ import (
 	"os"
 	"net"
 	"net/http"
+	"net/netip"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,7 @@ type banManager struct {
 	banned   map[string]banEntry // by client address
 	config   func() banConfig
 	notify   func(string)
+	own      *ownAddresses // this machine's addresses, for banConfig.exemptOwn
 	refused  atomic.Uint64 // requests turned away because their client is banned
 
 	// Persistence: the bans are saved to path after every change, so a restart
@@ -188,6 +190,8 @@ type banConfig struct {
 	threshold int
 	window    time.Duration
 	banFor    time.Duration
+	exempt    []netip.Prefix // addresses that are never banned
+	exemptOwn bool           // nor are this machine's own addresses
 }
 
 func newBanManager(config func() banConfig, notify func(string)) *banManager {
@@ -196,6 +200,7 @@ func newBanManager(config func() banConfig, notify func(string)) *banManager {
 		banned:   map[string]banEntry{},
 		config:   config,
 		notify:   notify,
+		own:      newOwnAddresses(nil),
 	}
 	go b.gc()
 	return b
@@ -227,6 +232,21 @@ func clientIP(remoteAddr string) string {
 	return remoteAddr
 }
 
+// exempt reports whether ip is on the never-ban list.
+func (b *banManager) exempt(cfg banConfig, ip string) bool {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return false
+	}
+	a = a.Unmap().WithZone("")
+	for _, p := range cfg.exempt {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return cfg.exemptOwn && b.own.has(a)
+}
+
 // blocked reports whether an IP is currently banned.
 func (b *banManager) blocked(remoteAddr string) bool {
 	cfg := b.config()
@@ -235,16 +255,39 @@ func (b *banManager) blocked(remoteAddr string) bool {
 	}
 	ip := clientIP(remoteAddr)
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	ban, ok := b.banned[ip]
+	if ok && time.Now().After(ban.until) {
+		delete(b.banned, ip)
+		ok = false
+	}
+	b.mu.Unlock()
 	if !ok {
 		return false
 	}
-	if time.Now().After(ban.until) {
-		delete(b.banned, ip)
+	// An address put on the never-ban list is let in straight away, also when
+	// it was banned before. Only banned addresses pay for this check.
+	if b.exempt(cfg, ip) {
+		b.unban(ip)
 		return false
 	}
 	return true
+}
+
+// liftExempt lifts the bans on addresses that are on the never-ban list now,
+// so the list of bans does not show addresses that are let in anyway.
+func (b *banManager) liftExempt() {
+	cfg := b.config()
+	b.mu.Lock()
+	var lift []string
+	for ip := range b.banned {
+		if b.exempt(cfg, ip) {
+			lift = append(lift, ip)
+		}
+	}
+	b.mu.Unlock()
+	for _, ip := range lift {
+		b.unban(ip)
+	}
 }
 
 // recordFailure notes one refused request for host, and why it was refused,
@@ -255,6 +298,9 @@ func (b *banManager) recordFailure(remoteAddr, host, reason string) {
 		return
 	}
 	ip := clientIP(remoteAddr)
+	if b.exempt(cfg, ip) {
+		return
+	}
 	now := time.Now()
 	b.mu.Lock()
 	defer b.mu.Unlock()

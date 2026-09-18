@@ -39,7 +39,7 @@ columns mean:
 | Forward authentication | yes | no | |
 | Path authentication (per-URL overrides) | yes | no | A rule whose gate cannot be built closes its path. |
 | Rate limiting, bad-bot and exploit filters | yes | partly (filters) | Run before authentication. The exploit filter is a coarse tripwire, not a WAF. |
-| Auto-ban | yes | no | Ban notifications are sent in the background. |
+| Auto-ban | yes | no | Ban notifications are sent in the background. Never-ban list, optionally with the machine's own and the router's public address. |
 | Trusted proxies and real client IP | yes | no | |
 
 ## Streams and ports

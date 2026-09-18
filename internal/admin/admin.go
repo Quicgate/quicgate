@@ -143,6 +143,9 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, s.engine.Bans())
 	}))
 	mux.HandleFunc("DELETE /api/bans/{ip}", s.auth(s.handleUnban))
+	mux.HandleFunc("GET /api/own-addresses", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.engine.OwnAddresses())
+	}))
 	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
 	mux.HandleFunc("POST /api/custom-certs/self-signed", s.auth(s.handleSelfSignedCert))
 	mux.HandleFunc("POST /api/custom-certs/from-file", s.auth(s.handleCertFromFile))
@@ -189,6 +192,8 @@ var settingsKeys = map[string]bool{
 	"ban_threshold":      true,
 	"ban_window_sec":     true,
 	"ban_duration_sec":   true,
+	"ban_exempt":         true, // addresses and CIDR ranges that are never banned
+	"ban_exempt_own":     true, // "1" = never ban this machine's own addresses
 	// OIDC admin login (additive; password always works)
 	"oidc_enabled":        true,
 	"oidc_issuer":         true,
@@ -254,6 +259,12 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if !settingsKeys[k] {
 			writeErr(w, http.StatusBadRequest, "unsupported setting: "+k)
+			return
+		}
+	}
+	if raw, ok := body["ban_exempt"]; ok {
+		if _, err := engine.ParseBanExempt(raw); err != nil {
+			writeErr(w, http.StatusBadRequest, "never-ban list: "+err.Error())
 			return
 		}
 	}

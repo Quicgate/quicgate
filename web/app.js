@@ -2497,6 +2497,9 @@ async function loadSettings() {
   $('set-ban-threshold').value = s.ban_threshold || '';
   $('set-ban-window').value = s.ban_window_sec || '';
   $('set-ban-duration').value = s.ban_duration_sec || '';
+  $('set-ban-exempt-own').checked = s.ban_exempt_own === '1';
+  $('set-ban-exempt').value = s.ban_exempt || '';
+  refreshOwnAddresses();
   $('set-oidc-enabled').checked = s.oidc_enabled === '1';
   const adminProv = $('set-oidc-provider');
   adminProv.innerHTML = '';
@@ -2564,8 +2567,25 @@ $('ban-form').addEventListener('submit', (e) => {
     ban_threshold: $('set-ban-threshold').value || '5',
     ban_window_sec: $('set-ban-window').value || '300',
     ban_duration_sec: $('set-ban-duration').value || '3600',
+    ban_exempt_own: $('set-ban-exempt-own').checked ? '1' : '0',
+    ban_exempt: $('set-ban-exempt').value.trim(),
   });
 });
+
+// Shows which addresses "Never ban my own addresses" covers, so it is clear
+// whether the router's public address is known.
+async function refreshOwnAddresses() {
+  const out = $('ban-own-addresses');
+  try {
+    const own = await api('GET', '/api/own-addresses');
+    const router = own.filter((a) => a.source === 'router').map((a) => a.ip);
+    const local = own.filter((a) => a.source !== 'router').map((a) => a.ip);
+    out.innerHTML = (router.length
+      ? `public: ${router.map(esc).join(', ')}`
+      : '<span class="hs-muted">public address unknown (needs UPnP); add it under Never ban</span>')
+      + (local.length ? `<br>this machine: ${local.map(esc).join(', ')}` : '');
+  } catch (err) { out.textContent = ''; }
+}
 
 $('settings-form').addEventListener('submit', (e) => {
   e.preventDefault();

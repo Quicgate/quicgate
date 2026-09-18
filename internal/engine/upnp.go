@@ -40,6 +40,16 @@ type UPnPManager struct {
 	// published is a copy of mapped for readers that must not wait for a
 	// router round trip in progress under mu.
 	published atomic.Pointer[map[string]bool]
+	// external is the router's public address as of the last Sync.
+	external atomic.Pointer[string]
+}
+
+// ExternalIP reports the router's public address, or "" while it is unknown.
+func (m *UPnPManager) ExternalIP() string {
+	if p := m.external.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // Mapped reports the forwards in place on the router, keyed "TCP:443".
@@ -119,6 +129,13 @@ func (m *UPnPManager) Sync(desired []PortMapping) {
 	if err := m.ensureClient(); err != nil {
 		log.Printf("upnp: %v", err)
 		return
+	}
+	// Asked at every Sync, so a new public address is known within one renewal.
+	if ip, err := m.client.GetExternalIPAddress(); err == nil && ip != "" {
+		if ip != m.ExternalIP() {
+			log.Printf("upnp: external address %s", ip)
+		}
+		m.external.Store(&ip)
 	}
 	want := map[string]PortMapping{}
 	for _, p := range desired {

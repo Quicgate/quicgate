@@ -202,6 +202,7 @@ func New(cfg Config, st *store.Store) *Engine {
 	e.accessLog.client = e.traffic.countClient
 	if cfg.UPnP {
 		e.upnp = NewUPnPManager(3600)
+		e.ban.own.external = e.upnp.ExternalIP
 	}
 	e.table.Store(&routingTable{exact: map[string]*route{}, wildcard: map[string]*route{}})
 
@@ -292,6 +293,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	e.buildRealIP()
 	banCfg := e.banConfig()
 	e.banCfg.Store(&banCfg)
+	e.ban.liftExempt()
 	e.syncOIDCSecret()
 	hosts, err := e.store.ListHosts()
 	if err != nil {
@@ -1444,11 +1446,19 @@ func (e *Engine) banConfig() banConfig {
 		}
 		return def
 	}
+	// The admin API refuses a list with a bad entry, so this only fails on a
+	// database edited by hand; the entries before the bad one still count.
+	exempt, err := ParseBanExempt(e.store.GetSetting("ban_exempt", ""))
+	if err != nil {
+		log.Printf("ban: never-ban list: %v", err)
+	}
 	return banConfig{
 		enabled:   e.store.GetSetting("ban_enabled", "") == "1",
 		threshold: atoi("ban_threshold", 5),
 		window:    time.Duration(atoi("ban_window_sec", 300)) * time.Second,
 		banFor:    time.Duration(atoi("ban_duration_sec", 3600)) * time.Second,
+		exempt:    exempt,
+		exemptOwn: e.store.GetSetting("ban_exempt_own", "") == "1",
 	}
 }
 

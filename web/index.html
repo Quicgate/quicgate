@@ -552,6 +552,17 @@
                   <div class="frow__label"><label for="set-ban-duration">Ban duration</label><p>Seconds a banned address stays blocked.</p></div>
                   <div class="frow__control"><input id="set-ban-duration" type="number" min="1" placeholder="3600" class="input--narrow"></div>
                 </div>
+                <div class="frow">
+                  <div class="frow__label"><label for="set-ban-exempt-own">Never ban my own addresses</label><p>This machine's addresses and your router's public address. Devices at home that open a public hostname arrive from that address, so one failing monitor can otherwise lock out the whole household.</p></div>
+                  <div class="frow__control">
+                    <span class="switch"><input type="checkbox" id="set-ban-exempt-own"><span class="switch__slot"></span><span class="switch__knob"></span></span>
+                    <div id="ban-own-addresses" class="mono frow__result"></div>
+                  </div>
+                </div>
+                <div class="frow">
+                  <div class="frow__label"><label for="set-ban-exempt">Never ban</label><p>Other addresses or CIDR ranges that are never banned, one per line. Access lists still apply to them.</p></div>
+                  <div class="frow__control"><textarea id="set-ban-exempt" class="mono" rows="3" autocomplete="off" spellcheck="false" placeholder="192.168.178.0/24&#10;2001:db8::/48"></textarea></div>
+                </div>
               </div>
               <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
             </form>

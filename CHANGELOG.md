@@ -4,6 +4,20 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.14.0] - 2026-09-18
+
+### Added
+- **A never-ban list for auto-ban.** Settings, Auto-ban has a list of addresses
+  and CIDR ranges that are never banned, and a switch "Never ban my own
+  addresses" that covers this machine's addresses and the router's public
+  address (learned over UPnP, and followed when it changes). Devices at home
+  that open a public hostname arrive from the router's public address, so one
+  monitor sending requests an access list refuses could ban the whole
+  household from every host. Access lists still apply to these addresses;
+  they are only never banned. Putting a banned address on the list lifts its
+  ban straight away. A list with a typo is refused instead of half applied.
+  `GET /api/own-addresses` shows which addresses the switch covers.
+
 ## [1.13.0] - 2026-09-15
 
 ### Changed
