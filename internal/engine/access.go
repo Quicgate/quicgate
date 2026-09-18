@@ -127,6 +127,12 @@ func compileAccess(a store.AccessList, geo *geoDB, ban *banManager, dns *dnsCach
 			for _, m := range r.Methods {
 				methods[strings.ToUpper(m)] = true
 			}
+			// HEAD is GET without the body (RFC 9110), and it is what uptime
+			// monitors send. A rule about GET that left HEAD out refused every
+			// monitor, and five such refusals banned the address it came from.
+			if methods[http.MethodGet] {
+				methods[http.MethodHead] = true
+			}
 		}
 		closed := func(why string) {
 			c.rules = append(c.rules, compiledRule{allow: allow, unresolved: true, methods: methods})
@@ -341,14 +347,17 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 			allowed = ipOK || authOK
 		}
 		if !allowed {
-			if c.ban != nil {
-				c.ban.recordFailure(r.RemoteAddr, routeName(r.Host), c.refusalReason(r, ipOK, authOK))
-			}
 			// The first 401 a client without credentials gets is a login prompt
-			// (git and Docker always ask that way), not a refusal, as long as
-			// credentials could still admit it.
-			challenge := r.Header.Get("Authorization") == "" && (ipOK || (c.satisfy == "any" && c.restricted))
-			if !challenge || len(c.users) == 0 {
+			// (git and Docker always ask that way, and so does a browser), not a
+			// refusal, as long as credentials could still admit it. It is not
+			// counted as blocked, and it does not count toward a ban: a client
+			// that then sends wrong credentials does, and so does an address the
+			// list refuses whatever it sends.
+			challenge := len(c.users) > 0 && r.Header.Get("Authorization") == "" && (ipOK || (c.satisfy == "any" && c.restricted))
+			if !challenge {
+				if c.ban != nil {
+					c.ban.recordFailure(r.RemoteAddr, routeName(r.Host), c.refusalReason(r, ipOK, authOK))
+				}
 				markBlocked(w, blockAccessList)
 			}
 			if len(c.users) > 0 && !authOK {

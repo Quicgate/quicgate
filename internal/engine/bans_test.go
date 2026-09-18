@@ -165,3 +165,49 @@ func TestAccessListRefusalReasons(t *testing.T) {
 		}
 	}
 }
+
+// A rule about GET covers HEAD, which is what uptime monitors send, and a
+// login prompt is not a failed login: neither may ban the address it comes
+// from. Wrong credentials still do.
+func TestMonitorsAndLoginPromptsDoNotBan(t *testing.T) {
+	e, st := newTestEngine(t)
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
+	getOnly := mustCreateACL(t, st, &store.AccessList{Name: "Serve Only GET", Satisfy: "any", Rules: []store.AccessRule{{Action: "allow", CIDR: "0.0.0.0/0", Methods: []string{"GET"}}}})
+	vault := mustCreateACL(t, st, &store.AccessList{Name: "vault", Satisfy: "all", Users: []store.AccessUser{{Username: "family", Password: "right"}}})
+	mustCreateHost(t, st, &store.Host{Type: "proxy", Domains: []string{"site.test"}, Upstream: up, AccessListID: &getOnly})
+	mustCreateHost(t, st, &store.Host{Type: "proxy", Domains: []string{"vault.test"}, Upstream: up, AccessListID: &vault})
+	reload(t, e)
+	e.banCfg.Store(&banConfig{enabled: true, threshold: 3, window: time.Hour, banFor: time.Hour})
+	serve := e.ban.wrap(e.accessLog.wrap(e.serveHTTPS))
+	do := func(method, host, ip, auth string) int {
+		r := httptest.NewRequest(method, "http://"+host+"/", nil)
+		r.Host = host
+		r.RemoteAddr = ip + ":40000"
+		if auth != "" {
+			r.Header.Set("Authorization", auth)
+		}
+		rr := httptest.NewRecorder()
+		serve(rr, r)
+		return rr.Code
+	}
+	for i := 0; i < 6; i++ {
+		if code := do(http.MethodHead, "site.test", "203.0.113.5", ""); code != http.StatusOK {
+			t.Fatalf("HEAD on a host that serves GET: %d, want 200", code)
+		}
+		if code := do(http.MethodGet, "vault.test", "203.0.113.5", ""); code != http.StatusUnauthorized {
+			t.Fatalf("no credentials: %d, want a 401 login prompt", code)
+		}
+	}
+	if code := do(http.MethodPost, "site.test", "203.0.113.5", ""); code != http.StatusForbidden {
+		t.Fatalf("POST on a GET-only host: %d, want 403", code)
+	}
+	if bans := e.Bans(); len(bans) != 0 {
+		t.Fatalf("a monitor and login prompts caused a ban: %+v", bans)
+	}
+	for i := 0; i < 3; i++ {
+		do(http.MethodGet, "vault.test", "198.51.100.7", basic("family", "wrong"))
+	}
+	if bans := e.Bans(); len(bans) != 1 || bans[0].IP != "198.51.100.7" {
+		t.Fatalf("wrong credentials three times: bans = %+v, want 198.51.100.7", bans)
+	}
+}
