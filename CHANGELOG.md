@@ -4,6 +4,46 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.16.0] - 2026-09-18
+
+### Added
+- **WireGuard sites: reach upstreams on networks quicgate is not on.** A site is an ordinary
+  WireGuard peer at another location (a router, a small Linux box, a VPS) that fronts one or
+  more networks. A proxy host, its pool and locations, and a stream can then be reached
+  *through* that site. It also works the other way round: quicgate on a VPS, with the network at
+  home calling in from behind carrier NAT. The endpoint runs inside quicgate (wireguard-go on a
+  userspace network stack): no network device, no extra privileges, no change to the host's
+  routing, still one static binary. Off by default; the new **VPN** page switches it on.
+- A site's private key never reaches quicgate: the browser makes the keypair (or you paste a
+  public key), and the site's configuration, with the preshared key quicgate adds, is shown
+  once. The server's key and the preshared keys are sealed at rest like every other secret.
+- The page shows each site's last handshake, traffic and open connections. With UPnP on, the
+  UDP port is mapped on the router like 80 and 443.
+
+### Security properties of sites
+- **Never by address, never a fallback.** Traffic enters the tunnel only for an upstream that
+  names a site. When the site or the tunnel is down, such an upstream answers 502: its address
+  is never tried on the local network, where the same address can belong to another machine.
+  An address outside the site's declared networks is refused before a packet is made.
+- One connection pool per site. quicgate used one pool per host, and Go pools connections by
+  address, so the same address behind a site and on the local network would have shared
+  connections. A host may also not reach one address two ways.
+- A network never changes hands inside the running VPN stack: giving a site a network another
+  site had, or a new key, rebuilds the endpoint, which interrupts VPN traffic for a moment.
+  Disabling or deleting a site closes the connections through it at once. A site that hosts or
+  streams still use cannot be deleted.
+- One site's problem stays that site's: an endpoint name that does not resolve leaves the
+  endpoint and the other sites running, and names are looked up again every five minutes, so a
+  dynamic-DNS endpoint is followed.
+
+### Good to know
+- A site without an endpoint has to call quicgate. After quicgate restarts such a site needs up
+  to 40 seconds to come back, and hosts behind it answer 502 until then. A site with an endpoint
+  is back at once. Give a site an endpoint wherever it has a reachable address.
+- The site's own router must forward between the tunnel and its network (IP forwarding, and a
+  return route or NAT). See the Streams & port forwards guide.
+- The image grows by about 5 MB.
+
 ## [1.15.0] - 2026-09-18
 
 ### Security

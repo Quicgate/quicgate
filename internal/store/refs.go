@@ -51,6 +51,8 @@ func refField(table string) string {
 		return "certId"
 	case "oidc_providers":
 		return "oidc providerId"
+	case "wg_sites":
+		return "via"
 	}
 	return table
 }
@@ -71,6 +73,26 @@ func checkHostRefs(q dbtx, h *Host) error {
 		if err := requireRow(q, "oidc_providers", h.Options.OIDC.ProviderID, "identity provider"); err != nil {
 			return err
 		}
+	}
+	for _, via := range h.Vias() {
+		if err := requireRow(q, "wg_sites", via, "WireGuard site"); err != nil {
+			return err
+		}
+	}
+	// Within one host an address belongs to one place. The same scheme, host
+	// and port reached both locally and through a site, or through two sites,
+	// would be two machines that the load balancer and the connection pools
+	// have to keep apart by more than their address.
+	where := map[string]int64{}
+	for _, u := range append(append([]Upstream{h.Upstream}, h.Upstreams...), locationUpstreams(h)...) {
+		if u.Host == "" {
+			continue
+		}
+		key := fmt.Sprintf("%s://%s:%d", u.Scheme, strings.ToLower(u.Host), u.Port)
+		if prev, ok := where[key]; ok && prev != u.Via {
+			return fmt.Errorf("%s is used both with and without a WireGuard site, or with two sites, in this host", key)
+		}
+		where[key] = u.Via
 	}
 	for _, r := range h.Options.AuthRules {
 		if r.AccessListID != nil {
@@ -99,7 +121,20 @@ func checkStreamRefs(q dbtx, st *Stream) error {
 			return err
 		}
 	}
+	if st.Via > 0 {
+		if err := requireRow(q, "wg_sites", st.Via, "WireGuard site"); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func locationUpstreams(h *Host) []Upstream {
+	out := make([]Upstream, 0, len(h.Locations))
+	for _, l := range h.Locations {
+		out = append(out, l.Upstream)
+	}
+	return out
 }
 
 func hostLabel(h Host) string {

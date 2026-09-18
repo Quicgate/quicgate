@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -20,7 +21,7 @@ import (
 // (dial + TLS per burst -> Windows ephemeral-port exhaustion -> 502s).
 func TestUpstreamTransportPooling(t *testing.T) {
 	t.Run("default", func(t *testing.T) {
-		tr := newUpstreamTransport(store.Host{Upstream: store.Upstream{Scheme: "http"}})
+		tr := newUpstreamTransport(store.Host{Upstream: store.Upstream{Scheme: "http"}}, hostDial)
 		if tr.MaxIdleConnsPerHost != defaultMaxIdleConnsPerHost {
 			t.Errorf("MaxIdleConnsPerHost = %d, want %d", tr.MaxIdleConnsPerHost, defaultMaxIdleConnsPerHost)
 		}
@@ -41,7 +42,7 @@ func TestUpstreamTransportPooling(t *testing.T) {
 		tr := newUpstreamTransport(store.Host{
 			Upstream: store.Upstream{Scheme: "http"},
 			Options:  store.Options{MaxIdleConnsPerHost: 64},
-		})
+		}, hostDial)
 		if tr.MaxIdleConnsPerHost != 64 {
 			t.Errorf("MaxIdleConnsPerHost = %d, want 64", tr.MaxIdleConnsPerHost)
 		}
@@ -57,7 +58,7 @@ func TestUpstreamTransportPooling(t *testing.T) {
 			Upstream:  store.Upstream{Scheme: "http"},
 			Upstreams: make([]store.Upstream, 2),
 			Locations: make([]store.Location, 1),
-		})
+		}, hostDial)
 		if tr.MaxIdleConnsPerHost != defaultMaxIdleConnsPerHost {
 			t.Errorf("MaxIdleConnsPerHost = %d, want %d", tr.MaxIdleConnsPerHost, defaultMaxIdleConnsPerHost)
 		}
@@ -70,7 +71,7 @@ func TestUpstreamTransportPooling(t *testing.T) {
 		tr := newUpstreamTransport(store.Host{
 			Upstream: store.Upstream{Scheme: "http"},
 			Options:  store.Options{IdleTimeoutSec: 30},
-		})
+		}, hostDial)
 		if tr.IdleConnTimeout != 30*time.Second {
 			t.Errorf("IdleConnTimeout = %v, want 30s", tr.IdleConnTimeout)
 		}
@@ -80,7 +81,7 @@ func TestUpstreamTransportPooling(t *testing.T) {
 		tr := newUpstreamTransport(store.Host{
 			Upstream: store.Upstream{Scheme: "https"},
 			Options:  store.Options{SkipTLSVerify: true, UpstreamSNI: "backend.internal"},
-		})
+		}, hostDial)
 		if tr.TLSClientConfig == nil {
 			t.Fatal("TLSClientConfig = nil, want set for https upstream")
 		}
@@ -172,4 +173,10 @@ func TestUpstreamConnectionReuse(t *testing.T) {
 	if bound := int64(workers) * 2; large > bound {
 		t.Errorf("large pool opened %d backend conns over %d requests, want <= %d (should reuse, not churn)", large, total, bound)
 	}
+}
+
+// hostDial is what the engine passes for backends on the host network.
+func hostDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	var d net.Dialer
+	return d.DialContext(ctx, network, addr)
 }

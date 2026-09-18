@@ -70,6 +70,9 @@ type SiteStatus struct {
 	RxBytes       uint64    `json:"rxBytes"`
 	TxBytes       uint64    `json:"txBytes"`
 	Connections   int       `json:"connections"` // open connections through the site
+	// Warning is a problem of this site alone, such as an endpoint name that
+	// does not resolve. The site is configured without what failed.
+	Warning string `json:"warning,omitempty"`
 }
 
 // instance is one device with its stack. It is never reconfigured in a way
@@ -95,11 +98,17 @@ type Manager struct {
 	conns  map[int64]map[*trackedConn]struct{}
 	resets uint64 // controlled resets so far
 	logf   func(string, ...any)
+	// resolved is the address each site's endpoint name last resolved to, and
+	// warnings what went wrong for a single site. lookup is replaced in tests.
+	resolved map[int64]string
+	warnings map[int64]string
+	lookup   func(ctx context.Context, endpoint string) (string, error)
 }
 
 // New returns a Manager with nothing running. Apply starts it.
 func New() *Manager {
-	return &Manager{sites: map[int64]Site{}, conns: map[int64]map[*trackedConn]struct{}{}, logf: log.Printf}
+	return &Manager{sites: map[int64]Site{}, conns: map[int64]map[*trackedConn]struct{}{}, logf: log.Printf,
+		resolved: map[int64]string{}, warnings: map[int64]string{}, lookup: resolveEndpoint}
 }
 
 // ErrNoFallback marks every refusal to dial through a site. The caller must
@@ -114,9 +123,15 @@ func keyHex(b64 string) (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
+// resolveTimeout bounds one endpoint lookup, so a slow resolver cannot hold
+// up a reload of the whole proxy.
+const resolveTimeout = 3 * time.Second
+
 // resolveEndpoint turns "host:port" into an IP literal with a port, which is
 // all wireguard-go accepts.
 func resolveEndpoint(ctx context.Context, endpoint string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
 	host, port, err := net.SplitHostPort(endpoint)
 	if err != nil {
 		return "", fmt.Errorf("endpoint %q: %w", endpoint, err)
@@ -137,8 +152,9 @@ func resolveEndpoint(ctx context.Context, endpoint string) (string, error) {
 }
 
 // peerIPC renders one site as wireguard-go configuration. AllowedIPs are
-// always written whole (S41), never patched.
-func peerIPC(ctx context.Context, s Site) (string, error) {
+// always written whole (S41), never patched. endpoint is the resolved
+// endpoint to write, or "" to leave the peer's endpoint as it is.
+func peerIPC(s Site, endpoint string) (string, error) {
 	pub, err := keyHex(s.PublicKey)
 	if err != nil {
 		return "", fmt.Errorf("site %q public key: %w", s.Name, err)
@@ -149,12 +165,8 @@ func peerIPC(ctx context.Context, s Site) (string, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "public_key=%s\nreplace_allowed_ips=true\npreshared_key=%s\n", pub, psk)
-	if s.Endpoint != "" {
-		ep, err := resolveEndpoint(ctx, s.Endpoint)
-		if err != nil {
-			return "", fmt.Errorf("site %q: %w", s.Name, err)
-		}
-		fmt.Fprintf(&b, "endpoint=%s\n", ep)
+	if endpoint != "" {
+		fmt.Fprintf(&b, "endpoint=%s\n", endpoint)
 	}
 	fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", s.Keepalive)
 	fmt.Fprintf(&b, "allowed_ip=%s\n", netip.PrefixFrom(s.Address, s.Address.BitLen()))
@@ -301,7 +313,27 @@ func (m *Manager) syncPeersLocked(ctx context.Context, cfg Config, replaceAll bo
 		delete(m.sites, id)
 	}
 	for _, s := range enabledSites(cfg) {
-		ipc, err := peerIPC(ctx, s)
+		// An endpoint that does not resolve is this site's problem, not the
+		// endpoint's: the site is configured without it, can still call in, and
+		// is tried again by Reresolve. The endpoint is only written when it is
+		// new or changed, so a peer that roamed is not pulled back on every
+		// reload.
+		endpoint := ""
+		delete(m.warnings, s.ID)
+		if s.Endpoint != "" {
+			ep, err := m.lookup(ctx, s.Endpoint)
+			switch {
+			case err != nil:
+				m.warnings[s.ID] = err.Error()
+				m.logf("wireguard: site %q: %v (configured without an endpoint for now)", s.Name, err)
+			case ep != m.resolved[s.ID] || replaceAll || m.sites[s.ID].PublicKey != s.PublicKey:
+				endpoint = ep
+				m.resolved[s.ID] = ep
+			}
+		} else {
+			delete(m.resolved, s.ID)
+		}
+		ipc, err := peerIPC(s, endpoint)
 		if err != nil {
 			return err
 		}
@@ -331,6 +363,42 @@ func (m *Manager) stopLocked() {
 		m.inst = nil
 	}
 	m.sites = map[int64]Site{}
+	m.resolved = map[int64]string{}
+}
+
+// Reresolve looks the endpoint names up again and moves a site whose name now
+// points elsewhere, as a dynamic-DNS name does when the address behind it
+// changes. WireGuard itself never resolves a name twice.
+func (m *Manager) Reresolve(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.inst == nil {
+		return
+	}
+	for id, s := range m.sites {
+		if s.Endpoint == "" {
+			continue
+		}
+		ep, err := m.lookup(ctx, s.Endpoint)
+		if err != nil {
+			m.warnings[id] = err.Error()
+			continue
+		}
+		delete(m.warnings, id)
+		if ep == m.resolved[id] {
+			continue
+		}
+		pub, err := keyHex(s.PublicKey)
+		if err != nil {
+			continue
+		}
+		if err := m.inst.dev.IpcSet(fmt.Sprintf("public_key=%s\nupdate_only=true\nendpoint=%s\n", pub, ep)); err != nil {
+			m.logf("wireguard: site %q: moving the endpoint to %s: %v", s.Name, ep, err)
+			continue
+		}
+		m.logf("wireguard: site %q now at %s", s.Name, ep)
+		m.resolved[id] = ep
+	}
 }
 
 // Close stops the endpoint. Dials through a site fail afterwards.
@@ -520,6 +588,7 @@ func (m *Manager) Status() []SiteStatus {
 			st.ID = id
 		}
 		st.Connections = len(m.conns[id])
+		st.Warning = m.warnings[id]
 		out = append(out, st)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

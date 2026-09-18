@@ -55,6 +55,7 @@ columns mean:
 | SNI passthrough routing | yes | no | |
 | Listener status (running or failed) | yes | no | |
 | UPnP router port mapping | no | yes | Only maps ports to the quicgate host itself (router restriction). |
+| WireGuard sites (upstreams and streams reached through a WireGuard peer) | yes: two real WireGuard devices over loopback, a request proxied end to end, mutation checks on no-fallback, connection closing and ownership reset | no | Userspace (wireguard-go on gVisor netstack), unprivileged. IPv4 only. TCP and UDP. Never a fallback to the local network. A dial-in site returns up to 40 s after a quicgate restart. Browser key generation needs HTTPS or localhost. The device-VPN and LAN-access parts of the design are not built. |
 
 ## Administration and operations
 
@@ -93,5 +94,6 @@ dropped:
 
 ## Not goals
 
-Clustering and high availability, Kubernetes ingress, a plugin marketplace, and tunnelling to
-networks quicgate cannot reach directly.
+Clustering and high availability, Kubernetes ingress and a plugin marketplace. (Tunnelling to
+networks quicgate cannot reach directly was on this list until 1.16, which added WireGuard
+sites; the design, its threat model and its review record are in SPEC-wireguard.md.)

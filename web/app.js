@@ -90,6 +90,7 @@ const pageLoaders = {
   hosts: () => refresh(),
   access: () => refreshAcls(),
   streams: () => refreshStreams(),
+  vpn: () => refreshVPN(),
   docker: () => refreshDocker(),
   certs: () => { refreshCerts(); refreshCustomCerts(); },
   logs: () => loadLogs(),
@@ -800,6 +801,7 @@ async function refresh() {
     api('GET', '/api/oidc-providers').catch(() => []),
     api('GET', '/api/config').catch(() => []),
   ]);
+  await loadWGSites();
   healthMap = {};
   for (const t of health) healthMap[t.target] = t.up;
   routeWarnings = {};
@@ -868,8 +870,11 @@ function renderHosts() {
       tdUpstream.innerHTML = `<span class="badge badge--muted">static</span> ${esc(h.staticRoot)}`;
     } else {
       const pool = [h.upstream, ...(h.upstreams || [])];
-      const primary = `${h.upstream.scheme}://${h.upstream.host}:${h.upstream.port}`;
-      const up = pool.filter((u) => healthMap[`${u.scheme}://${u.host}:${u.port}`] !== false).length;
+      // A backend behind a WireGuard site is another machine than the same
+      // address on the local network, and the health check keys it so.
+      const healthKey = (u) => `${u.scheme}://${u.host}:${u.port}${u.via ? '|site=' + u.via : ''}`;
+      const primary = `${h.upstream.scheme}://${h.upstream.host}:${h.upstream.port}${h.upstream.via ? ' via ' + wgSiteName(h.upstream.via) : ''}`;
+      const up = pool.filter((u) => healthMap[healthKey(u)] !== false).length;
       if (up < pool.length) tr.classList.add('row--down');
       if (pool.length > 1) {
         tdUpstream.innerHTML = `${esc(primary)} <span class="badge ${up === pool.length ? 'badge--success' : 'badge--danger'}">${up}/${pool.length} up</span>`;
@@ -1195,6 +1200,7 @@ function openModal(h) {
   $('f-scheme').value = h && h.upstream ? h.upstream.scheme : 'http';
   $('f-uhost').value = h && h.upstream ? h.upstream.host : '';
   $('f-uport').value = h && h.upstream && h.upstream.port ? h.upstream.port : '';
+  fillViaSelect('f-via', 'f-via-row', h && h.upstream ? h.upstream.via : 0);
   const rd = (h && h.redirect) || {};
   $('f-rcode').value = rd.httpCode || 301;
   $('f-rscheme').value = rd.targetScheme || 'auto';
@@ -1314,13 +1320,13 @@ $('host-form').addEventListener('submit', async (e) => {
   const host = {
     type,
     domains: $('f-domains').value.split('\n').map((s) => s.trim()).filter(Boolean),
-    upstream: type === 'proxy' ? {
+    upstream: type === 'proxy' ? viaOn({
       scheme: $('f-scheme').value,
       host: $('f-uhost').value.trim(),
       port: parseInt($('f-uport').value, 10),
-    } : { scheme: 'http', host: '', port: 0 },
-    upstreams: type === 'proxy' ? parsePool($('f-pool').value) : [],
-    locations: type === 'proxy' ? readLocations() : [],
+    }) : { scheme: 'http', host: '', port: 0 },
+    upstreams: type === 'proxy' ? parsePool($('f-pool').value).map(viaOn) : [],
+    locations: type === 'proxy' ? readLocations().map((l) => ({ ...l, upstream: viaOn(l.upstream) })) : [],
     staticRoot: type === 'static' ? $('f-staticroot').value.trim() : '',
     redirect: type === 'redirect' ? {
       httpCode: parseInt($('f-rcode').value, 10),
@@ -1768,7 +1774,7 @@ $('idp-form').addEventListener('submit', async (e) => {
 /* ---- streams page ---- */
 async function refreshStreams() {
   let streams;
-  [streams, customCerts, accessLists] = await Promise.all([api('GET', '/api/streams'), api('GET', '/api/custom-certs'), api('GET', '/api/access-lists')]);
+  [streams, customCerts, accessLists] = await Promise.all([api('GET', '/api/streams'), api('GET', '/api/custom-certs'), api('GET', '/api/access-lists'), loadWGSites()]);
   const body = $('streams-body');
   body.innerHTML = '';
   $('streams-empty').hidden = streams.length > 0;
@@ -1794,7 +1800,7 @@ async function refreshStreams() {
     tdProto.innerHTML = `<span class="badge badge--muted">${esc(s.protocol === 'both' ? 'tcp + udp' : s.protocol)}</span>`;
     const tdFwd = document.createElement('td');
     tdFwd.className = 'domain';
-    tdFwd.textContent = `${s.forwardHost}:${s.forwardPort}`;
+    tdFwd.textContent = `${s.forwardHost}:${s.forwardPort}${s.via ? ' via ' + wgSiteName(s.via) : ''}`;
     const tdSources = document.createElement('td');
     const nCidrs = (s.allowedCidrs || []).length;
     if (s.accessListId) {
@@ -1852,6 +1858,7 @@ function openStreamModal(s) {
   $('s-proto').value = s ? s.protocol : 'tcp';
   $('s-fhost').value = s ? s.forwardHost : '';
   $('s-fport').value = s ? s.forwardPort : '';
+  fillViaSelect('s-via', 's-via-row', s ? s.via : 0);
   $('s-cidrs').value = s && s.allowedCidrs ? s.allowedCidrs.join('\n') : '';
   const src = $('s-source');
   src.innerHTML = '<option value="">Inline CIDR list</option>';
@@ -1902,6 +1909,7 @@ $('stream-form').addEventListener('submit', async (e) => {
     protocol: $('s-proto').value,
     forwardHost: $('s-fhost').value.trim(),
     forwardPort: parseInt($('s-fport').value, 10) || 0,
+    via: parseInt($('s-via').value, 10) || 0,
     allowedCidrs: $('s-source').value ? [] : $('s-cidrs').value.split('\n').map((v) => v.trim()).filter(Boolean),
     accessListId: $('s-source').value ? parseInt($('s-source').value, 10) : null,
     sendProxyProtocol: $('s-sendproxy').value,
@@ -2651,3 +2659,261 @@ $('restore-file').addEventListener('change', async () => {
 });
 
 boot();
+
+/* ---- VPN: WireGuard sites ---- */
+// wgSites is loaded with the hosts and the streams too, for their "reach
+// through" pickers.
+let wgSites = [];
+let editingWGSiteId = null;
+
+async function loadWGSites() {
+  wgSites = await api('GET', '/api/wg/sites').catch(() => []);
+  return wgSites;
+}
+
+// viaOn marks an upstream with the site chosen in the host editor. The choice
+// covers the host's pool and locations too: within one host an address is
+// reached one way.
+function viaOn(u) {
+  const via = parseInt($('f-via').value, 10) || 0;
+  return via ? { ...u, via } : u;
+}
+
+function wgSiteName(id) {
+  const s = wgSites.find((x) => x.id === id);
+  return s ? s.name : `site ${id}`;
+}
+
+// fillViaSelect lists the sites in a "reach through" picker. The row stays
+// hidden while there are no sites and nothing is selected, so an install
+// that does not use WireGuard never sees it.
+function fillViaSelect(selectId, rowId, value) {
+  const sel = $(selectId);
+  sel.innerHTML = '';
+  const local = document.createElement('option');
+  local.value = '0';
+  local.textContent = 'the local network';
+  sel.appendChild(local);
+  for (const s of wgSites) {
+    const o = document.createElement('option');
+    o.value = String(s.id);
+    o.textContent = `WireGuard site ${s.name} (${(s.networks || []).join(', ')})${s.enabled ? '' : ', disabled'}`;
+    sel.appendChild(o);
+  }
+  sel.value = String(value || 0);
+  if (sel.value !== String(value || 0)) sel.value = '0';
+  $(rowId).hidden = wgSites.length === 0 && !value;
+}
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B', 'kB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
+  return `${n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`;
+}
+
+function ago(ts) {
+  const sec = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 1000));
+  if (sec < 90) return `${sec} s ago`;
+  if (sec < 5400) return `${Math.round(sec / 60)} min ago`;
+  return `${Math.round(sec / 3600)} h ago`;
+}
+
+async function refreshVPN() {
+  const [settings, status] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/wg/status'), loadWGSites()]);
+  $('wg-enabled').checked = settings.wg_enabled === '1';
+  $('wg-port').value = settings.wg_port || '';
+  $('wg-endpoint').value = settings.wg_endpoint || '';
+  $('wg-network').value = settings.wg_network || '';
+  $('wg-network').disabled = wgSites.length > 0;
+  $('wg-config').hidden = !$('wg-enabled').checked;
+  $('wg-pubkey').textContent = status.publicKey || '-';
+  $('btn-add-wgsite').disabled = !status.running;
+  $('btn-add-wgsite').title = status.running ? '' : 'Switch WireGuard on first';
+  let line = 'Off. Nothing listens and no upstream can use a site.';
+  if (status.enabled && status.running) line = `Listening on UDP ${status.port} as ${status.address} in ${status.network}.`;
+  else if (status.enabled) line = `Not running: ${status.error || 'unknown error'}. Upstreams that name a site answer 502 until this is fixed.`;
+  $('wg-status-line').textContent = line;
+  $('wg-status-line').classList.toggle('form-error', status.enabled && !status.running);
+
+  const live = {};
+  for (const st of status.sites || []) live[st.id] = st;
+  const body = $('wgsites-body');
+  body.innerHTML = '';
+  $('wgsites-empty').hidden = wgSites.length > 0;
+  $('wgsites-note').hidden = !wgSites.some((s) => !s.endpoint);
+  for (const s of wgSites) {
+    const st = live[s.id];
+    const tr = document.createElement('tr');
+    const cell = (text, cls) => { const td = document.createElement('td'); if (cls) td.className = cls; td.textContent = text; tr.appendChild(td); return td; };
+    cell(s.name, 'domain').title = `tunnel address ${s.address}`;
+    cell((s.networks || []).join(', '), 'mono');
+    cell(s.endpoint || 'calls in', s.endpoint ? 'mono' : 'hs-muted');
+    const tdState = cell('');
+    let badge = ['badge--muted', 'disabled', ''];
+    if (s.enabled && !status.running) badge = ['badge--danger', 'endpoint down', ''];
+    else if (s.enabled && st && st.up) badge = ['badge--success', 'up', `last handshake ${ago(st.lastHandshake)}${st.endpoint ? ', seen at ' + st.endpoint : ''}`];
+    else if (s.enabled && st && st.lastHandshake && !st.lastHandshake.startsWith('0001')) badge = ['badge--danger', 'no handshake', `last handshake ${ago(st.lastHandshake)}`];
+    else if (s.enabled) badge = ['badge--muted', 'waiting', 'no handshake yet. quicgate starts one with the first request when the site has an endpoint; otherwise the site has to call.'];
+    // A problem of this site alone (an endpoint name that does not resolve)
+    // does not stop it from calling in, so it is shown next to the state.
+    if (st && st.warning) badge = [badge[0], badge[1], `${st.warning}. ${badge[2]}`];
+    tdState.innerHTML = `<span class="badge ${badge[0]}">${esc(badge[1])}</span>` + (st && st.warning ? ' <span class="badge badge--danger">endpoint</span>' : '');
+    tdState.title = badge[2];
+    cell(st ? `${fmtBytes(st.rxBytes)} in, ${fmtBytes(st.txBytes)} out${st.connections ? ', ' + st.connections + ' open' : ''}` : '-', 'hs-muted');
+    cell(s.enabled ? 'yes' : 'no');
+    const tdAct = document.createElement('td');
+    tdAct.className = 'actions';
+    const edit = document.createElement('button');
+    edit.className = 'btn btn--secondary btn--sm';
+    edit.textContent = 'Edit';
+    edit.addEventListener('click', () => openWGSiteModal(s));
+    const del = document.createElement('button');
+    del.className = 'btn btn--ghost btn--sm btn--danger-hover';
+    del.textContent = 'Delete';
+    del.addEventListener('click', async () => {
+      if (!confirm(`Delete site ${s.name}? Its configuration stops working at once.`)) return;
+      try { await api('DELETE', `/api/wg/sites/${s.id}`); refreshVPN(); } catch (err) { alert(err.message); }
+    });
+    tdAct.append(edit, ' ', del);
+    tr.appendChild(tdAct);
+    body.appendChild(tr);
+  }
+}
+
+$('wg-enabled').addEventListener('change', () => { $('wg-config').hidden = !$('wg-enabled').checked; });
+$('wg-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  await saveSettings($('wg-form'), {
+    wg_enabled: $('wg-enabled').checked ? '1' : '0',
+    wg_port: $('wg-port').value || '',
+    wg_endpoint: $('wg-endpoint').value.trim(),
+    ...($('wg-network').disabled ? {} : { wg_network: $('wg-network').value.trim() }),
+  });
+  refreshVPN();
+});
+
+// canMakeKeys reports whether this page can generate an X25519 keypair: that
+// takes a secure context (HTTPS or localhost) and a recent browser.
+async function canMakeKeys() {
+  try {
+    if (!window.isSecureContext || !crypto.subtle) return false;
+    await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
+    return true;
+  } catch (err) { return false; }
+}
+
+const b64 = (bytes) => btoa(String.fromCharCode(...bytes));
+
+// makeWGKeypair returns base64 keys as WireGuard writes them. The private key
+// is the last 32 bytes of the PKCS#8 export; WireGuard clamps it on use.
+async function makeWGKeypair() {
+  const kp = await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
+  const pub = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey));
+  return { privateKey: b64(pkcs8.slice(-32)), publicKey: b64(pub) };
+}
+
+function syncWGKeyMode() {
+  $('w-pubkey-field').hidden = !$('w-key-paste').checked;
+}
+$('w-key-generate').addEventListener('change', syncWGKeyMode);
+$('w-key-paste').addEventListener('change', syncWGKeyMode);
+
+async function openWGSiteModal(s) {
+  editingWGSiteId = s ? s.id : null;
+  $('wgsite-modal-title').textContent = s ? `Edit site ${s.name}` : 'Add site';
+  setError('wgsite-error', null);
+  $('wgsite-form').hidden = false;
+  $('wgsite-created').hidden = true;
+  $('w-name').value = s ? s.name : '';
+  $('w-networks').value = s ? (s.networks || []).join('\n') : '';
+  $('w-endpoint').value = s ? s.endpoint : '';
+  $('w-keepalive').value = s ? s.keepalive : 25;
+  $('w-enabled').checked = s ? s.enabled : true;
+  $('w-overlap').checked = !!(s && s.allowOwnOverlap);
+  $('w-overlap-row').hidden = !(s && s.allowOwnOverlap);
+  // An existing site keeps its key: a new key is a new site.
+  $('w-key-block').hidden = !!s;
+  $('w-pubkey').value = '';
+  const can = s ? false : await canMakeKeys();
+  $('w-key-generate').disabled = !can;
+  $('w-key-unsupported').hidden = !!s || can;
+  $('w-key-generate').checked = can;
+  $('w-key-paste').checked = !can;
+  syncWGKeyMode();
+  $('wgsite-modal').hidden = false;
+}
+
+function closeWGSiteModal() {
+  // The configuration holds keys: it does not stay in the page.
+  $('w-config').value = '';
+  $('wgsite-modal').hidden = true;
+  refreshVPN();
+}
+$('btn-add-wgsite').addEventListener('click', () => openWGSiteModal(null));
+$('wgsite-modal-close').addEventListener('click', closeWGSiteModal);
+$('wgsite-btn-cancel').addEventListener('click', closeWGSiteModal);
+$('wgsite-btn-done').addEventListener('click', closeWGSiteModal);
+$('wgsite-btn-copy').addEventListener('click', async () => {
+  const ta = $('w-config');
+  try { await navigator.clipboard.writeText(ta.value); } catch (err) { ta.select(); document.execCommand('copy'); }
+  $('wgsite-btn-copy').textContent = 'Copied';
+  setTimeout(() => { $('wgsite-btn-copy').textContent = 'Copy'; }, 1500);
+});
+
+$('wgsite-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  setError('wgsite-error', null);
+  const site = {
+    name: $('w-name').value.trim(),
+    networks: $('w-networks').value.split('\n').map((v) => v.trim()).filter(Boolean),
+    endpoint: $('w-endpoint').value.trim(),
+    keepalive: parseInt($('w-keepalive').value, 10) || 0,
+    enabled: $('w-enabled').checked,
+    allowOwnOverlap: $('w-overlap').checked,
+  };
+  try {
+    if (editingWGSiteId) {
+      const cur = wgSites.find((x) => x.id === editingWGSiteId);
+      site.publicKey = cur.publicKey;
+      await api('PUT', `/api/wg/sites/${editingWGSiteId}`, site);
+      closeWGSiteModal();
+      return;
+    }
+    let privateKey = '';
+    if ($('w-key-generate').checked) {
+      const kp = await makeWGKeypair();
+      privateKey = kp.privateKey;
+      site.publicKey = kp.publicKey;
+    } else {
+      site.publicKey = $('w-pubkey').value.trim();
+    }
+    const [created, status] = [await api('POST', '/api/wg/sites', site), await api('GET', '/api/wg/status')];
+    const listen = created.endpoint ? created.endpoint.split(':').pop() : '';
+    $('w-config').value = [
+      '[Interface]',
+      `PrivateKey = ${privateKey || '(the private key that belongs to the public key you pasted)'}`,
+      `Address = ${created.address}/32`,
+      ...(listen ? [`ListenPort = ${listen}`] : []),
+      '',
+      '[Peer]',
+      `# quicgate`,
+      `PublicKey = ${status.publicKey}`,
+      `PresharedKey = ${created.presharedKey}`,
+      ...(status.endpoint ? [`Endpoint = ${status.endpoint}`] : ['# Endpoint = (set "Public address" on the VPN page, or let quicgate call this site)']),
+      `AllowedIPs = ${status.address}/32`,
+      ...(created.keepalive ? [`PersistentKeepalive = ${created.keepalive}`] : []),
+      '',
+    ].join('\n');
+    $('w-tunnel-addr').textContent = status.address;
+    $('wgsite-form').hidden = true;
+    $('wgsite-created').hidden = false;
+  } catch (err) {
+    // The server names an overlap with this machine's own networks; offer the
+    // confirmation only then.
+    if (/a network this machine is on/.test(err.message)) $('w-overlap-row').hidden = false;
+    setError('wgsite-error', err);
+  }
+});

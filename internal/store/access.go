@@ -361,6 +361,7 @@ type streamExtra struct {
 	SNIRoutes           []SNIRoute `json:"sniRoutes,omitempty"`
 	AccessListID        *int64     `json:"accessListId,omitempty"`
 	TrustedProxies      []string   `json:"trustedProxies,omitempty"`
+	Via                 int64      `json:"via,omitempty"`
 }
 
 func scanStream(row interface{ Scan(...any) error }) (Stream, error) {
@@ -383,6 +384,7 @@ func scanStream(row interface{ Scan(...any) error }) (Stream, error) {
 	st.TerminateTLS, st.CertID, st.SNIRoutes = e.TerminateTLS, e.CertID, e.SNIRoutes
 	st.AccessListID = e.AccessListID
 	st.TrustedProxies = e.TrustedProxies
+	st.Via = e.Via
 	return st, nil
 }
 
@@ -391,7 +393,7 @@ func (st *Stream) extraJSON() string {
 		ListenPortEnd: st.ListenPortEnd, SendProxyProtocol: st.SendProxyProtocol,
 		AcceptProxyProtocol: st.AcceptProxyProtocol, TerminateTLS: st.TerminateTLS,
 		CertID: st.CertID, SNIRoutes: st.SNIRoutes, AccessListID: st.AccessListID,
-		TrustedProxies: st.TrustedProxies,
+		TrustedProxies: st.TrustedProxies, Via: st.Via,
 	})
 	return string(b)
 }

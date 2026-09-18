@@ -143,6 +143,7 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, s.engine.Bans())
 	}))
 	mux.HandleFunc("DELETE /api/bans/{ip}", s.auth(s.handleUnban))
+	s.registerWireGuard(mux)
 	mux.HandleFunc("GET /api/own-addresses", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.engine.OwnAddresses())
 	}))
@@ -194,6 +195,12 @@ var settingsKeys = map[string]bool{
 	"ban_duration_sec":   true,
 	"ban_exempt":         true, // addresses and CIDR ranges that are never banned
 	"ban_exempt_own":     true, // "1" = never ban this machine's own addresses
+	// WireGuard sites. The server's private key is a setting too, but not one
+	// of these: it is never read or written through the settings API.
+	"wg_enabled":  true, // "1" = run the embedded WireGuard endpoint
+	"wg_port":     true, // UDP port, default 51820
+	"wg_network":  true, // tunnel network, default 10.77.0.0/24; fixed once a site exists
+	"wg_endpoint": true, // public host:port of this server, written into site configurations
 	// OIDC admin login (additive; password always works)
 	"oidc_enabled":        true,
 	"oidc_issuer":         true,
@@ -261,6 +268,10 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "unsupported setting: "+k)
 			return
 		}
+	}
+	if err := s.checkWGSettings(body); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	if raw, ok := body["ban_exempt"]; ok {
 		if _, err := engine.ParseBanExempt(raw); err != nil {

@@ -51,6 +51,10 @@ type StreamManager struct {
 	// It is set once, before the first Sync.
 	traffic *trafficStats
 	refused atomic.Uint64 // connections and packets a source filter turned away
+	// dial connects to a stream's target, through its WireGuard site when it
+	// has one. Set by the engine, once, before the first Sync. Without it only
+	// targets on the host network can be reached.
+	dial func(via int64, network, addr string, timeout time.Duration) (net.Conn, error)
 }
 
 func NewStreamManager() *StreamManager {
@@ -119,6 +123,22 @@ type streamSpec struct {
 	// no listener is started for it.
 	failure  string
 	warnings []string
+	// via is the WireGuard site the target, and every SNI route, is reached
+	// through; 0 is the host network.
+	via     int64
+	dialVia func(via int64, network, addr string, timeout time.Duration) (net.Conn, error)
+}
+
+// dialTarget connects to one of the stream's targets. A target behind a site
+// is never dialled on the host network: without the tunnel it fails.
+func (sp *streamSpec) dialTarget(network, addr string, timeout time.Duration) (net.Conn, error) {
+	if sp.dialVia != nil {
+		return sp.dialVia(sp.via, network, addr, timeout)
+	}
+	if sp.via != 0 {
+		return nil, fmt.Errorf("no WireGuard endpoint to reach site %d through", sp.via)
+	}
+	return net.DialTimeout(network, addr, timeout)
 }
 
 func (sp *streamSpec) allowed(addr net.Addr) bool {
@@ -182,6 +202,7 @@ func (m *StreamManager) Sync(streams []store.Stream, loadCert certLoader, resolv
 		enabled = append(enabled, s)
 		// Build the shared spec once per stream.
 		spec := buildStreamSpec(s, loadCert, resolveACL)
+		spec.via, spec.dialVia = s.Via, m.dial
 		protos := []string{s.Protocol}
 		if s.Protocol == "both" {
 			protos = []string{"tcp", "udp"}
@@ -347,8 +368,8 @@ func buildStreamSpec(s store.Stream, loadCert certLoader, resolveACL aclResolver
 	// The signature decides whether a running listener is replaced, so it
 	// covers everything the listener was built from, including the certificate
 	// contents (a replaced certificate must restart the listener).
-	spec.sig = fmt.Sprintf("%s|%s|pp:%s/%v/%v|tls:%v/%v/%s|sni:%v", target, srcSig,
-		s.SendProxyProtocol, s.AcceptProxyProtocol, s.TrustedProxies, s.TerminateTLS, s.CertID, certSig, s.SNIRoutes)
+	spec.sig = fmt.Sprintf("%s|%s|pp:%s/%v/%v|tls:%v/%v/%s|sni:%v|via:%d", target, srcSig,
+		s.SendProxyProtocol, s.AcceptProxyProtocol, s.TrustedProxies, s.TerminateTLS, s.CertID, certSig, s.SNIRoutes, s.Via)
 	return spec
 }
 
@@ -607,7 +628,7 @@ func handleTCP(key string, raw net.Conn, spec *streamSpec, open *connTracker, ac
 		upstreamReader = tlsConn
 	}
 
-	backend, err := net.DialTimeout("tcp", dest, 10*time.Second)
+	backend, err := spec.dialTarget("tcp", dest, 10*time.Second)
 	if err != nil {
 		log.Printf("stream %s: dial %s: %v", key, dest, err)
 		return
@@ -723,7 +744,7 @@ func startUDP(key, addr string, spec *streamSpec, acct streamAcct) (*forwarder, 
 					limited.printf("stream %s: %s holds %d UDP sessions, dropping packets from its new ports", key, srcIP, maxPerIP)
 					continue
 				}
-				up, err := net.DialTimeout("udp", target, 5*time.Second)
+				up, err := spec.dialTarget("udp", target, 5*time.Second)
 				if err != nil {
 					mu.Unlock()
 					log.Printf("stream %s: dial %s: %v", key, target, err)

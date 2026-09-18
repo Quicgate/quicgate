@@ -24,6 +24,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	"quicgate/internal/store"
+	"quicgate/internal/wg"
 )
 
 // Config is the engine's static (process-level) configuration.
@@ -74,6 +75,9 @@ type route struct {
 	// closed (an unresolvable access-list hostname, a missing reference, an
 	// unusable client CA), shown in the effective-config viewer.
 	warnings []string
+	// transports are the route's connection pools, one per place its backends
+	// are reached through. Nil for routes that proxy nothing.
+	transports *viaTransports
 }
 
 type routingTable struct {
@@ -151,6 +155,11 @@ type Engine struct {
 	health        *healthChecker
 	geo           *geoDB
 	ban           *banManager
+	// wg is the embedded WireGuard endpoint. It exists always and runs only
+	// while wg_enabled is on; wgState is what the last reload made of it.
+	wg      *wg.Manager
+	wgState atomic.Pointer[wgState]
+
 	banCfg        atomic.Pointer[banConfig] // compiled at reload; nil (auto-ban off) before the first
 	caPoolCache   sync.Map
 	reloadMu      sync.Mutex                     // serializes concurrent Reload callers
@@ -181,7 +190,10 @@ func (e *Engine) SetDockerRoutes(hosts []store.Host, streams []store.Stream) {
 }
 
 func New(cfg Config, st *store.Store) *Engine {
-	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager(), health: newHealthChecker(), dns: newDNSCache(), started: time.Now()}
+	e := &Engine{cfg: cfg, store: st, streams: NewStreamManager(), health: newHealthChecker(), dns: newDNSCache(), started: time.Now(), wg: wg.New()}
+	e.health.dial = e.dialTargetTimeout
+	e.streams.dial = e.dialTargetTimeout
+	go e.reresolveWireGuard()
 	e.acmeStaging = cfg.ACMEStage
 	e.acmeEmail = cfg.ACMEEmail
 	e.certs = newCertTracker(func() string { return st.GetSetting("notify_url", "") })
@@ -295,6 +307,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	e.banCfg.Store(&banCfg)
 	e.ban.liftExempt()
 	e.syncOIDCSecret()
+	e.syncWireGuard(ctx)
 	hosts, err := e.store.ListHosts()
 	if err != nil {
 		return err
@@ -321,7 +334,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	}
 	e.loadCustomCerts(hosts)
 	t := &routingTable{exact: map[string]*route{}, wildcard: map[string]*route{}}
-	healthTargets := map[string]struct{ scheme, hostport string }{}
+	healthTargets := map[string]healthTarget{}
 	var managed []string
 
 	// place installs one host's routes. Database hosts are placed first; hosts
@@ -371,8 +384,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 		}
 		for _, u := range append([]store.Upstream{h.Upstream}, h.Upstreams...) {
 			if u.Host != "" {
-				hp := hostPort(u.Host, u.Port)
-				healthTargets[u.Scheme+"://"+hp] = struct{ scheme, hostport string }{u.Scheme, hp}
+				healthTargets[upstreamKey(u)] = healthTarget{scheme: u.Scheme, hostport: hostPort(u.Host, u.Port), via: u.Via}
 			}
 		}
 	}
@@ -385,8 +397,19 @@ func (e *Engine) Reload(ctx context.Context) error {
 			place(h, true)
 		}
 	}
-	e.table.Store(t)
+	old := e.table.Swap(t)
 	e.health.setTargets(healthTargets)
+	// The replaced routes' pooled connections go now, not when they time out:
+	// a backend that moved behind another site must not be served from a
+	// connection that was opened to the old place.
+	if old != nil {
+		for _, r := range old.exact {
+			r.transports.CloseIdleConnections()
+		}
+		for _, r := range old.wildcard {
+			r.transports.CloseIdleConnections()
+		}
+	}
 
 	// Merge Docker-provider streams after the database streams, dropping any
 	// whose listen port collides with a database stream, another docker stream,
@@ -421,6 +444,9 @@ func (e *Engine) Reload(ctx context.Context) error {
 	e.streams.Sync(streams, e.loadStreamCert, func(id int64) *compiledAccess { return access[id] })
 	if e.upnp != nil {
 		var mappings []PortMapping
+		if p := e.wgPort(); p > 0 {
+			mappings = append(mappings, PortMapping{Proto: "UDP", Port: uint16(p)})
+		}
 		if p := portOf(e.cfg.HTTPAddr); p > 0 {
 			mappings = append(mappings, PortMapping{Proto: "TCP", Port: uint16(p)})
 		}
@@ -542,7 +568,7 @@ const defaultMaxIdleConnsPerHost = 256
 // typed options. The same transport backs the host's default proxy and every
 // location proxy, so its idle-connection budget is sized for the whole backend
 // set (primary + pool + locations), not a single target.
-func newUpstreamTransport(h store.Host) *http.Transport {
+func newUpstreamTransport(h store.Host, dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
 	o := h.Options
 	dialTimeout := 10 * time.Second
 	if o.DialTimeoutSec > 0 {
@@ -563,7 +589,11 @@ func newUpstreamTransport(h store.Host) *http.Transport {
 	// MaxIdleConnsPerHost back down.
 	backends := 1 + len(h.Upstreams) + len(h.Locations)
 	transport := &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: dialTimeout}).DialContext,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+			defer cancel()
+			return dial(ctx, network, addr)
+		},
 		IdleConnTimeout:       idleTimeout,
 		MaxIdleConnsPerHost:   maxIdlePerHost,
 		MaxIdleConns:          maxIdlePerHost * backends,
@@ -638,16 +668,21 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 	// Build the balancer target list: primary plus any pool members.
 	bal := &balancer{health: e.health}
 	pool := append([]store.Upstream{h.Upstream}, h.Upstreams...)
+	// viaOf gives the site of a backend by its URL. Within a host an address
+	// is only ever reached one way (the store refuses anything else), so the
+	// URL is enough to tell.
+	viaOf := map[string]int64{}
 	for _, u := range pool {
 		hp := hostPort(u.Host, u.Port)
 		bal.targets = append(bal.targets, balTarget{
-			key: u.Scheme + "://" + hp, url: u.Scheme + "://" + hp, hostport: hp,
-			id: targetID(u.Scheme + "://" + hp),
+			key: upstreamKey(u), url: u.Scheme + "://" + hp, hostport: hp,
+			id: targetID(upstreamKey(u)),
 		})
+		viaOf[u.Scheme+"://"+hp] = u.Via
 	}
 	target := &url.URL{Scheme: h.Upstream.Scheme, Host: hostPort(h.Upstream.Host, h.Upstream.Port)}
 
-	transport := newUpstreamTransport(h)
+	transport := e.newHostTransports(h)
 
 	// Buffered by default; buffering=false flushes every write for SSE and
 	// long-poll upstreams. Websockets bypass this path entirely.
@@ -678,6 +713,7 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 					pick = u
 				}
 			}
+			pr.Out = withVia(pr.Out, viaOf[pick.Scheme+"://"+pick.Host])
 			pr.SetURL(pick)
 			pr.SetXForwarded()
 			setRealIP(pr)
@@ -735,7 +771,7 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 		})
 	}
 	handler = wrapCommon(h.Domains, handler, o, acl, acls, sso, newGate)
-	return &route{host: h, proxy: handler}
+	return &route{host: h, proxy: handler, transports: transport}
 }
 
 // normalizeBodyless drops the phantom request body HTTP/3 leaves on GET/HEAD.
@@ -877,7 +913,7 @@ func badGatewayHandler(target *url.URL, customHTML string) func(http.ResponseWri
 // locationDispatcher routes requests whose path matches a location prefix
 // (longest wins) to that location's own upstream + rewrite; everything else
 // falls through to the host's default handler.
-func (e *Engine) locationDispatcher(h store.Host, def http.Handler, transport *http.Transport) http.Handler {
+func (e *Engine) locationDispatcher(h store.Host, def http.Handler, transport http.RoundTripper) http.Handler {
 	type loc struct {
 		prefix string
 		proxy  http.Handler
@@ -886,9 +922,11 @@ func (e *Engine) locationDispatcher(h store.Host, def http.Handler, transport *h
 	for _, l := range h.Locations {
 		target := &url.URL{Scheme: l.Upstream.Scheme, Host: hostPort(l.Upstream.Host, l.Upstream.Port)}
 		rw := compileRewrite(l.PathRewrite)
+		via := l.Upstream.Via
 		lp := &httputil.ReverseProxy{
 			Transport: transport,
 			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.Out = withVia(pr.Out, via)
 				pr.SetURL(target)
 				pr.SetXForwarded()
 				setRealIP(pr)
@@ -1257,6 +1295,7 @@ func (e *Engine) Run(ctx context.Context) error {
 			_ = e.h3.Close()
 		}
 		e.streams.StopAll()
+		e.wg.Close()
 		if e.upnp != nil {
 			e.upnp.Close()
 		}
@@ -1381,6 +1420,11 @@ func (e *Engine) ReservedPorts() []int {
 		if p := portOf(addr); p > 0 {
 			out = append(out, p)
 		}
+	}
+	// The WireGuard port is UDP; a stream may not take it on either protocol,
+	// which costs nothing and keeps the rule simple.
+	if p := e.wgPort(); p > 0 {
+		out = append(out, p)
 	}
 	return out
 }

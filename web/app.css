@@ -523,3 +523,8 @@ html[data-skin="brass"][data-theme="light"] {
 
 /* search boxes live in forms of their own for the password manager; the form takes no space */
 .searchform { display: contents; }
+
+/* VPN: the one-time site configuration. Keys must not wrap: a wrapped key
+   copied by hand is a broken key. */
+#w-config { width: 100%; white-space: pre; overflow: auto; resize: vertical; }
+#wgsites-note { padding: var(--sp-3) var(--sp-4); border-top: 1px solid var(--c-border); color: var(--c-text-muted); font-size: var(--fs-sm); }

@@ -16,8 +16,17 @@ import (
 // load balancer can skip dead backends. One shared checker for all hosts.
 type healthChecker struct {
 	mu      sync.RWMutex
-	targets map[string]*targetHealth // key: "scheme://host:port"
+	targets map[string]*targetHealth // key: upstreamKey
 	client  *http.Client
+	// dial connects to a target, through its WireGuard site when it has one.
+	// Set by the engine; nil in tests that only probe the host network.
+	dial func(via int64, network, addr string, timeout time.Duration) (net.Conn, error)
+}
+
+// healthTarget is one backend to probe.
+type healthTarget struct {
+	scheme, hostport string
+	via              int64
 }
 
 type targetHealth struct {
@@ -26,6 +35,7 @@ type targetHealth struct {
 	checked  time.Time
 	scheme   string
 	hostport string
+	via      int64
 }
 
 func newHealthChecker() *healthChecker {
@@ -45,7 +55,7 @@ func newHealthChecker() *healthChecker {
 }
 
 // setTargets reconciles the tracked set; new targets start optimistically up.
-func (h *healthChecker) setTargets(want map[string]struct{ scheme, hostport string }) {
+func (h *healthChecker) setTargets(want map[string]healthTarget) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for key := range h.targets {
@@ -55,7 +65,7 @@ func (h *healthChecker) setTargets(want map[string]struct{ scheme, hostport stri
 	}
 	for key, v := range want {
 		if _, ok := h.targets[key]; !ok {
-			h.targets[key] = &targetHealth{up: true, scheme: v.scheme, hostport: v.hostport}
+			h.targets[key] = &targetHealth{up: true, scheme: v.scheme, hostport: v.hostport, via: v.via}
 		}
 	}
 }
@@ -95,7 +105,7 @@ func (h *healthChecker) loop() {
 		}
 		h.mu.RUnlock()
 		for _, t := range snapshot {
-			up, errStr := h.probe(t.scheme, t.hostport)
+			up, errStr := h.probe(t.scheme, t.hostport, t.via)
 			h.mu.Lock()
 			t.up, t.lastErr, t.checked = up, errStr, time.Now()
 			h.mu.Unlock()
@@ -105,12 +115,27 @@ func (h *healthChecker) loop() {
 
 // probe does a cheap liveness check: TCP connect, then an HTTP HEAD/GET that
 // counts any response (even 4xx/5xx) as "the backend is alive".
-func (h *healthChecker) probe(scheme, hostport string) (bool, string) {
-	conn, err := net.DialTimeout("tcp", hostport, 4*time.Second)
+func (h *healthChecker) probe(scheme, hostport string, via int64) (bool, string) {
+	dial := h.dial
+	if dial == nil {
+		if via != 0 {
+			return false, "no WireGuard endpoint to probe through"
+		}
+		dial = func(_ int64, network, addr string, timeout time.Duration) (net.Conn, error) {
+			return net.DialTimeout(network, addr, timeout)
+		}
+	}
+	conn, err := dial(via, "tcp", hostport, 4*time.Second)
 	if err != nil {
 		return false, err.Error()
 	}
 	conn.Close()
+	if via != 0 {
+		// The HTTP probe below uses the host network. A backend behind a site
+		// must never be contacted there, so the connect through the tunnel is
+		// the whole probe.
+		return true, ""
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+hostport+"/", nil)

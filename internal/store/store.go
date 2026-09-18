@@ -99,6 +99,31 @@ type Upstream struct {
 	Scheme string `json:"scheme"` // http | https
 	Host   string `json:"host"`
 	Port   int    `json:"port"`
+	// Via, when set, is the WireGuard site the upstream is reached through.
+	// Such an upstream is only ever dialled inside the tunnel: when the site
+	// or the tunnel is down the request fails, it is never tried on the local
+	// network, where the same address may belong to another machine.
+	Via int64 `json:"via,omitempty"`
+}
+
+// Vias lists the WireGuard sites a host's upstreams name, without repeats.
+func (h *Host) Vias() []int64 {
+	seen := map[int64]bool{}
+	var out []int64
+	add := func(u Upstream) {
+		if u.Via > 0 && !seen[u.Via] {
+			seen[u.Via] = true
+			out = append(out, u.Via)
+		}
+	}
+	add(h.Upstream)
+	for _, u := range h.Upstreams {
+		add(u)
+	}
+	for _, l := range h.Locations {
+		add(l.Upstream)
+	}
+	return out
 }
 
 // Options is the structured replacement for NPM's free-text advanced config.
@@ -221,6 +246,9 @@ type Stream struct {
 	// AccessListID, when set, reuses that access list's allow CIDR/host rules
 	// as the source filter instead of AllowedCIDRs (define an allowlist once).
 	AccessListID *int64 `json:"accessListId,omitempty"`
+	// Via, when set, is the WireGuard site the target is reached through. SNI
+	// routes of the stream go through the same site.
+	Via int64 `json:"via,omitempty"`
 
 	// Round-2 options (all TCP-only).
 	SendProxyProtocol   string `json:"sendProxyProtocol,omitempty"`   // "" | v1 | v2 (prepend PROXY header to backend)
@@ -601,6 +629,9 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 		}
 	}
 	if err := s.migrateCustomCerts(); err != nil {
+		return err
+	}
+	if err := s.migrateWG(); err != nil {
 		return err
 	}
 	return s.migrateTokens()

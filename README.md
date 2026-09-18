@@ -9,7 +9,7 @@
 
 <p align="center">
   Point-and-click hosts, automatic HTTPS, HTTP/3, single sign-on and live traffic charts.<br>
-  <b>One Go binary. One 25 MB container. No nginx, no Traefik, no sidecars.</b>
+  <b>One Go binary. One 30 MB container. No nginx, no Traefik, no sidecars.</b>
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
   <a href="https://github.com/Quicgate/quicgate/actions/workflows/docker.yml"><img src="https://img.shields.io/github/actions/workflow/status/Quicgate/quicgate/docker.yml?branch=master&label=build" alt="build status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-a3e635" alt="MIT license"></a>
   <img src="https://img.shields.io/github/go-mod/go-version/Quicgate/quicgate?logo=go&color=00ADD8" alt="Go version">
-  <img src="https://img.shields.io/badge/image-~25%20MB%2C%20FROM%20scratch-a3e635" alt="image size">
+  <img src="https://img.shields.io/badge/image-~30%20MB%2C%20FROM%20scratch-a3e635" alt="image size">
   <a href="https://github.com/Quicgate/quicgate/stargazers"><img src="https://img.shields.io/github/stars/Quicgate/quicgate?style=flat&color=a3e635" alt="GitHub stars"></a>
 </p>
 
@@ -162,7 +162,17 @@ never-ban list &middot; real client IP behind Cloudflare or another load balance
 
 L4 forwards with source allowlists &middot; PROXY protocol v1/v2 &middot; TLS termination &middot;
 SNI passthrough routing &middot; port ranges &middot; router port forwards managed over **UPnP**,
-self-healing after a router reboot
+self-healing after a router reboot &middot; targets on a remote network through a WireGuard site
+</details>
+
+<details>
+<summary><b>WireGuard sites</b></summary>
+
+Reach upstreams on networks quicgate is not on, through an ordinary WireGuard peer at the other
+end: a router, a small Linux box, a VPS. Also the other way round, with quicgate on a VPS and the
+home network calling in. Runs inside quicgate, unprivileged &middot; keys made in your browser,
+never stored &middot; an upstream behind a site is never tried on the local network &middot;
+handshake, traffic and connections per site
 </details>
 
 <details>
@@ -197,7 +207,7 @@ is tracked row by row in [FEATURES.md](FEATURES.md).
 | | **quicgate** | **Nginx Proxy Manager** | **Pangolin** |
 |---|---|---|---|
 | Data plane | native Go (net/http, quic-go) | nginx | Traefik |
-| Deployment | **1 container, ~25 MB, scratch** | 1 container (+ optional db) | 3+ containers |
+| Deployment | **1 container, ~30 MB, scratch** | 1 container (+ optional db) | 3+ containers |
 | HTTP/3 (QUIC) | **default, per-host toggle** | no | via Traefik config |
 | Config model | **typed, validated options** | UI + free-text nginx snippets | UI + Traefik config |
 | Applying a change | instant atomic swap | nginx reload | Traefik provider push |
@@ -205,13 +215,14 @@ is tracked row by row in [FEATURES.md](FEATURES.md).
 | Per-URL auth policy | **yes** | no | per resource |
 | Access lists | IP/CIDR + **GeoIP + dynamic DNS** | IP/CIDR | yes |
 | TCP/UDP streams | yes, + PROXY protocol, SNI, TLS termination | basic | via tunnels |
-| WireGuard tunnels to remote sites | no | no | **yes, Pangolin's killer feature** |
+| Reaching services on remote networks | **WireGuard sites**, any WireGuard peer, no agent (new in 1.16) | no | **yes, mature, with its own agent and user access** |
 | Config from container labels | **yes, flat labels + streams** | no | via Traefik labels |
 | Metrics and API | Prometheus + full REST + OpenAPI | none / undocumented REST | via Traefik / REST |
 | Maturity | **young, read the caveats** | battle-tested, huge community | growing fast |
 
 **Choose NPM** for the most battle-tested option and years of community answers.
-**Choose Pangolin** if you need WireGuard tunnels to reach services on remote machines.
+**Choose Pangolin** if tunnels are the heart of your setup: it is built around them, with its own
+agent and identity-aware access for users.
 **Choose quicgate** if you want one small container to replace the whole stack (proxy,
 certificates, access control and SSO) on a modern engine.
 
@@ -221,7 +232,8 @@ certificates, access control and SSO) on a modern engine.
 - Not everything has met the real world yet. The built-in OIDC SSO, for one, is tested against a
   synthetic identity provider: try it against yours before you rely on it.
   [FEATURES.md](FEATURES.md) says per feature what is proven live and what is only tested.
-- No WireGuard tunnelling: quicgate proxies to upstreams it can reach over the network.
+- WireGuard sites are new in 1.16 and tested, not yet proven in production. There is no VPN for
+  people's devices: a site connects a network to quicgate, it does not let your phone into one.
 - A single admin account (with 2FA, OIDC or LDAP login), no multi-tenant roles.
 
 ## Performance

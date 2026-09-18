@@ -53,6 +53,7 @@
         <button class="pagelink is-active" data-page="overview">Overview</button>
         <button class="pagelink" data-page="hosts">Proxy hosts</button>
         <button class="pagelink" data-page="streams">Streams</button>
+        <button class="pagelink" data-page="vpn">VPN</button>
         <button class="pagelink" data-page="access">Access control</button>
         <button class="pagelink" data-page="certs">Certificates</button>
         <button class="pagelink" data-page="docker">Docker</button>
@@ -237,6 +238,47 @@
           <tbody id="streams-body"></tbody>
         </table>
         <div id="streams-empty" class="empty" hidden>No streams. Add a TCP or UDP port forward.</div>
+      </div>
+    </div>
+
+    <div id="page-vpn" hidden>
+      <div class="pagehead">
+        <div><h1 class="pagehead__title">VPN</h1><p class="pagehead__sub">WireGuard sites: reach upstreams on networks quicgate is not on, through an ordinary WireGuard peer at the other end.</p></div>
+        <div class="pagehead__actions"><button id="btn-add-wgsite" class="btn btn--primary">Add site</button></div>
+      </div>
+      <form class="panel" id="wg-form">
+        <div class="panel__head"><h2>WireGuard endpoint</h2><p id="wg-status-line">Off. Nothing listens and no upstream can use a site.</p></div>
+        <div class="frow">
+          <div class="frow__label"><label for="wg-enabled">Enabled</label><p>Runs inside quicgate, without a network device or extra privileges. One UDP port is opened.</p></div>
+          <div class="frow__control"><span class="switch"><input type="checkbox" id="wg-enabled"><span class="switch__slot"></span><span class="switch__knob"></span></span></div>
+        </div>
+        <div id="wg-config" hidden>
+          <div class="frow">
+            <div class="frow__label"><label for="wg-port">UDP port</label><p>Forward it on your router, or let UPnP do it when that is on.</p></div>
+            <div class="frow__control"><input id="wg-port" type="number" min="1" max="65535" placeholder="51820" class="input--narrow"></div>
+          </div>
+          <div class="frow">
+            <div class="frow__label"><label for="wg-endpoint">Public address</label><p>How sites reach this server, written into their configuration. A site that only gets called by quicgate does not need it.</p></div>
+            <div class="frow__control"><input id="wg-endpoint" class="mono" placeholder="vpn.example.com:51820" autocomplete="off" spellcheck="false"></div>
+          </div>
+          <div class="frow">
+            <div class="frow__label"><label for="wg-network">Tunnel network</label><p>Addresses used inside the tunnel. It cannot change once a site exists.</p></div>
+            <div class="frow__control"><input id="wg-network" class="mono input--narrow" placeholder="10.77.0.0/24" autocomplete="off" spellcheck="false"></div>
+          </div>
+          <div class="frow">
+            <div class="frow__label"><label>This server's public key</label></div>
+            <div class="frow__control"><div id="wg-pubkey" class="mono frow__result">-</div></div>
+          </div>
+        </div>
+        <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
+      </form>
+      <div class="card card--flush">
+        <table class="table" id="wgsites-table">
+          <thead><tr><th>Site</th><th>Networks</th><th>Endpoint</th><th>Status</th><th>Traffic</th><th>Enabled</th><th></th></tr></thead>
+          <tbody id="wgsites-body"></tbody>
+        </table>
+        <div id="wgsites-empty" class="empty" hidden>No sites. A site is a WireGuard peer at another location (a router, a small Linux box, a VPS); hosts and streams can then reach addresses on its networks.</div>
+        <div class="card__foot-note" id="wgsites-note" hidden>A site without an endpoint has to call quicgate. After quicgate restarts such a site needs up to 40 seconds to return; hosts that go through it answer 502 until then. Give a site an endpoint wherever it has a reachable address.</div>
       </div>
     </div>
 
@@ -794,6 +836,44 @@
 </div>
 
 <!-- stream modal -->
+<div id="wgsite-modal" class="modal-backdrop" hidden>
+  <div class="modal card">
+    <div class="card-head"><h2 id="wgsite-modal-title">Add site</h2><button id="wgsite-modal-close" class="btn btn--ghost btn--sm">&times;</button></div>
+    <form id="wgsite-form">
+      <label class="field"><span>Name</span><input id="w-name" required autocomplete="off" placeholder="office"></label>
+      <label class="field"><span>Networks behind the site <em>(one IPv4 prefix per line)</em></span>
+        <textarea id="w-networks" rows="3" class="mono" required placeholder="192.168.50.0/24" spellcheck="false"></textarea></label>
+      <div class="field-row">
+        <label class="field"><span>Endpoint <em>(host:port where quicgate can call the site; empty when the site calls in)</em></span><input id="w-endpoint" class="mono" autocomplete="off" spellcheck="false" placeholder="office.example.com:51820"></label>
+        <label class="field field--sm"><span>Keepalive (s)</span><input id="w-keepalive" type="number" min="0" max="3600" value="25"></label>
+      </div>
+      <fieldset class="fieldset" id="w-key-block">
+        <legend>The site's key</legend>
+        <label class="check"><input type="radio" name="w-keymode" id="w-key-generate" value="generate" checked><span>Make a keypair here, in this browser. The private key never reaches quicgate; it is shown once in the configuration below.</span></label>
+        <label class="check"><input type="radio" name="w-keymode" id="w-key-paste" value="paste"><span>I have a keypair already: paste its public key.</span></label>
+        <p id="w-key-unsupported" class="form-hint" hidden>This browser cannot make WireGuard keys on this page (it needs HTTPS, or a recent browser). Make a pair on the site with <code>wg genkey | tee private.key | wg pubkey</code> and paste the public key.</p>
+        <label class="field" id="w-pubkey-field" hidden><span>Public key</span><input id="w-pubkey" class="mono" autocomplete="off" spellcheck="false"></label>
+      </fieldset>
+      <label class="check" id="w-overlap-row" hidden><input type="checkbox" id="w-overlap"><span>One of these networks is also a network this machine is on. I mean that: only upstreams that name the site go into the tunnel.</span></label>
+      <label class="check"><input type="checkbox" id="w-enabled" checked><span>Enabled</span></label>
+      <div id="wgsite-error" class="form-error" hidden></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn--secondary" id="wgsite-btn-cancel">Cancel</button>
+        <button type="submit" class="btn btn--primary">Save</button>
+      </div>
+    </form>
+    <div id="wgsite-created" hidden>
+      <p><b>The site is saved.</b> This is its WireGuard configuration. It holds the site's private key and the preshared key, and <b>it is shown this once</b>: quicgate keeps neither in a form it can show again. If it gets lost, delete the site and add it anew.</p>
+      <textarea id="w-config" rows="14" class="mono" readonly spellcheck="false"></textarea>
+      <p class="form-hint">The site also has to forward packets between the tunnel and its network: IP forwarding on, and either a route back to <span id="w-tunnel-addr" class="mono"></span> or NAT on its LAN interface. See the Streams &amp; port forwards guide.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn--secondary" id="wgsite-btn-copy">Copy</button>
+        <button type="button" class="btn btn--primary" id="wgsite-btn-done">I have saved it</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="stream-modal" class="modal-backdrop" hidden>
   <div class="modal card">
     <div class="card-head"><h2 id="stream-modal-title">Add stream</h2><button id="stream-modal-close" class="btn btn--ghost btn--sm">&times;</button></div>
@@ -808,6 +888,8 @@
         <label class="field"><span>Forward host / IP</span><input id="s-fhost" class="mono"></label>
         <label class="field field--sm"><span>Forward port</span><input id="s-fport" type="number" min="1" max="65535"></label>
       </div>
+      <label class="field" id="s-via-row" hidden><span>Reach through <em>(SNI routes of this stream go the same way)</em></span>
+        <select id="s-via"><option value="0">the local network</option></select></label>
       <label class="field"><span>Source restriction <em>(who may connect)</em></span>
         <select id="s-source"><option value="">Inline CIDR list</option></select></label>
       <label class="field" id="s-cidrs-field"><span>Allowed source IPs / CIDRs <em>(one per line, empty = anyone; UPnP may expose this port to the internet)</em></span>
@@ -898,6 +980,8 @@
           <label class="field"><span>Forward host / IP</span><input id="f-uhost" class="mono"></label>
           <label class="field field--sm"><span>Port</span><input id="f-uport" type="number" min="1" max="65535"></label>
         </div>
+        <label class="field" id="f-via-row" hidden><span>Reach through <em>(applies to the pool and the locations of this host too)</em></span>
+          <select id="f-via"><option value="0">the local network</option></select></label>
         <div id="f-redirect-block" hidden>
           <div class="field-row">
             <label class="field field--sm"><span>HTTP code</span>

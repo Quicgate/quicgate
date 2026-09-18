@@ -25,6 +25,7 @@ var secretSettings = map[string]bool{
 	"oidc_client_secret": true, // admin sign-in through OIDC
 	"acme_dns_config":    true, // DNS provider credentials for DNS-01
 	"sso_cookie_secret":  true, // signs the SSO session cookies
+	"wg_private_key":     true, // the WireGuard server key
 }
 
 // secretColumn is one place a secret lives, for the migration and for unseal.
@@ -34,7 +35,8 @@ type secretColumn struct {
 }
 
 var secretColumns = []secretColumn{
-	{table: "settings", column: "value", key: "key", where: "key IN ('oidc_client_secret','acme_dns_config','sso_cookie_secret')"},
+	{table: "settings", column: "value", key: "key", where: "key IN ('oidc_client_secret','acme_dns_config','sso_cookie_secret','wg_private_key')"},
+	{table: "wg_sites", column: "psk", key: "id"},
 	{table: "oidc_providers", column: "client_secret", key: "id"},
 	{table: "custom_certs", column: "key_pem", key: "id"},
 	{table: "users", column: "totp_secret", key: "id"},
