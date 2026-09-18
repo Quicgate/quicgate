@@ -2583,7 +2583,9 @@ async function refreshOwnAddresses() {
     out.innerHTML = (router.length
       ? `public: ${router.map(esc).join(', ')}`
       : '<span class="hs-muted">public address unknown (needs UPnP); add it under Never ban</span>')
-      + (local.length ? `<br>this machine: ${local.map(esc).join(', ')}` : '');
+      + (local.length
+        ? `<br><span title="${esc(local.join('\n'))}">this machine: ${local.length} address${local.length === 1 ? '' : 'es'}</span>`
+        : '');
   } catch (err) { out.textContent = ''; }
 }
 

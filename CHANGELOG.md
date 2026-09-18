@@ -4,6 +4,14 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.14.1] - 2026-09-18
+
+### Fixed
+- "Never ban my own addresses" no longer counts link-local addresses, and
+  Settings shows how many addresses of this machine it covers (the full list
+  is in the tooltip) instead of printing them all. On a Docker host that was
+  one address per container interface.
+
 ## [1.14.0] - 2026-09-18
 
 ### Added

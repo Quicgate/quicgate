@@ -68,7 +68,9 @@ func (o *ownAddresses) refresh() {
 	var list []OwnAddress
 	add := func(a netip.Addr, source string) {
 		a = a.Unmap().WithZone("")
-		if !a.IsValid() || a.IsUnspecified() || addrs[a] {
+		// Link-local addresses are left out: a Docker host has one per container
+		// interface, and no client reaches a public hostname from one.
+		if !a.IsValid() || a.IsUnspecified() || a.IsLinkLocalUnicast() || addrs[a] {
 			return
 		}
 		addrs[a] = true
