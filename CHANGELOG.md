@@ -42,7 +42,7 @@ All notable changes to quicgate are documented here. The format follows
   is back at once. Give a site an endpoint wherever it has a reachable address.
 - The site's own router must forward between the tunnel and its network (IP forwarding, and a
   return route or NAT). See the Streams & port forwards guide.
-- The image grows by about 5 MB.
+- The image grows from about 28 MB to about 34 MB.
 
 ## [1.15.0] - 2026-09-18
 

@@ -9,7 +9,7 @@
 
 <p align="center">
   Point-and-click hosts, automatic HTTPS, HTTP/3, single sign-on and live traffic charts.<br>
-  <b>One Go binary. One 30 MB container. No nginx, no Traefik, no sidecars.</b>
+  <b>One Go binary. One 34 MB container. No nginx, no Traefik, no sidecars.</b>
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
   <a href="https://github.com/Quicgate/quicgate/actions/workflows/docker.yml"><img src="https://img.shields.io/github/actions/workflow/status/Quicgate/quicgate/docker.yml?branch=master&label=build" alt="build status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-a3e635" alt="MIT license"></a>
   <img src="https://img.shields.io/github/go-mod/go-version/Quicgate/quicgate?logo=go&color=00ADD8" alt="Go version">
-  <img src="https://img.shields.io/badge/image-~30%20MB%2C%20FROM%20scratch-a3e635" alt="image size">
+  <img src="https://img.shields.io/badge/image-~34%20MB%2C%20FROM%20scratch-a3e635" alt="image size">
   <a href="https://github.com/Quicgate/quicgate/stargazers"><img src="https://img.shields.io/github/stars/Quicgate/quicgate?style=flat&color=a3e635" alt="GitHub stars"></a>
 </p>
 
@@ -207,7 +207,7 @@ is tracked row by row in [FEATURES.md](FEATURES.md).
 | | **quicgate** | **Nginx Proxy Manager** | **Pangolin** |
 |---|---|---|---|
 | Data plane | native Go (net/http, quic-go) | nginx | Traefik |
-| Deployment | **1 container, ~30 MB, scratch** | 1 container (+ optional db) | 3+ containers |
+| Deployment | **1 container, ~34 MB, scratch** | 1 container (+ optional db) | 3+ containers |
 | HTTP/3 (QUIC) | **default, per-host toggle** | no | via Traefik config |
 | Config model | **typed, validated options** | UI + free-text nginx snippets | UI + Traefik config |
 | Applying a change | instant atomic swap | nginx reload | Traefik provider push |
