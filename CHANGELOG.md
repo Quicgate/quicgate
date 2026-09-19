@@ -4,6 +4,19 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.17.3] - 2026-09-19
+
+### Fixed
+- **A name belongs to one host.** Nothing stopped two hosts from carrying the same domain, so
+  saving a new host several times made several hosts with one name. The routing table served one
+  of them and the others sat in the list answering nothing. A domain that another host already
+  serves is now refused, without regard to case, and so is a name listed twice on one host.
+  Saves that arrive at the same moment are decided one after the other, so eight simultaneous
+  saves of one name make one host.
+- **Save buttons cannot be pressed twice.** While a change is on its way to the server every Save
+  button is disabled and reads "Saving...", and a second submit is ignored. This applies to every
+  form in the admin interface.
+
 ## [1.17.2] - 2026-09-19
 
 A security release. An external review of the 1.17.1 source found twelve defects in the

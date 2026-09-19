@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"quicgate/internal/seal"
@@ -552,6 +553,9 @@ type Store struct {
 	// locked, and lockReason then says why.
 	box        *seal.Box
 	lockReason string
+	// hostMu makes "is this name free" and the write one step: two saves of
+	// the same name at the same moment must not both find it free.
+	hostMu sync.Mutex
 }
 
 func Open(path string) (*Store, error) {
@@ -729,13 +733,52 @@ func b2i(b bool) int {
 	return 0
 }
 
-func (s *Store) CreateHost(h *Host) error { return createHost(s.db, h) }
+func (s *Store) CreateHost(h *Host) error {
+	s.hostMu.Lock()
+	defer s.hostMu.Unlock()
+	return createHost(s.db, h)
+}
+
+// checkHostDomains refuses a domain that another host serves already. Two
+// hosts with one name cannot both be reached: the routing table keeps one of
+// them, which one is an accident of order, and the other looks fine in the
+// list and answers nothing. Names are compared without case, as DNS does.
+func checkHostDomains(q dbtx, h *Host) error {
+	all, err := listHosts(q)
+	if err != nil {
+		return err
+	}
+	for _, other := range all {
+		if other.ID == h.ID {
+			continue
+		}
+		for _, theirs := range other.Domains {
+			for _, mine := range h.Domains {
+				if strings.EqualFold(strings.TrimSpace(theirs), strings.TrimSpace(mine)) {
+					return fmt.Errorf("%s is already served by another host (%s, id %d): a name belongs to one host", mine, other.Type, other.ID)
+				}
+			}
+		}
+	}
+	seen := map[string]bool{}
+	for _, d := range h.Domains {
+		k := strings.ToLower(strings.TrimSpace(d))
+		if seen[k] {
+			return fmt.Errorf("%s is listed twice", d)
+		}
+		seen[k] = true
+	}
+	return nil
+}
 
 func createHost(q dbtx, h *Host) error {
 	if err := h.Validate(); err != nil {
 		return err
 	}
 	if err := checkHostRefs(q, h); err != nil {
+		return err
+	}
+	if err := checkHostDomains(q, h); err != nil {
 		return err
 	}
 	domains, _ := json.Marshal(h.Domains)
@@ -755,13 +798,20 @@ func createHost(q dbtx, h *Host) error {
 	return err
 }
 
-func (s *Store) UpdateHost(h *Host) error { return updateHost(s.db, h) }
+func (s *Store) UpdateHost(h *Host) error {
+	s.hostMu.Lock()
+	defer s.hostMu.Unlock()
+	return updateHost(s.db, h)
+}
 
 func updateHost(q dbtx, h *Host) error {
 	if err := h.Validate(); err != nil {
 		return err
 	}
 	if err := checkHostRefs(q, h); err != nil {
+		return err
+	}
+	if err := checkHostDomains(q, h); err != nil {
 		return err
 	}
 	domains, _ := json.Marshal(h.Domains)

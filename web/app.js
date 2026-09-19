@@ -211,15 +211,49 @@ function show(view) {
   for (const v of views) $(v).hidden = v !== view;
 }
 
+// While a change is on its way to the server, every Save button is disabled
+// and says so, and another submit is ignored. Without that a save that takes a
+// moment looks like a button that did nothing, and pressing it again saved the
+// same thing again.
+let savesInFlight = 0;
+function setSaving(delta) {
+  savesInFlight += delta;
+  const saving = savesInFlight > 0;
+  document.body.classList.toggle('is-saving', saving);
+  for (const b of document.querySelectorAll('button[type=submit]')) {
+    if (saving && !b.disabled) {
+      b.dataset.savingLabel = b.textContent;
+      b.textContent = 'Saving...';
+      b.disabled = true;
+    } else if (!saving && b.dataset.savingLabel !== undefined) {
+      b.textContent = b.dataset.savingLabel;
+      delete b.dataset.savingLabel;
+      b.disabled = false;
+    }
+  }
+}
+document.addEventListener('submit', (e) => {
+  if (savesInFlight > 0) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }
+}, true);
+
 async function api(method, path, body) {
-  const res = await fetch(path, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = res.status === 204 ? {} : await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
-  return data;
+  const changes = method !== 'GET';
+  if (changes) setSaving(1);
+  try {
+    const res = await fetch(path, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = res.status === 204 ? {} : await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    return data;
+  } finally {
+    if (changes) setSaving(-1);
+  }
 }
 
 // parsePool turns "scheme://host:port" lines into upstream objects.
