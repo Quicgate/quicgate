@@ -173,6 +173,7 @@ type Engine struct {
 	reloadMu      sync.Mutex                     // serializes concurrent Reload callers
 	dockerHosts   atomic.Pointer[[]store.Host]   // in-memory hosts from the Docker label provider
 	dockerStreams atomic.Pointer[[]store.Stream] // in-memory L4 streams from the Docker label provider
+	publicReqs    publicRequests                 // what is being served on the public listeners, per host
 	realIP        atomic.Pointer[realIPConfig]   // compiled trusted-proxy / real-client-IP config
 	oidcProviders sync.Map                       // issuer -> *discoveredProvider (lazy IdP discovery)
 	oidcSecretMu  sync.Mutex
@@ -415,6 +416,9 @@ func (e *Engine) Reload(ctx context.Context) error {
 		}
 	}
 	old := e.table.Swap(t)
+	// Whoever is connected from outside to a host that just left the public
+	// side is disconnected now (QG-03).
+	e.endNoLongerPublic(t)
 	e.health.setTargets(healthTargets)
 	// The replaced routes' pooled connections go now, not when they time out:
 	// a backend that moved behind another site must not be served from a
@@ -1036,6 +1040,11 @@ func (e *Engine) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		e.serveUnmatched(w, r)
 		return
 	}
+	if !viaVPN(r) {
+		var done func()
+		r, done = e.publicReqs.track(rt, r)
+		defer done()
+	}
 	if !e.clientCertOK(w, r, t, rt) {
 		return
 	}
@@ -1071,6 +1080,11 @@ func (e *Engine) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if rt == nil || (rt.host.Options.VPNOnly && !viaVPN(r)) {
 		e.serveUnmatched(w, r)
 		return
+	}
+	if !viaVPN(r) {
+		var done func()
+		r, done = e.publicReqs.track(rt, r)
+		defer done()
 	}
 	// A host that takes client certificates is HTTPS only, whatever its
 	// force-SSL flag says: plain HTTP carries no certificate to check.
