@@ -383,7 +383,7 @@ func (s *Server) handleExplainRoute(w http.ResponseWriter, r *http.Request) {
 func (s *Server) vpnOverview() map[string]any {
 	st := s.engine.WGStatus()
 	out := map[string]any{"enabled": st.Enabled, "running": st.Running, "error": st.Error, "lanAccess": st.LANAccess,
-		"flowLogDropped": s.engine.FlowLogDropped(), "breakGlass": 0, "breakGlassNoExpiry": 0}
+		"flowLogDropped": s.engine.FlowLogDropped(), "flowLogError": s.engine.FlowLogError(), "breakGlass": 0, "breakGlassNoExpiry": 0}
 	devices, err := s.store.ListWGDevices()
 	if err != nil {
 		return out

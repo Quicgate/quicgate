@@ -442,6 +442,7 @@ async function ovLoadState() {
   if (V.enabled && !V.running) attn('bad', `The WireGuard endpoint is not running: ${V.error || 'unknown error'}`, 'vpn');
   if (V.breakGlassNoExpiry) attn('warn', `${plural(V.breakGlassNoExpiry, 'break-glass VPN device never expires', 'break-glass VPN devices never expire')}: a lost copy reaches the LAN until somebody revokes it`, 'vpn');
   else if (V.breakGlass) attn('info', `${plural(V.breakGlass, 'break-glass VPN device exists', 'break-glass VPN devices exist')}: they reach the LAN without a login`, 'vpn');
+  if (V.flowLogError) attn('bad', `The VPN flow log cannot be written (${V.flowLogError}). LAN flows are refused until it can`, 'vpn');
   if (V.flowLogDropped) attn('warn', `${V.flowLogDropped} VPN flow records were dropped because the log could not keep up`, 'vpn');
   if (pendingCerts) attn('info', `${plural(pendingCerts, 'certificate is', 'certificates are')} waiting to be issued`, 'certs');
   if (!attention.length) attn('ok', 'Nothing needs attention.', '');

@@ -3,12 +3,14 @@ package engine
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 
@@ -19,50 +21,116 @@ import (
 // only served inside the WireGuard tunnel.
 var errVPNOnlyName = errors.New("no certificate for this name here")
 
-// flowLogger writes the forwarder's flow log (S31). The record of an allowed
-// flow is part of its admission: when it cannot be queued, the flow is
-// refused, so every LAN flow that was allowed has a record. Records of denied
-// and ended flows are best effort, and what is dropped is counted.
+// flowLogger writes the forwarder's flow log (S31). "No record, no flow" means
+// written: the record of an allowed flow has been handed to the log file
+// before the flow is admitted, and a flow whose record cannot be written is
+// refused. Queued in memory is not written: a full disk or a directory that
+// cannot be created would otherwise lose every record while every flow went
+// through (QG-07). Records of denied and ended flows are best effort, and what
+// is lost of them is counted.
+//
+// While the log cannot be written, LAN flows are refused at once instead of
+// each waiting for a write. The records of those refusals are still tried, so
+// the first one that succeeds switches admission back on.
 type flowLogger struct {
-	out     *lumberjack.Logger
-	queue   chan wg.FlowRecord
-	dropped atomic.Uint64
+	write   func([]byte) error // replaced in tests
+	queue   chan flowItem
+	dropped atomic.Uint64 // best-effort records that were not written
+	failed  atomic.Bool
+	lastErr atomic.Value // string
 }
 
+type flowItem struct {
+	rec  wg.FlowRecord
+	done chan error // set for a record that an admission waits for
+}
+
+// flowWriteWait bounds how long one admission waits for its record. It is
+// held with the endpoint's lock, so it is short; a log that is this slow
+// counts as failing.
+const flowWriteWait = 2 * time.Second
+
 func newFlowLogger(dir string) *flowLogger {
-	l := &flowLogger{
-		out:   &lumberjack.Logger{Filename: dir + "/logs/vpn-flows.log", MaxSize: 20, MaxBackups: 5, Compress: true},
-		queue: make(chan wg.FlowRecord, 2048),
-	}
-	go func() {
-		for rec := range l.queue {
-			if data, err := json.Marshal(rec); err == nil {
-				_, _ = l.out.Write(append(data, '\n'))
-			}
-		}
-	}()
+	out := &lumberjack.Logger{Filename: dir + "/logs/vpn-flows.log", MaxSize: 20, MaxBackups: 5, Compress: true}
+	l := &flowLogger{queue: make(chan flowItem, 2048)}
+	l.write = func(line []byte) error { _, err := out.Write(line); return err }
+	go l.run()
 	return l
 }
 
-// record queues one line and reports whether it was taken. It never blocks.
-func (l *flowLogger) record(rec wg.FlowRecord) bool {
-	select {
-	case l.queue <- rec:
-		return true
-	default:
-		if rec.Verdict != "allow" {
-			l.dropped.Add(1)
+func (l *flowLogger) run() {
+	for item := range l.queue {
+		data, err := json.Marshal(item.rec)
+		if err == nil {
+			err = l.write(append(data, '\n'))
 		}
+		if err != nil {
+			if !l.failed.Swap(true) {
+				log.Printf("vpn: the flow log cannot be written, LAN flows are refused until it can: %v", err)
+			}
+			l.lastErr.Store(err.Error())
+			if item.done == nil {
+				l.dropped.Add(1)
+			}
+		} else if l.failed.Swap(false) {
+			log.Printf("vpn: the flow log can be written again")
+		}
+		if item.done != nil {
+			item.done <- err
+		}
+	}
+}
+
+// record reports whether the record was taken. For an allowed flow that means
+// written. It blocks for at most flowWriteWait, and not at all while the log
+// is known to fail.
+func (l *flowLogger) record(rec wg.FlowRecord) bool {
+	if rec.Verdict != "allow" {
+		select {
+		case l.queue <- flowItem{rec: rec}:
+			return true
+		default:
+			l.dropped.Add(1)
+			return false
+		}
+	}
+	if l.failed.Load() {
+		return false
+	}
+	item := flowItem{rec: rec, done: make(chan error, 1)}
+	select {
+	case l.queue <- item:
+	default:
+		return false
+	}
+	select {
+	case err := <-item.done:
+		return err == nil
+	case <-time.After(flowWriteWait):
+		l.failed.Store(true)
+		l.lastErr.Store("writing a record took longer than " + flowWriteWait.String())
 		return false
 	}
 }
 
-// FlowLogDropped reports how many best-effort flow records were dropped.
+// FlowLogDropped reports how many best-effort flow records were lost.
 func (e *Engine) FlowLogDropped() uint64 {
 	if e.flowLog == nil {
 		return 0
 	}
 	return e.flowLog.dropped.Load()
+}
+
+// FlowLogError says why the flow log cannot be written, or "" when it can.
+// While it cannot, LAN flows are refused.
+func (e *Engine) FlowLogError() string {
+	if e.flowLog == nil || !e.flowLog.failed.Load() {
+		return ""
+	}
+	if s, _ := e.flowLog.lastErr.Load().(string); s != "" {
+		return s
+	}
+	return "unknown error"
 }
 
 // ParseProtectedEndpoints reads the wg_protected_endpoints setting: addresses
