@@ -1424,7 +1424,7 @@ func (e *Engine) listenerTraffic() []PortTraffic {
 	if st := e.wgState.Load(); st != nil && st.enabled && st.port > 0 {
 		sites, devices := e.wg.Status(), e.wg.DeviceStatus()
 		row := PortTraffic{Proto: "udp", Port: st.port, Service: "WireGuard", State: "listening",
-			Detail: fmt.Sprintf("VPN endpoint: %d sites, %d devices", len(sites), len(devices))}
+			Detail: "VPN endpoint: " + countOf(len(sites), "site", "sites") + ", " + countOf(len(devices), "device", "devices")}
 		if sites == nil {
 			row.State, row.Error = "failed", st.err
 		}
@@ -1621,4 +1621,12 @@ func serveDefault404(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusNotFound)
 	fmt.Fprintf(w, errorPage, http.StatusNotFound, http.StatusNotFound, "This address is not served here")
+}
+
+// countOf writes a count with its noun: "1 device", "2 devices".
+func countOf(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return strconv.Itoa(n) + " " + many
 }
