@@ -898,6 +898,59 @@ func (s *Store) SetSetting(key, value string) error {
 	return err
 }
 
+// SecretState says what is stored under a secret setting.
+type SecretState int
+
+const (
+	SecretAbsent     SecretState = iota // nothing stored
+	SecretReadable                      // stored, and it opens with the key in use
+	SecretUnreadable                    // stored, and it does not open: locked, or sealed under another key
+)
+
+// SecretSetting reads a secret setting and says which of the three it is.
+// GetSetting cannot: it reads "unreadable" as "unset", which is right for a
+// credential (what needs it fails closed) and wrong for a secret quicgate
+// makes itself, because "unset" is when it makes a new one. After a restore
+// under another sealing key that would replace, for good, a value the right
+// key could still have opened (QG-04).
+func (s *Store) SecretSetting(key string) (string, SecretState) {
+	var v string
+	if err := s.db.QueryRow("SELECT value FROM settings WHERE key=?", key).Scan(&v); err != nil || v == "" {
+		return "", SecretAbsent
+	}
+	plain, err := s.openSecret(v, settingAAD(key))
+	if err != nil {
+		return "", SecretUnreadable
+	}
+	if plain == "" {
+		return "", SecretAbsent
+	}
+	return plain, SecretReadable
+}
+
+// InitSecretSetting stores a secret quicgate generated itself, and only if
+// nothing is stored under the key: it never replaces a value, readable or not.
+// It reports whether it stored the value.
+func (s *Store) InitSecretSetting(key, value string) (bool, error) {
+	sealed, err := s.sealSecret(value, settingAAD(key))
+	if err != nil {
+		return false, err
+	}
+	res, err := s.db.Exec("INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value=''", key, sealed)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// DeleteSetting removes a setting. For a generated secret that is the
+// explicit reset: the next use makes a new one.
+func (s *Store) DeleteSetting(key string) error {
+	_, err := s.db.Exec("DELETE FROM settings WHERE key=?", key)
+	return err
+}
+
 // Snapshot writes a consistent copy of the database to path.
 func (s *Store) Snapshot(path string) error {
 	_, err := s.db.Exec("VACUUM INTO ?", path)

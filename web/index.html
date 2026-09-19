@@ -278,7 +278,7 @@
       <p class="vpnmap__guide"><a href="#" id="vm-guide">Read the VPN guide</a> for what each part does, what it never does, and what the identity provider has to support.</p>
 
       <form class="panel" id="wg-form">
-        <div class="panel__head"><h2>WireGuard endpoint</h2><p id="wg-status-line">Off. Nothing listens and no upstream can use a site.</p></div>
+        <div class="panel__head"><h2>WireGuard endpoint</h2><p id="wg-status-line">Off. Nothing listens and no upstream can use a site.</p><p><button type="button" id="wg-reset-key" class="btn btn--ghost btn--sm btn--danger-hover" hidden>Reset the server key</button></p></div>
         <div class="frow">
           <div class="frow__label"><label for="wg-enabled">Enabled</label><p>Runs inside quicgate, without a network device or extra privileges. One UDP port is opened.</p></div>
           <div class="frow__control"><span class="switch"><input type="checkbox" id="wg-enabled"><span class="switch__slot"></span><span class="switch__knob"></span></span></div>

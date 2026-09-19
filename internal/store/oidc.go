@@ -143,12 +143,26 @@ func (s *Store) UpdateOIDCProvider(p *OIDCProvider) error {
 	// echo the secret back just to save an unrelated field.
 	// The stored value is kept as it is in that case, sealed or not, also in
 	// a locked store.
-	var stored string
-	if err := s.db.QueryRow("SELECT client_secret FROM oidc_providers WHERE id = ?", p.ID).Scan(&stored); err != nil {
+	var stored, issuer string
+	if err := s.db.QueryRow("SELECT client_secret, issuer FROM oidc_providers WHERE id = ?", p.ID).Scan(&stored, &issuer); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return sql.ErrNoRows
 		}
 		return err
+	}
+	// The VPN names a person as (provider, subject). That only means one person
+	// while the provider is one issuer: with another issuer under the same id,
+	// somebody else's "sub 1234" would own the devices, the policies and the
+	// blocks of the first, and the old refresh tokens would be sent to the new
+	// token endpoint (QG-09). Another issuer is another provider.
+	if p.Issuer != issuer {
+		users, err := vpnIdentityUsers(s.db, p.ID)
+		if err != nil {
+			return err
+		}
+		if len(users) > 0 {
+			return fmt.Errorf("the issuer cannot change while the VPN knows people from this provider (%s): add the new issuer as a new identity provider", strings.Join(users, ", "))
+		}
 	}
 	if p.ClientSecret != "" {
 		sealed, err := s.sealSecret(p.ClientSecret, providerSecretAAD(p.ID))
@@ -225,4 +239,32 @@ func (o *OIDCAuth) validate() error {
 		}
 	}
 	return nil
+}
+
+// vpnIdentityUsers names what in the VPN identifies people through a provider.
+func vpnIdentityUsers(q dbtx, id int64) ([]string, error) {
+	var users []string
+	for _, c := range []struct{ query, what string }{
+		{"SELECT COUNT(*) FROM vpn_sessions WHERE provider=?", "logins"},
+		{"SELECT COUNT(*) FROM wg_devices WHERE provider=? AND revoked_at=''", "devices"},
+		{"SELECT COUNT(*) FROM vpn_blocked WHERE provider=?", "blocked people"},
+	} {
+		var n int
+		if err := q.QueryRow(c.query, id).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			users = append(users, fmt.Sprintf("%d %s", n, c.what))
+		}
+	}
+	all, err := oidcProviderUsers(q, id)
+	if err != nil {
+		return nil, err
+	}
+	for _, u := range all {
+		if strings.HasPrefix(u, "VPN policy ") || strings.HasSuffix(u, "(VPN portal)") || strings.HasPrefix(u, "access list ") {
+			users = append(users, u)
+		}
+	}
+	return users, nil
 }

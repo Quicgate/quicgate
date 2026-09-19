@@ -254,6 +254,20 @@ func TestVPNPoliciesSessionsAndSettings(t *testing.T) {
 		t.Errorf("deleting a provider a policy names: %d %s, want 400 naming the policy", rr.Code, rr.Body.String())
 	}
 
+	// The issuer behind a provider the VPN knows people from cannot change: the
+	// same subject id under another issuer is another person (QG-09).
+	edit := map[string]any{"name": "idp renamed", "issuer": "https://other.example.com", "clientId": "c"}
+	if rr := call(t, s, http.MethodPut, fmt.Sprintf("/api/oidc-providers/%d", p.ID), sess, edit); rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "issuer cannot change") {
+		t.Errorf("changing the issuer under a VPN policy: %d %s, want 400", rr.Code, rr.Body.String())
+	}
+	if all, _ := s.store.ListOIDCProviders(); len(all) != 1 || all[0].Issuer != "https://idp.example.com" {
+		t.Errorf("the issuer changed: %+v", all)
+	}
+	edit["issuer"] = "https://idp.example.com"
+	if rr := call(t, s, http.MethodPut, fmt.Sprintf("/api/oidc-providers/%d", p.ID), sess, edit); rr.Code != http.StatusOK {
+		t.Errorf("renaming the provider: %d %s", rr.Code, rr.Body.String())
+	}
+
 	// An access list cannot name a provider, a site or a device that is not there.
 	for name, vpn := range map[string]map[string]any{
 		"a provider that is not": {"kind": "group", "provider": 999, "group": "ops"},

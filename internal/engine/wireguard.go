@@ -54,6 +54,9 @@ type WGStatus struct {
 	Sites     []wg.SiteStatus `json:"sites"`
 	Devices   []wg.PeerStatus `json:"devices"`
 	LANAccess bool            `json:"lanAccess"`
+	// KeyUnreadable: a server key is stored and does not open (QG-04). Only an
+	// explicit reset replaces it.
+	KeyUnreadable bool `json:"keyUnreadable,omitempty"`
 }
 
 // WGSettings reads the WireGuard settings with their defaults.
@@ -121,13 +124,23 @@ func (e *Engine) syncWireGuard(ctx context.Context) {
 		return
 	}
 	state.port, state.network, state.endpoint = port, network, endpoint
-	private := e.store.GetSetting("wg_private_key", "")
-	if private == "" {
-		// First use. In a locked store the read above gives "" for a key that
-		// exists, and the write below is refused, so an existing key is never
-		// replaced by accident.
+	private, keyState := e.store.SecretSetting("wg_private_key")
+	switch keyState {
+	case store.SecretUnreadable:
+		// A key is stored and does not open: the store is locked, or this
+		// database was restored from an instance with another sealing key.
+		// Making a new key here would overwrite the old one for good, and
+		// with it every site's and device's configuration (QG-04).
+		fail("the server key is stored but cannot be opened with the sealing key in use. Put the original secret.key back and restart, or reset the server key explicitly (VPN page), which invalidates every site's and device's configuration")
+		return
+	case store.SecretAbsent:
+		// First use. The write only happens if nothing is stored.
+		var stored bool
 		if private, err = wg.NewPrivateKey(); err == nil {
-			err = e.store.SetSetting("wg_private_key", private)
+			stored, err = e.store.InitSecretSetting("wg_private_key", private)
+		}
+		if err == nil && !stored {
+			err = errors.New("another value appeared under the key meanwhile")
 		}
 		if err != nil {
 			fail("the server key cannot be created or stored: %v", err)
@@ -204,6 +217,8 @@ func (e *Engine) WGStatus() WGStatus {
 		out.Devices = e.wg.DeviceStatus()
 	}
 	out.LANAccess = e.store.GetSetting("wg_lan_access", "") == "1"
+	_, keyState := e.store.SecretSetting("wg_private_key")
+	out.KeyUnreadable = keyState == store.SecretUnreadable
 	out.Resets = e.wg.Resets()
 	return out
 }

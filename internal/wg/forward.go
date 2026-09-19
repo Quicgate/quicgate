@@ -364,7 +364,7 @@ func (m *Manager) forwardTCP(in *instance, r *tcp.ForwarderRequest) {
 	if !fc.add(client) {
 		return
 	}
-	up, down = relay(client, out, tcpIdle)
+	up, down = relay(client, out, tcpIdle, false)
 }
 
 func (m *Manager) forwardUDP(in *instance, r *udp.ForwarderRequest) {
@@ -398,20 +398,32 @@ func (m *Manager) forwardUDP(in *instance, r *udp.ForwarderRequest) {
 		if err != nil || !fc.add(out) {
 			return
 		}
-		up, down = relay(client, out, udpIdle)
+		up, down = relay(client, out, udpIdle, true)
 	}()
 }
 
+// maxDatagram is the largest UDP payload there is: a read into a buffer of
+// this size never cuts a datagram short.
+const maxDatagram = 65535
+
 // relay copies both ways until either side ends or nothing moved for idle.
-func relay(a, b net.Conn, idle time.Duration) (aToB, bToA int64) {
+// For datagrams every read is one message and is written as one: the buffer
+// holds the largest datagram there is, so none is cut short (a 32 KiB buffer
+// silently delivered the first 32 KiB of a larger one, QG-11), and an empty
+// datagram is a message too.
+func relay(a, b net.Conn, idle time.Duration, datagrams bool) (aToB, bToA int64) {
 	var wg sync.WaitGroup
+	size := 32 << 10
+	if datagrams {
+		size = maxDatagram
+	}
 	pipe := func(dst, src net.Conn, n *int64) {
 		defer wg.Done()
-		buf := make([]byte, 32<<10)
+		buf := make([]byte, size)
 		for {
 			_ = src.SetReadDeadline(time.Now().Add(idle))
 			c, err := src.Read(buf)
-			if c > 0 {
+			if c > 0 || (datagrams && err == nil) {
 				_ = dst.SetWriteDeadline(time.Now().Add(30 * time.Second))
 				if _, werr := dst.Write(buf[:c]); werr != nil {
 					break

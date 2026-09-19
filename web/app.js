@@ -2772,6 +2772,7 @@ async function refreshVPN() {
   else if (status.enabled) line = `Not running: ${status.error || 'unknown error'}. Upstreams that name a site answer 502 until this is fixed.`;
   $('wg-status-line').textContent = line;
   $('wg-status-line').classList.toggle('form-error', status.enabled && !status.running);
+  $('wg-reset-key').hidden = !status.keyUnreadable;
   if (!hosts.length) hosts = await api('GET', '/api/hosts').catch(() => []);
   await refreshVPNDevices(settings, status);
 
@@ -3582,4 +3583,11 @@ $('vm-add-portal').addEventListener('click', async (e) => {
   openModal(null);
   $('f-type').value = 'vpn-portal';
   syncHostType();
+});
+
+$('wg-reset-key').addEventListener('click', async () => {
+  if (!confirm('Reset the server key? Do this only when the original sealing key (secret.key) is lost. Every site and every device has to be set up again: their configurations name the old key.')) return;
+  const password = prompt('Confirm with your password');
+  if (!password) return;
+  try { await api('POST', '/api/wg/server-key/reset', { password }); refreshVPN(); } catch (err) { alert(err.message); }
 });

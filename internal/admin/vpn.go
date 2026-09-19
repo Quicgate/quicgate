@@ -40,6 +40,7 @@ func (s *Server) registerVPN(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/wg/owners/block", s.auth(s.handleBlockVPNOwner))
 	mux.HandleFunc("POST /api/wg/owners/unblock", s.auth(s.handleUnblockVPNOwner))
 	mux.HandleFunc("POST /api/wg/explain", s.auth(s.handleExplainRoute))
+	mux.HandleFunc("POST /api/wg/server-key/reset", s.auth(s.handleResetWGServerKey))
 }
 
 func (s *Server) wgReady(w http.ResponseWriter) bool {
@@ -437,4 +438,36 @@ func (s *Server) checkVPNSettings(body map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// handleResetWGServerKey throws the stored server key away, so the next reload
+// makes a new one. It exists for one situation: the stored key cannot be opened
+// (a restore under another sealing key) and the original sealing key is gone.
+// Every site's and device's configuration names the old public key and stops
+// working, so it takes the admin's password and only works while the key is
+// in fact unreadable; a readable key is never reset this way.
+func (s *Server) handleResetWGServerKey(w http.ResponseWriter, r *http.Request) {
+	sess := r.Context().Value(sessionKey).(session)
+	var in struct{ Password string }
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if _, status, msg := s.reauthenticate(sess, in.Password); status != 0 {
+		writeErr(w, status, msg)
+		return
+	}
+	if _, state := s.store.SecretSetting("wg_private_key"); state != store.SecretUnreadable {
+		writeErr(w, http.StatusConflict, "the server key can be read: there is nothing to reset")
+		return
+	}
+	if err := s.store.DeleteSetting("wg_private_key"); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.reload(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "the key was reset, but applying it failed: "+err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
