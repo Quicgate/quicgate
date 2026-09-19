@@ -19,16 +19,35 @@ var never = []netip.Prefix{
 // ValidKey reports whether b64 is a usable WireGuard public or preshared key:
 // 32 bytes of base64, and not all zero.
 func ValidKey(b64 string) error {
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
-	if err != nil || len(raw) != 32 {
-		return fmt.Errorf("a WireGuard key is 32 bytes in base64")
+	_, err := CanonicalKey(b64)
+	return err
+}
+
+// CanonicalKey returns the one spelling of a key that quicgate stores and
+// compares: strict standard base64 of the 32 bytes. Go's decoder skips line
+// breaks and accepts loose padding bits, so the same key has many spellings
+// that a text comparison takes for different keys; two peers with one key
+// would then silently become one peer inside WireGuard, the second replacing
+// the first one's addresses and preshared key.
+func CanonicalKey(b64 string) (string, error) {
+	b64 = strings.TrimSpace(b64)
+	if strings.ContainsAny(b64, "\r\n\t ") {
+		return "", fmt.Errorf("a WireGuard key is 32 bytes in base64, without line breaks")
 	}
+	raw, err := base64.StdEncoding.Strict().DecodeString(b64)
+	if err != nil || len(raw) != 32 {
+		return "", fmt.Errorf("a WireGuard key is 32 bytes in base64")
+	}
+	zero := true
 	for _, c := range raw {
 		if c != 0 {
-			return nil
+			zero = false
 		}
 	}
-	return fmt.Errorf("the all-zero key is not a key")
+	if zero {
+		return "", fmt.Errorf("the all-zero key is not a key")
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
 }
 
 // TunnelAddress returns quicgate's own address: the first host of the prefix.

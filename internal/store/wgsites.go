@@ -168,6 +168,11 @@ func lastAddr(p netip.Prefix) netip.Addr {
 // preshared key to seal. Validation of keys and networks is the caller's job
 // (wg.ValidateSite): it needs the server key and this machine's networks.
 func (s *Store) CreateWGSite(w *WGSite, tunnel netip.Prefix, psk string) error {
+	key, err := canonicalWGKey(w.PublicKey)
+	if err != nil {
+		return err
+	}
+	w.PublicKey = key
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -209,10 +214,20 @@ func (s *Store) CreateWGSite(w *WGSite, tunnel netip.Prefix, psk string) error {
 // UpdateWGSite changes everything but the address, which a site keeps for
 // life, and the preshared key, which only changes with a new site.
 func (s *Store) UpdateWGSite(w *WGSite) error {
+	// A changed key is never an edit: it is a new site (S39). The key that is
+	// stored stays, and an update that names another one is refused.
+	prev, err := s.GetWGSite(w.ID)
+	if err != nil {
+		return err
+	}
+	if key, kerr := canonicalWGKey(w.PublicKey); kerr != nil || key != prev.PublicKey {
+		return errors.New("a site keeps its key: delete the site and add it anew to change the key")
+	}
+	w.PublicKey = prev.PublicKey
 	networks, _ := json.Marshal(w.Networks)
 	w.UpdatedAt = now()
-	res, err := s.db.Exec("UPDATE wg_sites SET name=?, public_key=?, networks=?, endpoint=?, keepalive=?, enabled=?, allow_own_overlap=?, updated_at=? WHERE id=?",
-		strings.TrimSpace(w.Name), w.PublicKey, string(networks), w.Endpoint, w.Keepalive, b2i(w.Enabled), b2i(w.AllowOwnOverlap), w.UpdatedAt, w.ID)
+	res, err := s.db.Exec("UPDATE wg_sites SET name=?, networks=?, endpoint=?, keepalive=?, enabled=?, allow_own_overlap=?, updated_at=? WHERE id=?",
+		strings.TrimSpace(w.Name), string(networks), w.Endpoint, w.Keepalive, b2i(w.Enabled), b2i(w.AllowOwnOverlap), w.UpdatedAt, w.ID)
 	if err != nil {
 		return wgConstraint(err)
 	}

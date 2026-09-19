@@ -65,13 +65,18 @@ func TestWireGuardDevicesAPI(t *testing.T) {
 		t.Fatalf("site: %d %s", rr.Code, rr.Body.String())
 	}
 	for name, bad := range map[string]map[string]any{
-		"the same key again":   {"name": "x", "publicKey": key},
-		"a site's key":         {"name": "x", "publicKey": site["publicKey"]},
-		"the server's own key": {"name": "x", "publicKey": status.PublicKey},
-		"not a key":            {"name": "x", "publicKey": "AAAA"},
-		"no name":              {"name": " ", "publicKey": randomKey(t)},
-		"a chosen kind":        {"name": "x", "publicKey": randomKey(t), "kind": "breakglass"},
-		"chosen routes":        {"name": "x", "publicKey": randomKey(t), "routes": []map[string]string{{"cidr": "192.168.1.0/24", "proto": "any"}}},
+		"the same key again": {"name": "x", "publicKey": key},
+		// One key has many spellings: Go's base64 skips line breaks and accepts
+		// loose padding bits. Uniqueness is about the 32 bytes.
+		"the same key with a line break":  {"name": "x", "publicKey": key[:20] + "\r\n" + key[20:]},
+		"the same key with loose padding": {"name": "x", "publicKey": loosePadding(key)},
+		"a site's key with a line break":  {"name": "x", "publicKey": site["publicKey"].(string)[:8] + "\n" + site["publicKey"].(string)[8:]},
+		"a site's key":                    {"name": "x", "publicKey": site["publicKey"]},
+		"the server's own key":            {"name": "x", "publicKey": status.PublicKey},
+		"not a key":                       {"name": "x", "publicKey": "AAAA"},
+		"no name":                         {"name": " ", "publicKey": randomKey(t)},
+		"a chosen kind":                   {"name": "x", "publicKey": randomKey(t), "kind": "breakglass"},
+		"chosen routes":                   {"name": "x", "publicKey": randomKey(t), "routes": []map[string]string{{"cidr": "192.168.1.0/24", "proto": "any"}}},
 	} {
 		if rr := call(t, s, http.MethodPost, "/api/wg/devices", sess, bad); rr.Code != http.StatusBadRequest {
 			t.Errorf("%s: %d %s, want 400", name, rr.Code, rr.Body.String())
@@ -340,4 +345,12 @@ func TestVPNPoliciesSessionsAndSettings(t *testing.T) {
 	if rr := call(t, s, http.MethodDelete, fmt.Sprintf("/api/wg/policies/%d", saved.ID), sess, nil); rr.Code != http.StatusNoContent {
 		t.Fatalf("delete: %d %s", rr.Code, rr.Body.String())
 	}
+}
+
+// loosePadding returns another base64 spelling of the same 32 bytes: the last
+// character before the padding carries two unused bits.
+func loosePadding(key string) string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	i := strings.IndexByte(alphabet, key[42])
+	return key[:42] + string(alphabet[i|1]) + key[43:]
 }

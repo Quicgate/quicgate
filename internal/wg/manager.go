@@ -349,7 +349,22 @@ func wanted(cfg Config) []peer {
 		out = append(out, devicePeer(d))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].key < out[j].key })
-	return out
+	// One key is one peer inside WireGuard, whatever the configuration says.
+	// The store refuses a second peer with the same 32 bytes; should one get
+	// here anyway, the first keeps its addresses and its preshared key and the
+	// other is left out, instead of the last one winning silently.
+	seen := map[string]bool{}
+	kept := out[:0]
+	for _, p := range out {
+		id, err := keyHex(p.publicKey)
+		if err == nil && seen[id] {
+			log.Printf("wireguard: %s %q has the same public key as another peer and is left out", kindOf(p), p.name)
+			continue
+		}
+		seen[id] = true
+		kept = append(kept, p)
+	}
+	return kept
 }
 
 // needsReset reports whether cfg changes who owns an address the instance has

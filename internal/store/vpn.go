@@ -2,9 +2,11 @@ package store
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -232,6 +234,7 @@ func sessionTokenAAD(id, provider int64, sub string) string {
 }
 
 func (s *Store) migrateVPN() error {
+	defer s.canonicaliseWGKeys()
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS wg_devices (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -329,8 +332,24 @@ func (s *Store) GetWGDevice(id int64) (WGDevice, error) {
 	return s.scanWGDevice(s.db.QueryRow("SELECT "+wgDeviceCols+" FROM wg_devices WHERE id=?", id))
 }
 
+// canonicalWGKey returns the one spelling of a WireGuard key that is stored
+// and compared: strict base64 of its 32 bytes. Every write of a public key
+// goes through it, because the uniqueness of a key is about its bytes and a
+// text comparison is fooled by a line break or loose padding.
+func canonicalWGKey(key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if strings.ContainsAny(key, "\r\n\t ") {
+		return "", errors.New("a WireGuard key is 32 bytes in base64, without line breaks")
+	}
+	raw, err := base64.StdEncoding.Strict().DecodeString(key)
+	if err != nil || len(raw) != 32 {
+		return "", errors.New("a WireGuard key is 32 bytes in base64")
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
 // publicKeyTaken reports whether any site or device, revoked ones included,
-// has this key (S3).
+// has this key (S3). key must be canonical.
 func publicKeyTaken(q dbtx, key string) (bool, error) {
 	var n int
 	err := q.QueryRow("SELECT (SELECT COUNT(*) FROM wg_sites WHERE public_key=?) + (SELECT COUNT(*) FROM wg_devices WHERE public_key=?)", key, key).Scan(&n)
@@ -358,6 +377,11 @@ func (s *Store) CreateWGDevice(d *WGDevice, tunnel netip.Prefix, psk string, lim
 			return err
 		}
 	}
+	key, err := canonicalWGKey(d.PublicKey)
+	if err != nil {
+		return err
+	}
+	d.PublicKey = key
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -749,4 +773,45 @@ func (p *PortalOptions) Validate() error {
 		}
 	}
 	return nil
+}
+
+// canonicaliseWGKeys rewrites public keys that an older version stored in
+// another spelling. Two rows that turn out to hold the same key cannot both
+// stay usable: the older one keeps the key, the newer device is revoked or
+// the newer site disabled, and the log says so.
+func (s *Store) canonicaliseWGKeys() {
+	for _, table := range []string{"wg_sites", "wg_devices"} {
+		rows, err := s.db.Query("SELECT id, public_key FROM " + table + " ORDER BY id")
+		if err != nil {
+			continue
+		}
+		type row struct {
+			id  int64
+			key string
+		}
+		var all []row
+		for rows.Next() {
+			var r row
+			if rows.Scan(&r.id, &r.key) == nil {
+				all = append(all, r)
+			}
+		}
+		rows.Close()
+		for _, r := range all {
+			key, err := canonicalWGKey(r.key)
+			if err != nil || key == r.key {
+				continue
+			}
+			if taken, _ := publicKeyTaken(s.db, key); taken {
+				log.Printf("store: %s %d holds the key of another peer in a different spelling and is switched off", table, r.id)
+				if table == "wg_devices" {
+					_, _ = s.db.Exec("UPDATE wg_devices SET enabled=0, revoked_at=?, address=NULL WHERE id=? AND revoked_at=''", now(), r.id)
+				} else {
+					_, _ = s.db.Exec("UPDATE wg_sites SET enabled=0 WHERE id=?", r.id)
+				}
+				continue
+			}
+			_, _ = s.db.Exec("UPDATE "+table+" SET public_key=? WHERE id=?", key, r.id)
+		}
+	}
 }
