@@ -56,6 +56,10 @@ type portalSession struct {
 	sub      string
 	email    string
 	expires  time.Time
+	// authTime is when the person authenticated at the identity provider, as
+	// the provider stated it at login. Adding a device takes a fresh one
+	// (QG-08): the page's session slides with use and says nothing about that.
+	authTime time.Time
 }
 
 type portalState struct {
@@ -126,10 +130,17 @@ func (e *Engine) vpnIntSetting(key string, def int) int {
 
 func requestOrigin(r *http.Request) string {
 	scheme := "http"
-	if r.TLS != nil {
+	if portalEncrypted(r) {
 		scheme = "https"
 	}
 	return scheme + "://" + r.Host
+}
+
+// portalEncrypted reports whether the browser's connection is encrypted: TLS
+// here, or TLS at a trusted proxy in front of quicgate that says so. The
+// header alone is not believed, because anybody can send it.
+func portalEncrypted(r *http.Request) bool {
+	return r.TLS != nil || (viaTrustedProxy(r) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"))
 }
 
 // portalHandler serves one portal host.
@@ -180,7 +191,9 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 			RedirectURL: requestOrigin(r) + "/.qg/vpn/callback", Scopes: list}
 	}
 	setCookie := func(w http.ResponseWriter, r *http.Request, name, value string, maxAge int, sameSite http.SameSite) {
-		http.SetCookie(w, &http.Cookie{Name: name, Value: value, Path: "/", HttpOnly: true, Secure: r.TLS != nil,
+		// Always Secure. The one exception is a development instance that was
+		// started without TLS altogether, where there is no HTTPS to send it on.
+		http.SetCookie(w, &http.Cookie{Name: name, Value: value, Path: "/", HttpOnly: true, Secure: portalEncrypted(r) || !e.cfg.DisableTLS,
 			SameSite: sameSite, MaxAge: maxAge}) // no Domain: host-only
 	}
 
@@ -289,7 +302,7 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 		if old, err := r.Cookie(portalCookie); err == nil {
 			e.portal.drop(old.Value)
 		}
-		sid := e.portal.create(portalSession{provider: p.ID, sub: id.sub, email: id.email, expires: now.Add(portalIdle)})
+		sid := e.portal.create(portalSession{provider: p.ID, sub: id.sub, email: id.email, expires: now.Add(portalIdle), authTime: id.authTime})
 		setCookie(w, r, portalCookie, sid, 0, http.SameSiteStrictMode)
 		e.refreshVPN(r.Context()) // the owner's devices are back
 		http.Redirect(w, r, "/", http.StatusFound)
@@ -332,6 +345,13 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 		lease, err := e.store.GetVPNSession(s.provider, s.sub)
 		if err != nil || !lease.Live(time.Now()) {
 			writePortalErr(w, http.StatusForbidden, "your authorization has run out: log in again first")
+			return
+		}
+		// A new device is a new credential. It takes a login that is fresh now,
+		// not one that was fresh when this page was opened: a page kept open,
+		// or a cookie that was copied, must not be enough (QG-08).
+		if maxAge := time.Duration(e.vpnIntSetting("wg_auth_max_age", 900)) * time.Second; time.Since(s.authTime) > maxAge+authTimeSkew {
+			writePortalErr(w, http.StatusUnauthorized, "adding a device takes a fresh login: log in again, then add the device")
 			return
 		}
 		in.PublicKey = strings.TrimSpace(in.PublicKey)
@@ -395,6 +415,19 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 	}))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The portal hands out credentials: a session, and a device's
+		// configuration with its preshared key. Over plain HTTP anybody on the
+		// path reads both and can change the page that makes the private key,
+		// so there is no portal over plain HTTP (QG-05). A development instance
+		// without TLS altogether is the one exception.
+		if !portalEncrypted(r) && !e.cfg.DisableTLS {
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusPermanentRedirect)
+				return
+			}
+			http.Error(w, "the VPN portal is only served over HTTPS", http.StatusForbidden)
+			return
+		}
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")

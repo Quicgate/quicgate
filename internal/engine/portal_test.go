@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -160,6 +161,7 @@ func (f *vpnIdP) set(fn func(*vpnIdP)) {
 const portalHost = "vpn.test"
 
 type portalFixture struct {
+	https    bool // requests arrive over TLS
 	e        *Engine
 	st       *store.Store
 	idp      *vpnIdP
@@ -208,9 +210,14 @@ func (f *portalFixture) do(method, path, cookies string, body any, hdr map[strin
 	if cookies != "" {
 		r.Header.Set("Cookie", cookies)
 	}
+	origin := "http://" + portalHost
+	if f.https {
+		r.TLS = &tls.ConnectionState{}
+		origin = "https://" + portalHost
+	}
 	if body != nil {
 		r.Header.Set("Content-Type", "application/json")
-		r.Header.Set("Origin", "http://"+portalHost)
+		r.Header.Set("Origin", origin)
 	}
 	for k, v := range hdr {
 		if v == "" {
@@ -651,4 +658,98 @@ func TestSubjectsNameTheirProvider(t *testing.T) {
 	if e.vpnSubjectMatches(store.VPNSubject{Kind: "any-user", Provider: 2}, wg.Peer{Key: "site:7", Site: true, ID: 7}) {
 		t.Fatal("a site matched a subject about a person")
 	}
+}
+
+// There is no portal over plain HTTP (QG-05). It hands out a session and a
+// device's configuration with its preshared key, and it serves the page that
+// makes the private key: on plain HTTP anybody on the path gets all three.
+func TestPortalNeedsHTTPS(t *testing.T) {
+	f := newPortalFixture(t)
+	f.e.cfg.DisableTLS = false // an ordinary instance, not the development mode of the other tests
+
+	if rr := f.do(http.MethodGet, "/", "", nil, nil); rr.Code != http.StatusPermanentRedirect || rr.Header().Get("Location") != "https://"+portalHost+"/" {
+		t.Fatalf("the page over plain HTTP: %d to %q, want a redirect to HTTPS", rr.Code, rr.Header().Get("Location"))
+	}
+	rr := f.do(http.MethodGet, "/.qg/vpn/login", "", nil, nil)
+	if rr.Code != http.StatusPermanentRedirect || len(rr.Result().Cookies()) != 0 || strings.Contains(rr.Header().Get("Location"), f.idp.srv.URL) {
+		t.Fatalf("a login started over plain HTTP: %d, cookies %v, to %q", rr.Code, rr.Result().Cookies(), rr.Header().Get("Location"))
+	}
+	// A header anybody can send does not make the connection encrypted.
+	if rr := f.do(http.MethodGet, "/.qg/vpn/login", "", nil, map[string]string{"X-Forwarded-Proto": "https"}); rr.Code != http.StatusPermanentRedirect {
+		t.Fatalf("X-Forwarded-Proto from a stranger was believed: %d", rr.Code)
+	}
+
+	// Over HTTPS the portal works, and its cookies are Secure.
+	f.https = true
+	cookie, cb := f.login(t)
+	if cookie == "" {
+		t.Fatalf("login over HTTPS refused: %d %s", cb.Code, cb.Body.String())
+	}
+	for _, c := range cb.Result().Cookies() {
+		if c.Value != "" && !c.Secure {
+			t.Errorf("cookie %s is not Secure", c.Name)
+		}
+	}
+	// The session is worth nothing over plain HTTP: no enrolment, no reading.
+	f.https = false
+	if rr := f.do(http.MethodPost, "/.qg/vpn/api/devices", cookie, map[string]string{"name": "phone", "publicKey": randomWGKey(t)}, nil); rr.Code != http.StatusForbidden {
+		t.Fatalf("an enrolment over plain HTTP: %d %s, want 403", rr.Code, rr.Body.String())
+	}
+	if rr := f.do(http.MethodGet, "/.qg/vpn/api/me", cookie, nil, nil); rr.Code == http.StatusOK {
+		t.Fatalf("the API answered over plain HTTP: %s", rr.Body.String())
+	}
+	if n := f.deviceCount(t); n != 0 {
+		t.Fatalf("%d devices were enrolled over plain HTTP", n)
+	}
+	f.https = true
+	if rr := f.do(http.MethodPost, "/.qg/vpn/api/devices", cookie, map[string]string{"name": "phone", "publicKey": randomWGKey(t)}, nil); rr.Code != http.StatusCreated {
+		t.Fatalf("an enrolment over HTTPS: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Adding a device takes a login that is fresh now (QG-08). The page's session
+// slides with use, and the lease is renewed in the background for weeks:
+// neither says the person authenticated recently.
+func TestEnrolmentNeedsAFreshLogin(t *testing.T) {
+	f := newPortalFixture(t)
+	cookie, cb := f.login(t)
+	if cookie == "" {
+		t.Fatalf("login refused: %d %s", cb.Code, cb.Body.String())
+	}
+	add := func() *httptest.ResponseRecorder {
+		return f.do(http.MethodPost, "/.qg/vpn/api/devices", cookie, map[string]string{"name": "phone", "publicKey": randomWGKey(t)}, nil)
+	}
+	if rr := add(); rr.Code != http.StatusCreated {
+		t.Fatalf("right after the login: %d %s", rr.Code, rr.Body.String())
+	}
+	// A day later the page is still open, the lease was renewed all along.
+	f.e.portal.mu.Lock()
+	for id, s := range f.e.portal.sessions {
+		s.authTime = s.authTime.Add(-24 * time.Hour)
+		f.e.portal.sessions[id] = s
+	}
+	f.e.portal.mu.Unlock()
+	if me := f.me(t, cookie); me["lease"].(map[string]any)["live"] != true {
+		t.Fatalf("the lease should still be live: %v", me)
+	}
+	if rr := add(); rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "fresh login") {
+		t.Fatalf("a day after the login: %d %s, want 401", rr.Code, rr.Body.String())
+	}
+	if n := f.deviceCount(t); n != 1 {
+		t.Fatalf("%d devices, want the one from the fresh login", n)
+	}
+	// Logging in again brings enrolment back.
+	cookie, _ = f.login(t)
+	if rr := add(); rr.Code != http.StatusCreated {
+		t.Fatalf("after a new login: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func (f *portalFixture) deviceCount(t *testing.T) int {
+	t.Helper()
+	all, err := f.st.ListWGDevices()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(all)
 }

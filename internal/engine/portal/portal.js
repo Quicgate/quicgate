@@ -146,6 +146,12 @@ $('add-form').addEventListener('submit', async (e) => {
     syncKeyMode();
   } catch (err) {
     errBox.textContent = err.message;
+    if (err.status === 401) {
+      const a = document.createElement('a');
+      a.href = '/.qg/vpn/login';
+      a.textContent = ' Log in again';
+      errBox.append(a);
+    }
     errBox.hidden = false;
   }
 });

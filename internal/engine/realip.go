@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strings"
@@ -65,6 +66,9 @@ func (e *Engine) wrapRealIP(next http.Handler) http.Handler {
 		if c := e.realIP.Load(); c != nil && c.header != "" && len(c.nets) > 0 {
 			if real := c.realClientIP(r); real != "" {
 				r.RemoteAddr = net.JoinHostPort(real, "0")
+				// What else a trusted proxy says about the connection (its
+				// scheme) may be believed too; from anybody else it may not.
+				r = r.WithContext(context.WithValue(r.Context(), viaTrustedProxyKey{}, true))
 			}
 		}
 		next.ServeHTTP(w, r)
@@ -91,4 +95,12 @@ func (e *Engine) buildRealIP() {
 		}
 	}
 	e.realIP.Store(cfg)
+}
+
+// viaTrustedProxyKey marks a request whose immediate peer is a trusted proxy.
+type viaTrustedProxyKey struct{}
+
+func viaTrustedProxy(r *http.Request) bool {
+	v, _ := r.Context().Value(viaTrustedProxyKey{}).(bool)
+	return v
 }
