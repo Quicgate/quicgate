@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -170,9 +171,30 @@ type portalFixture struct {
 
 func newPortalFixture(t *testing.T, enrol ...store.VPNSubject) *portalFixture {
 	t.Helper()
+	return newPortalFixtureOn(t, true, enrol...)
+}
+
+// newPortalFixtureOn makes the fixture on a development engine (no TLS at all,
+// like every other test) or on an ordinary one. The mode is fixed when the
+// engine is made: its background workers read the configuration.
+func newPortalFixtureOn(t *testing.T, development bool, enrol ...store.VPNSubject) *portalFixture {
+	t.Helper()
 	t.Setenv("QG_SECRET_KEY", "")
 	t.Setenv("QG_SECRET_KEY_FILE", "")
-	e, st := newTestEngine(t)
+	var e *Engine
+	var st *store.Store
+	if development {
+		e, st = newTestEngine(t)
+	} else {
+		dir := t.TempDir()
+		var err error
+		if st, err = store.Open(filepath.Join(dir, "quicgate.db")); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		e = New(Config{DataDir: dir}, st)
+		t.Cleanup(func() { _ = e.accessLog.Close(); _ = e.ban.closePersist() })
+	}
 	t.Cleanup(e.wg.Close)
 	idp := newVPNIdP(t)
 	p := &store.OIDCProvider{Name: "idp", Issuer: idp.srv.URL, ClientID: "quicgate-vpn", ClientSecret: "s3cret"}
@@ -670,8 +692,7 @@ func TestSubjectsNameTheirProvider(t *testing.T) {
 // device's configuration with its preshared key, and it serves the page that
 // makes the private key: on plain HTTP anybody on the path gets all three.
 func TestPortalNeedsHTTPS(t *testing.T) {
-	f := newPortalFixture(t)
-	f.e.cfg.DisableTLS = false // an ordinary instance, not the development mode of the other tests
+	f := newPortalFixtureOn(t, false) // an ordinary instance, not the development mode of the other tests
 
 	if rr := f.do(http.MethodGet, "/", "", nil, nil); rr.Code != http.StatusPermanentRedirect || rr.Header().Get("Location") != "https://"+portalHost+"/" {
 		t.Fatalf("the page over plain HTTP: %d to %q, want a redirect to HTTPS", rr.Code, rr.Header().Get("Location"))

@@ -4,6 +4,75 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.17.2] - 2026-09-19
+
+A security release. An external review of the 1.17.1 source found twelve defects in the
+WireGuard work, five rated high. None is an unauthenticated remote attack, and an instance that
+never switched WireGuard on is not affected by any of them, but every one was a gap between what
+the design promises and what the code did. All twelve are fixed here, each with a regression test
+that fails without its fix. **If you use sites, devices or the portal, upgrade.** LAN access stays
+marked experimental: the fixes have not been reviewed from outside yet.
+
+### Security
+- **One key, one peer, whatever its spelling (QG-01, high).** Go's base64 decoder skips line
+  breaks and accepts loose padding, so one WireGuard key had many accepted spellings, and the
+  uniqueness check compared text. Somebody allowed to add a device could register *another
+  peer's* public key in a different spelling; inside WireGuard the two became one peer, and the
+  new entry took over the victim's addresses and preshared key, cutting it off. No traffic could
+  be read that way. Keys are now stored and compared in one canonical form, other spellings are
+  refused, keys stored by older versions are canonicalised at start, a site's key can no longer
+  be changed by an update, and the endpoint leaves a duplicate out instead of letting the last
+  one win.
+- **An open connection ends when its authorization ends (QG-02, high).** A lapsed login, an
+  expired break-glass device or the 30-day limit only kept *new* connections out; one that was
+  already open went on until something else closed it. The endpoint now has a timer on the next
+  deadline and closes what the expired device holds. A renewal that arrived in time keeps its
+  connections.
+- **Making a host VPN only disconnects whoever is connected from outside (QG-03, high).** New
+  public requests got the 404 at once, but an open WebSocket or stream from the public side
+  stayed open. Public requests are now tracked per host and ended when the host becomes VPN
+  only, is disabled or is deleted. On HTTP/2 and HTTP/3 only that host's streams are reset.
+- **A server key that cannot be read is never replaced (QG-04, high).** After restoring a backup
+  onto an instance with a different sealing key, quicgate read "cannot open the stored server
+  key" as "first use" and generated a new key over it. Putting the right sealing key back later
+  could then no longer recover the old one, and every site and device had to be set up again.
+  Now the endpoint stays down and says why, the stored key is kept byte for byte, and the right
+  sealing key brings the original identity back. If that key is lost, the VPN page offers an
+  explicit, password-confirmed reset.
+- **No portal over plain HTTP (QG-05, high).** A portal host without a certificate served its
+  login, its session cookie (without `Secure`) and a new device's configuration over HTTP, where
+  anybody on the path could read them or change the page that makes the private key. The portal
+  now redirects plain HTTP to HTTPS and refuses everything else, its cookies are always
+  `Secure`, and `X-Forwarded-Proto` is only believed from a trusted proxy.
+- **The tunnel's listeners share the per-device budget (QG-06).** The limits of 512 open flows
+  per peer and 4096 in total only applied to forwarded LAN flows, not to connections to
+  quicgate's own listeners in the tunnel. They now cover both, and dials through a site too.
+- **"No record, no flow" means written (QG-07).** The record of an allowed LAN flow only had to
+  fit in a memory queue. With a full disk or a log directory that cannot be created, every record
+  was lost silently while every flow went through. The record is now written before the flow is
+  admitted; while the log cannot be written LAN flows are refused, the Overview says so, and
+  admission comes back by itself with the log.
+- **Adding a device takes a login that is fresh now (QG-08).** The freshness of the login was
+  checked when logging in, not when enrolling, so a portal page kept open (or a copied session
+  cookie) could add devices for as long as it stayed alive.
+- **An identity provider's issuer cannot change under the VPN (QG-09).** The VPN names people by
+  provider and subject id. With another issuer under the same provider entry, somebody else with
+  the same subject id would have owned the first person's devices, policies and blocks.
+- **The outage grace reaches the running endpoint (QG-10).** It was written to the database but
+  not applied, so devices were cut off at the normal deadline during an identity-provider outage
+  although a grace was configured. This one failed closed.
+- **UDP datagrams through LAN access stay whole (QG-11).** Datagrams above 32 KiB were delivered
+  cut off at 32 KiB.
+- **A pending dial through a site ends when the site is removed (QG-12),** instead of waiting for
+  its caller's timeout.
+- Also: a relayed DNS reply must repeat the question it answers, not only carry the right id.
+
+### Still open from the review
+No load or flood test of the VPN exists yet, so nothing is claimed about memory or CPU under
+hostile load; the question whether a listener must be bound to one instance of the network stack
+across a controlled reset has not been settled with a test on Linux; the portal is not qualified
+against a live Keycloak; the official phone apps are untested. See ROADMAP.md.
+
 ## [1.17.1] - 2026-09-18
 
 ### Changed
@@ -22,7 +91,8 @@ All notable changes to quicgate are documented here. The format follows
 
 The rest of the WireGuard work in SPEC-wireguard.md: Release B (devices and a private entrance)
 and Release C (single sign-on for the VPN, LAN access). Everything here is off until you use it,
-and an install that does not switch WireGuard on runs none of it. The new **VPN guide** in the
+and an install that does not switch WireGuard on opens no socket for it and admits nothing (a few
+idle background workers exist whether it is on or not). The new **VPN guide** in the
 built-in help describes all of it.
 
 ### Added

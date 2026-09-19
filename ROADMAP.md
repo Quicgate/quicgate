@@ -54,8 +54,12 @@ not a missing feature, it is code that nobody else has looked at and nobody has 
 
 ### 1. Qualify what is built
 
-1. **An outside review of the WireGuard code** (1.16 and 1.17). Until then LAN access stays
-   marked experimental. The design was reviewed twice; the code was not.
+1. **A second outside look at the WireGuard code.** The first external review (2026-09-19, on
+   1.17.1) found twelve defects, five of them high; all are fixed in 1.17.2 with regression
+   tests. The fixes themselves have not been reviewed from outside, so LAN access stays marked
+   experimental. Still open from that review: load and flood tests with measured limits, and
+   binding listeners to one instance of the network stack across a controlled reset, tested on
+   Linux with queued traffic.
 2. **The VPN portal against a real identity provider.** Keycloak first: refresh tokens
    (`offline_access`), `auth_time`, `max_age`, and groups in a refreshed ID token or at UserInfo.
    Then write the working client settings into the VPN guide.

@@ -936,3 +936,27 @@ Verdict: a focused v3 before implementation. All seven findings and five correct
 | c3 | Pending dials and request contexts; closing cannot recall delivered requests | S2, S42: register before dial, cancel contexts, revocation defined as no further access |
 | c4 | "All flows logged" contradicts a dropping queue | S31: no record, no flow for allowed flows; the rest best effort with a visible loss counter |
 | c5 | Browser key compatibility is first needed in Release B | S21, sections 3, 14, 15 |
+
+### Round 3: review of the code (2026-09-19, on 1.17.1)
+
+An external review of the built code, with thirteen reproduction probes. Twelve findings, all
+accepted and fixed in 1.17.2. Each has a regression test that fails without its fix.
+
+| ID | Finding | What the design said | Fix |
+|---|---|---|---|
+| QG-01 | Alternate base64 spellings bypass key uniqueness | S3: a key is used once | keys canonicalised on every write and compared by their bytes; duplicates left out by the endpoint |
+| QG-02 | Open connections outlive their authorization | S2: deadlines bind admission *and* what is open | a timer on the next deadline closes the expired peer's flows |
+| QG-03 | Public upgrades stay open when a host becomes VPN only | S17 | public requests tracked per host, ended when the host leaves the public side |
+| QG-04 | A restore under another sealing key replaces the server key | S34, S35: a secret that cannot be opened is never replaced | typed secret read (absent, readable, unreadable); generation only when absent; explicit reset |
+| QG-05 | Portal over plain HTTP with a usable cookie | S51 | HTTPS only, cookies always Secure, forwarded scheme believed from trusted proxies only |
+| QG-06 | No connection limits on the tunnel's listeners | S49 | one budget for listeners, forwarded flows and site dials |
+| QG-07 | Flow records lost silently while flows are allowed | S31 | the record is written before admission; a failing log refuses flows and is visible |
+| QG-08 | Enrolment without a fresh login | S54 | the login's `auth_time` is kept with the portal session and checked at enrolment |
+| QG-09 | Issuer change under live VPN identities | S23, S53 | refused while the VPN names anybody from the provider |
+| QG-10 | Grace not applied to the endpoint | S45 | the transition is published to the endpoint; the deadline is part of change detection |
+| QG-11 | UDP datagrams truncated at 32 KiB | S29 | datagram-sized buffer, one read is one message |
+| QG-12 | Pending site dials not registered or cancelled | S2, S42 | registered before resolution and dial, cancelled with the site |
+
+Not closed by this round: S49 load and flood measurements; binding listeners and DNS callbacks to
+one stack instance across a reset (S52), to be settled by a test on Linux; S36; live qualification
+of an identity provider; the official mobile apps.

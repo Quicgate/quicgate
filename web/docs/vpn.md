@@ -75,6 +75,9 @@ and say who may add devices (a group, single people, or everybody from that prov
 `https://vpn.example.com/.qg/vpn/callback` as a redirect URI at the provider.
 
 The portal has to be reachable without the VPN: it is where people go to get the VPN *back*.
+It is served over **HTTPS only**, so the host needs a certificate: plain HTTP is redirected, and
+nothing but the redirect is ever answered there. Behind a proxy that terminates TLS, that proxy
+has to be listed under trusted proxies and send `X-Forwarded-Proto: https`.
 
 What a person sees: log in, name a device, download the configuration. What quicgate does with
 that login is stricter than an ordinary web login, because a VPN configuration outlives a
@@ -94,6 +97,11 @@ browser session:
   (0 by default), and no longer.
 - **However well the checks go, the person logs in again** after **Log in again after** (30 days
   by default).
+- **Adding a device takes a login that is fresh at that moment.** A portal page that has been
+  open since this morning shows your devices, and asks you to log in again before it adds one.
+- **What is open ends with the authorization.** When a login lapses, is ended, or reaches its
+  limit, the connections the person's devices hold are closed at that moment, not just new ones
+  refused.
 - A device keeps its configuration across all of this. After a lapse the person logs in at the
   portal and the same device works again.
 
@@ -145,9 +153,11 @@ How it works, and what follows from it:
   service on one of them takes a route for exactly that address (`/32`) with explicit ports, and
   quicgate's own listeners stay out of reach even then.
 - Every flow is recorded in `logs/vpn-flows.log` before it is allowed: who, which device, where
-  to, allowed or refused and why. If the log cannot keep up, a flow that would have been allowed
-  is refused rather than let through unrecorded; records of *refused* flows are dropped and
-  counted, and the Overview page says so.
+  to, allowed or refused and why. "Recorded" means written to the file, not queued: if the log
+  cannot be written (a full disk, a directory that cannot be created, a disk that hangs), LAN
+  flows are refused until it can, and the Overview page says so. Records of *refused* and ended
+  flows are best effort; what is lost of them is counted. A record is handed to the operating
+  system, not forced to the disk, so a power cut can still lose the last ones.
 - Limits per device and in total keep one device from exhausting quicgate.
 - When a login lapses, a device is revoked, or a policy changes, the flows that are no longer
   allowed are closed, not just new ones refused.

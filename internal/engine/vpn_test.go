@@ -217,3 +217,26 @@ func TestPrivateEntrance(t *testing.T) {
 		t.Fatal("a revoked device's key was registered again")
 	}
 }
+
+// A relayed reply has to repeat the question it answers (S20).
+func TestDNSReplyMustRepeatTheQuestion(t *testing.T) {
+	msg := func(name string, response bool) []byte {
+		m := dnsmessage.Message{Header: dnsmessage.Header{ID: 7, Response: response},
+			Questions: []dnsmessage.Question{{Name: dnsmessage.MustNewName(name), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}}}
+		b, err := m.Pack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	query := msg("app.example.com.", false)
+	if !sameQuestion(query, msg("APP.example.com.", true)) {
+		t.Error("a reply to the same name in another case was refused")
+	}
+	if sameQuestion(query, msg("evil.example.com.", true)) {
+		t.Error("a reply about another name was taken for the answer")
+	}
+	if sameQuestion(query, []byte{0, 7, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0}) {
+		t.Error("a reply without a question was taken for the answer")
+	}
+}

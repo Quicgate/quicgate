@@ -305,7 +305,7 @@ func relayDNS(query []byte, network string) ([]byte, error) {
 			continue
 		}
 		// The reply must answer this query.
-		if len(reply) < 12 || reply[0] != query[0] || reply[1] != query[1] || reply[2]&0x80 == 0 {
+		if len(reply) < 12 || reply[0] != query[0] || reply[1] != query[1] || reply[2]&0x80 == 0 || !sameQuestion(query, reply) {
 			lastErr = errors.New("the resolver's reply does not match the query")
 			continue
 		}
@@ -599,4 +599,27 @@ func (e *Engine) ExplainRoute(routes []store.VPNRoute, proto, dest string) (stri
 		}
 	}
 	return wg.Explain(cfg, wgRoutes(routes), proto, ap), nil
+}
+
+// sameQuestion reports whether a reply repeats the question of the query: the
+// same name (whatever its case), type and class. The id and the response bit
+// alone say little; the socket is connected to the resolver, and this is the
+// second half of "the reply must answer this query" (S20).
+func sameQuestion(query, reply []byte) bool {
+	var qp, rp dnsmessage.Parser
+	if _, err := qp.Start(query); err != nil {
+		return false
+	}
+	if _, err := rp.Start(reply); err != nil {
+		return false
+	}
+	q, err := qp.Question()
+	if err != nil {
+		return false
+	}
+	r, err := rp.Question()
+	if err != nil {
+		return false
+	}
+	return q.Type == r.Type && q.Class == r.Class && strings.EqualFold(q.Name.String(), r.Name.String())
 }
