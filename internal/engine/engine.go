@@ -173,6 +173,8 @@ type Engine struct {
 	reloadMu      sync.Mutex                     // serializes concurrent Reload callers
 	dockerHosts   atomic.Pointer[[]store.Host]   // in-memory hosts from the Docker label provider
 	dockerStreams atomic.Pointer[[]store.Stream] // in-memory L4 streams from the Docker label provider
+	wgSeenMu      sync.Mutex                     // guards wgSeen
+	wgSeen        map[string]wg.PeerStatus       // the peers' byte totals at the last look, for the traffic overview
 	publicReqs    publicRequests                 // what is being served on the public listeners, per host
 	realIP        atomic.Pointer[realIPConfig]   // compiled trusted-proxy / real-client-IP config
 	oidcProviders sync.Map                       // issuer -> *discoveredProvider (lazy IdP discovery)
@@ -1415,6 +1417,18 @@ func (e *Engine) listenerTraffic() []PortTraffic {
 		if !e.cfg.DisableH3 {
 			add(PortTraffic{Proto: "udp", Port: p, Service: "HTTP/3", Detail: "QUIC", State: "listening"})
 		}
+	}
+	// The WireGuard endpoint is a listener like the others: it holds a port,
+	// the router maps it, and it carries traffic. Leaving it out made this list
+	// disagree with the router's.
+	if st := e.wgState.Load(); st != nil && st.enabled && st.port > 0 {
+		sites, devices := e.wg.Status(), e.wg.DeviceStatus()
+		row := PortTraffic{Proto: "udp", Port: st.port, Service: "WireGuard", State: "listening",
+			Detail: fmt.Sprintf("VPN endpoint: %d sites, %d devices", len(sites), len(devices))}
+		if sites == nil {
+			row.State, row.Error = "failed", st.err
+		}
+		add(row)
 	}
 	for _, l := range e.streams.listeners() {
 		s := l.stream

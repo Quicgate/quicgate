@@ -247,3 +247,39 @@ func rawSetting(t *testing.T, e *Engine, key string) string {
 	}
 	return v
 }
+
+// The WireGuard endpoint holds a port like any other listener, so the list of
+// open ports shows it, and stops showing it when the endpoint is off.
+func TestTheOpenPortsListTheWireGuardEndpoint(t *testing.T) {
+	t.Setenv("QG_SECRET_KEY", "")
+	t.Setenv("QG_SECRET_KEY_FILE", "")
+	e, st := newTestEngine(t)
+	t.Cleanup(e.wg.Close)
+	find := func() *PortTraffic {
+		for _, p := range e.listenerTraffic() {
+			if p.Service == "WireGuard" {
+				return &p
+			}
+		}
+		return nil
+	}
+	if find() != nil {
+		t.Fatal("the endpoint is listed although WireGuard is off")
+	}
+	port := freeUDP(t)
+	setSettings(t, st, map[string]string{"wg_enabled": "1", "wg_port": fmt.Sprint(port)})
+	reload(t, e)
+	row := find()
+	if row == nil || row.Proto != "udp" || row.Port != port || row.State != "listening" || row.Key != fmt.Sprintf("udp:%d", port) {
+		t.Fatalf("open ports with WireGuard on: %+v", row)
+	}
+	e.countWireGuardTraffic(port) // no peers: must not panic or count anything
+	if c := e.traffic.port(row.Key); c.in.Load() != 0 || c.active.Load() != 0 {
+		t.Fatalf("an endpoint without peers counted traffic: in=%d open=%d", c.in.Load(), c.active.Load())
+	}
+	setSettings(t, st, map[string]string{"wg_enabled": "0"})
+	reload(t, e)
+	if find() != nil {
+		t.Fatal("the endpoint is still listed after WireGuard was switched off")
+	}
+}

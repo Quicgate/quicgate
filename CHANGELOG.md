@@ -4,6 +4,14 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.17.4] - 2026-09-19
+
+### Fixed
+- **The WireGuard endpoint is in the list of open ports.** It holds a UDP port and the router maps
+  it through UPnP like the others, but the Overview left it out, so the list disagreed with the
+  router's. It is shown now with its state, the router mapping, the sites and devices configured,
+  how many peers are connected, and the tunnel's traffic.
+
 ## [1.17.3] - 2026-09-19
 
 ### Fixed

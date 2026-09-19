@@ -184,11 +184,16 @@ const wgReresolveEvery = 10
 // call in is called back at once after a restart.
 func (e *Engine) reresolveWireGuard() {
 	for tick := 1; ; tick++ {
-		time.Sleep(30 * time.Second)
+		time.Sleep(10 * time.Second)
 		st := e.wgState.Load()
 		if st == nil || !st.enabled {
 			continue
 		}
+		e.countWireGuardTraffic(st.port)
+		if tick%3 != 0 {
+			continue
+		}
+		tick := tick / 3
 		e.wg.Remember()
 		if tick%wgReresolveEvery == 0 {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -331,4 +336,45 @@ func locationUpstreamsOf(h store.Host) []store.Upstream {
 		out = append(out, l.Upstream)
 	}
 	return out
+}
+
+// countWireGuardTraffic feeds the endpoint's port into the traffic overview.
+// WireGuard counts bytes per peer; the overview counts per listener, so the
+// growth of the peers' totals since the last look is added to the port. A peer
+// that went away takes its total with it, which must not read as negative
+// traffic, so every peer is followed by itself. "Open" is the peers with a
+// recent handshake, "connections" the times a peer came up.
+func (e *Engine) countWireGuardTraffic(port int) {
+	c := e.traffic.port("udp:" + strconv.Itoa(port))
+	if c == nil {
+		return
+	}
+	e.wgSeenMu.Lock()
+	defer e.wgSeenMu.Unlock()
+	if e.wgSeen == nil {
+		e.wgSeen = map[string]wg.PeerStatus{}
+	}
+	now := map[string]wg.PeerStatus{}
+	up := int64(0)
+	for kind, list := range map[string][]wg.PeerStatus{"site": e.wg.Status(), "device": e.wg.DeviceStatus()} {
+		for _, p := range list {
+			key := kind + ":" + strconv.FormatInt(p.ID, 10)
+			now[key] = p
+			prev := e.wgSeen[key]
+			if p.RxBytes >= prev.RxBytes {
+				c.in.Add(p.RxBytes - prev.RxBytes)
+			}
+			if p.TxBytes >= prev.TxBytes {
+				c.out.Add(p.TxBytes - prev.TxBytes)
+			}
+			if p.Up {
+				up++
+				if !prev.Up {
+					c.accepted.Add(1)
+				}
+			}
+		}
+	}
+	e.wgSeen = now
+	c.active.Store(up)
 }
