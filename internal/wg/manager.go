@@ -227,6 +227,9 @@ type Manager struct {
 	// record is the flow log. An allowed flow whose record cannot be taken is
 	// refused (S31).
 	record func(FlowRecord) bool
+	// expiry fires at the next moment a device's authorization ends, and
+	// closes what that device still has open (QG-02).
+	expiry *time.Timer
 }
 
 // New returns a Manager with nothing running. Apply starts it.
@@ -445,6 +448,7 @@ func (m *Manager) Apply(ctx context.Context, cfg Config) error {
 		}
 	}
 	m.reviewFlowsLocked()
+	m.scheduleExpiryLocked()
 	return nil
 }
 
@@ -649,7 +653,58 @@ func (m *Manager) Remember() {
 }
 
 // stopLocked closes every connection, then the device and its stack.
+// roomLocked reports whether the peer may hold one more connection or flow.
+func (m *Manager) roomLocked(key string) bool {
+	total := 0
+	for _, set := range m.flows {
+		total += len(set)
+	}
+	return len(m.flows[key]) < maxFlowsPerPeer && total < maxFlowsTotal
+}
+
+// scheduleExpiryLocked arms the timer for the next moment a device's
+// authorization ends. Until now a deadline only kept new connections out: one
+// that was open went on for as long as it liked, because nothing looked at it
+// again (QG-02). What is closed is decided when the timer fires, from the
+// state of that moment, so a renewal that arrived in time keeps its
+// connections and an old timer cannot close them.
+func (m *Manager) scheduleExpiryLocked() {
+	if m.expiry != nil {
+		m.expiry.Stop()
+		m.expiry = nil
+	}
+	if m.inst == nil {
+		return
+	}
+	now := time.Now()
+	var next time.Time
+	for key, p := range m.peers {
+		if p.until.IsZero() {
+			continue
+		}
+		if !p.active(now) {
+			m.closePeerLocked(key) // over already: nothing of it stays open
+			continue
+		}
+		if next.IsZero() || p.until.Before(next) {
+			next = p.until
+		}
+	}
+	if next.IsZero() {
+		return
+	}
+	m.expiry = time.AfterFunc(time.Until(next)+10*time.Millisecond, func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.scheduleExpiryLocked()
+	})
+}
+
 func (m *Manager) stopLocked() {
+	if m.expiry != nil {
+		m.expiry.Stop()
+		m.expiry = nil
+	}
 	m.rememberLocked()
 	for key := range m.flows {
 		m.closePeerLocked(key)
@@ -823,7 +878,10 @@ func (l *peerListener) Accept() (net.Conn, error) {
 		}
 		l.m.mu.Lock()
 		p, ok := l.m.peerByAddrLocked(ap.Addr())
-		if !ok {
+		if !ok || !l.m.roomLocked(p.key) {
+			// Nobody's address, or a peer that has as much open as one peer may
+			// have: the budget is one for everything a peer holds, forwarded
+			// flows and connections to quicgate's own listeners alike (QG-06).
 			l.m.mu.Unlock()
 			c.Close()
 			continue
@@ -893,8 +951,31 @@ func (m *Manager) DialContext(ctx context.Context, siteID int64, network, addres
 	if !ok {
 		return fail("site %d is not configured or not enabled", siteID)
 	}
+	// The attempt is registered under the site before anything is looked up
+	// or dialled, so removing the site ends it at once instead of leaving it
+	// to the caller's patience (S2, QG-12).
+	ctx, cancel := context.WithCancel(ctx)
+	t := &tracked{close: cancel}
+	m.mu.Lock()
+	if cur, ok := m.peers[key]; !ok || m.inst != inst || cur.publicKey != site.publicKey {
+		m.mu.Unlock()
+		cancel()
+		return fail("site %q was removed while connecting", site.name)
+	}
+	if !m.roomLocked(key) {
+		m.mu.Unlock()
+		cancel()
+		return fail("site %q has too many open connections", site.name)
+	}
+	m.admitLocked(key, t)
+	m.mu.Unlock()
+	abandon := func() {
+		m.release(key, t)
+		cancel()
+	}
 	ip, err := pickAddress(ctx, site, host)
 	if err != nil {
+		abandon()
 		return fail("%v", err)
 	}
 	target := netip.AddrPortFrom(ip, uint16(pn))
@@ -905,22 +986,27 @@ func (m *Manager) DialContext(ctx context.Context, siteID int64, network, addres
 	case "udp", "udp4":
 		c, err = inst.stack.dialUDP(target)
 	default:
+		abandon()
 		return fail("network %q is not supported through a site", network)
 	}
 	if err != nil {
+		abandon()
 		return fail("site %q, %s: %v", site.name, target, err)
 	}
 
-	// Register, unless the site went away while the dial was in flight: then
-	// the connection must not outlive it (S2).
+	// The registration turns from "an attempt" into "this connection", unless
+	// the site went away meanwhile: then the connection must not outlive it.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if cur, ok := m.peers[key]; !ok || m.inst != inst || cur.publicKey != site.publicKey {
+	if cur, ok := m.peers[key]; t.closed.Load() || !ok || m.inst != inst || cur.publicKey != site.publicKey {
 		_ = c.Close()
+		cancel()
+		if !t.closed.Swap(true) {
+			delete(m.flows[key], t)
+		}
 		return fail("site %q was removed while connecting", site.name)
 	}
-	t := &tracked{close: func() { _ = c.Close() }}
-	m.admitLocked(key, t)
+	t.close = func() { cancel(); _ = c.Close() }
 	return &trackedConn{Conn: c, m: m, key: key, t: t}, nil
 }
 
