@@ -501,6 +501,12 @@ func TestLeaseRenewal(t *testing.T) {
 		if after.State != "active" || !after.Transient || !after.AccessUntil().Equal(before.GraceUntil) {
 			t.Fatalf("after an outage: %+v, want active, transient, access until the grace", after)
 		}
+		// The running endpoint has the grace too, without waiting for some later
+		// reload (QG-10): it is the endpoint that admits, not the database.
+		devices, _ := f.st.ListWGDevices()
+		if got, ok := f.e.wg.DeviceDeadline(devices[0].ID); !ok || got.Unix() != before.GraceUntil.Unix() {
+			t.Fatalf("the endpoint admits the device until %v (known: %v), want the grace deadline %v", got, ok, before.GraceUntil)
+		}
 		// The provider is back but refuses: the grace is over at once.
 		f.idp.set(func(i *vpnIdP) { i.unavailable, i.refuse = false, true })
 		f.e.renewLease(ctx, f.lease(t))

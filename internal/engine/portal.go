@@ -618,7 +618,9 @@ func (e *Engine) leaseTick(ctx context.Context, now time.Time) {
 			_ = e.store.EndVPNSession(s.ID, "lapsed", s.Generation)
 			continue
 		}
-		live = append(live, ownerKey(s.Provider, s.Sub)+"@"+strconv.FormatInt(s.Generation, 10))
+		// The moment access ends is part of what the endpoint was told: it moves
+		// without a new generation when the grace starts to apply (QG-10).
+		live = append(live, ownerKey(s.Provider, s.Sub)+"@"+strconv.FormatInt(s.Generation, 10)+"@"+strconv.FormatInt(s.AccessUntil().Unix(), 10))
 		half := s.RenewedAt.Add(s.LeaseUntil.Sub(s.RenewedAt) / 2)
 		if now.After(half) {
 			if _, busy := e.portal.renewing.LoadOrStore(s.ID, struct{}{}); !busy {
@@ -670,7 +672,11 @@ func (e *Engine) renewLease(ctx context.Context, s store.VPNSession) {
 	}
 	transient := func(why string) {
 		log.Printf("vpn: renewing the authorization of %s failed, will retry: %s", s.Email, why)
-		_ = e.store.MarkVPNSessionTransient(s.ID, from)
+		// With a grace configured this moves the moment the devices stop, and
+		// the endpoint holds the old one: tell it now, not at some later reload.
+		if changed, _ := e.store.MarkVPNSessionTransientChanged(s.ID, from); changed {
+			e.refreshVPN(ctx)
+		}
 	}
 	if s.RefreshToken == "" {
 		lapse("no refresh token is stored (is the secret store locked?)")

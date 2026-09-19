@@ -666,8 +666,25 @@ func (s *Store) RenewVPNSession(v *VPNSession, fromGeneration int64) error {
 // MarkVPNSessionTransient notes that renewals are failing for reasons that say
 // nothing about the account. It moves no deadline.
 func (s *Store) MarkVPNSessionTransient(id, fromGeneration int64) error {
-	_, err := s.db.Exec("UPDATE vpn_sessions SET transient=1 WHERE id=? AND generation=? AND state='active'", id, fromGeneration)
+	_, err := s.markVPNSessionTransient(id, fromGeneration)
 	return err
+}
+
+// MarkVPNSessionTransientChanged is MarkVPNSessionTransient and reports whether
+// the session went from "checked" to "provider unreachable" just now: that
+// moves the moment its devices stop (the grace applies from here on), which
+// the running endpoint has to be told (QG-10).
+func (s *Store) MarkVPNSessionTransientChanged(id, fromGeneration int64) (bool, error) {
+	return s.markVPNSessionTransient(id, fromGeneration)
+}
+
+func (s *Store) markVPNSessionTransient(id, fromGeneration int64) (bool, error) {
+	res, err := s.db.Exec("UPDATE vpn_sessions SET transient=1 WHERE id=? AND generation=? AND state='active' AND transient=0", id, fromGeneration)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // EndVPNSession ends or lapses a session and forgets its refresh token. state

@@ -159,6 +159,16 @@ func (p peer) public() Peer {
 // active reports whether the peer's authorization still runs.
 func (p peer) active(now time.Time) bool { return p.until.IsZero() || now.Before(p.until) }
 
+// DeviceDeadline returns the moment the running endpoint stops admitting the
+// device, and whether it knows the device at all. It is what the endpoint was
+// told, which is what counts: the database may say something newer.
+func (m *Manager) DeviceDeadline(id int64) (time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.peers["device:"+strconv.FormatInt(id, 10)]
+	return p.until, ok
+}
+
 // prefixes lists everything a peer owns: its /32 and, for a site, its networks.
 func (p peer) prefixes() []netip.Prefix {
 	out := []netip.Prefix{netip.PrefixFrom(p.address, p.address.BitLen())}
