@@ -26,7 +26,7 @@ contacted.
 
 ## Scope and hardening notes
 
-Some things are deployment responsibilities rather than bugs — please keep them in
+Some things are deployment responsibilities rather than bugs: please keep them in
 mind before reporting:
 
 - **The admin UI/API (port 81) must never be exposed to the internet.** Put it
@@ -39,3 +39,17 @@ mind before reporting:
 
 Reports about the default credentials existing, or about the admin port being
 reachable in an intentionally-open test setup, are out of scope.
+
+## Reviews so far
+
+quicgate is reviewed from outside when somebody is willing to, and the results are public:
+
+- **September 2026, whole product (on 1.8.1):** remediated in 1.9.0; the changelog lists every
+  finding.
+- **19 September 2026, the WireGuard work (on 1.17.1):** twelve findings, five rated high, none an
+  unauthenticated remote attack; all fixed in 1.17.2, each with a regression test. The record is
+  in SPEC-wireguard.md, section 16, round 3. The fixes have not been reviewed from outside yet,
+  which is why LAN access is still marked experimental.
+
+A review is not a guarantee. If you find something, the section above says how to tell us, and we
+would rather hear it bluntly than not at all.
