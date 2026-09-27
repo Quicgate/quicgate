@@ -550,9 +550,11 @@ func (o *Options) validateAuthRules() error {
 type Store struct {
 	db *sql.DB
 	// box seals the secrets at rest (sealed.go). It is nil while the store is
-	// locked, and lockReason then says why.
-	box        *seal.Box
-	lockReason string
+	// locked, and lockReason then says why. sealWarnings names stored values
+	// the migration could not seal (damaged, or moved from another row).
+	box          *seal.Box
+	lockReason   string
+	sealWarnings []string
 	// hostMu makes "is this name free" and the write one step: two saves of
 	// the same name at the same moment must not both find it free.
 	hostMu sync.Mutex
