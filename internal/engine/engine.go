@@ -382,8 +382,30 @@ func (e *Engine) Reload(ctx context.Context) error {
 		}
 		r := e.buildRoute(h, acl, access, oidcProv)
 		r.warnings = e.routeWarnings(h, acl, access)
+		// configured reports whether a database host has name d: the same
+		// name, or a wildcard that covers it (lookup prefers an exact name, so
+		// a container's api.example.com would otherwise take that traffic from
+		// a manual *.example.com). Disabled hosts count: a configured name is
+		// configured whether or not it is served right now.
+		configured := func(d string) bool {
+			parent := ""
+			if i := strings.IndexByte(d, '.'); i > 0 && !strings.HasPrefix(d, "*.") {
+				parent = "*." + d[i+1:]
+			}
+			for _, m := range hosts {
+				for _, md := range m.Domains {
+					if md == d || (parent != "" && md == parent) {
+						return true
+					}
+				}
+			}
+			return false
+		}
 		placed := false
 		for _, d := range h.Domains {
+			if fromDocker && configured(d) {
+				continue
+			}
 			if strings.HasPrefix(d, "*.") {
 				key := d[2:]
 				if fromDocker {

@@ -2,11 +2,14 @@ package store
 
 import (
 	"bytes"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"quicgate/internal/seal"
 )
@@ -176,8 +179,8 @@ func TestMigrationSealsEverySecretAndScrubsTheFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer again.Close()
-	if n, err := again.sealExisting(); err != nil || n != 0 {
-		t.Fatalf("second start resealed %d values (%v), want 0", n, err)
+	if n, warnings, err := again.sealExisting(); err != nil || n != 0 || len(warnings) != 0 {
+		t.Fatalf("second start resealed %d values (%v, %v), want 0", n, warnings, err)
 	}
 }
 
@@ -339,6 +342,155 @@ func TestUnsealForRollback(t *testing.T) {
 	defer again.Close()
 	if err := again.db.QueryRow("SELECT totp_secret FROM users").Scan(&raw); err != nil || !seal.IsSealed(raw) {
 		t.Fatalf("the next start did not seal again: %.20q", raw)
+	}
+}
+
+// keyIDOf returns the key id a sealed value names.
+func keyIDOf(sealed string) string {
+	parts := strings.SplitN(sealed, ".", 3)
+	if len(parts) != 3 {
+		return ""
+	}
+	return parts[1]
+}
+
+// keyLine returns the key from a key file, without the comment.
+func keyLine(t *testing.T, path string) string {
+	t.Helper()
+	text, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(text), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+			return line
+		}
+	}
+	t.Fatal("no key in the key file")
+	return ""
+}
+
+// The VPN refresh tokens are part of the seal inventory: a key rotation seals
+// them under the new key and -unseal writes them back, like every other
+// secret. Their writer sealed them, bound to the session's provider and
+// subject, but the migration did not know the column, so a rotation left
+// them under the retired key and -unseal left them sealed.
+func TestRefreshTokensFollowKeyRotation(t *testing.T) {
+	noKeyEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quicgate.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const token = "PLAINTEXT-refresh-token-5a1c93"
+	now := time.Now()
+	sess := &VPNSession{Provider: 7, Sub: "alice", Email: "alice@example.com", RefreshToken: token,
+		LoginAt: now, RenewedAt: now, LeaseUntil: now.Add(time.Hour), GraceUntil: now.Add(2 * time.Hour), HardUntil: now.Add(24 * time.Hour)}
+	if err := st.LoginVPNSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	oldID := st.box.PrimaryID()
+	var raw string
+	if err := st.db.QueryRow("SELECT refresh_token FROM vpn_sessions").Scan(&raw); err != nil || keyIDOf(raw) != oldID {
+		t.Fatalf("the token was not sealed under the key: %.30q %v", raw, err)
+	}
+	st.Close()
+
+	// Rotate: a new primary key, the old one kept for opening.
+	fresh := make([]byte, 32)
+	if _, err := rand.Read(fresh); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QG_SECRET_KEY", base64.StdEncoding.EncodeToString(fresh)+"\n"+keyLine(t, filepath.Join(dir, seal.KeyFileName)))
+	rotated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := rotated.SealStatus()
+	if status.Locked || status.KeyID == oldID || len(status.Warnings) != 0 {
+		t.Fatalf("status after rotation = %+v", status)
+	}
+	if err := rotated.db.QueryRow("SELECT refresh_token FROM vpn_sessions").Scan(&raw); err != nil || keyIDOf(raw) != status.KeyID {
+		t.Fatalf("the refresh token stayed under the retired key %s: %.30q (primary %s)", keyIDOf(raw), raw, status.KeyID)
+	}
+	got, err := rotated.GetVPNSession(7, "alice")
+	if err != nil || got.RefreshToken != token {
+		t.Fatalf("after rotation the token reads as %q, %v", got.RefreshToken, err)
+	}
+	if n, err := rotated.Unseal(); err != nil || n != 1 {
+		t.Fatalf("Unseal = %d, %v, want the one token", n, err)
+	}
+	if err := rotated.db.QueryRow("SELECT refresh_token FROM vpn_sessions").Scan(&raw); err != nil || raw != token {
+		t.Fatalf("after -unseal the column holds %.30q, want the plaintext token", raw)
+	}
+	rotated.Close()
+}
+
+// One value that does not open (damaged, or copied from another row) must not
+// keep every other secret under the retired key or in plaintext: the migration
+// seals what it can, leaves that value as it is, and says so in the status
+// instead of aborting and reporting "sealed".
+func TestMigrationSealsTheRestWhenOneValueIsDamaged(t *testing.T) {
+	dir, path, _ := legacyDB(t)
+	st, err := Open(path) // seals everything under the key it creates
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldID := st.box.PrimaryID()
+	// A ciphertext moved to another row does not open there. It needs
+	// re-sealing at the next rotation, like everything else under this key,
+	// and that is when it fails.
+	if _, err := st.db.Exec("UPDATE users SET totp_secret = (SELECT client_secret FROM oidc_providers LIMIT 1)"); err != nil {
+		t.Fatal(err)
+	}
+	var moved string
+	if err := st.db.QueryRow("SELECT totp_secret FROM users").Scan(&moved); err != nil {
+		t.Fatal(err)
+	}
+	// And a plaintext secret is waiting to be sealed for the first time.
+	const dns = `{"account":"PLAINTEXT-dns-cred-second-9c1e"}`
+	if _, err := st.db.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('acme_dns_config', ?)", dns); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	fresh := make([]byte, 32)
+	if _, err := rand.Read(fresh); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QG_SECRET_KEY", base64.StdEncoding.EncodeToString(fresh)+"\n"+keyLine(t, filepath.Join(dir, seal.KeyFileName)))
+	again, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	status := again.SealStatus()
+	if status.Locked || status.KeyID == oldID {
+		t.Fatalf("status after rotation = %+v", status)
+	}
+	if len(status.Warnings) != 1 || !strings.Contains(status.Warnings[0], "users.totp_secret 1") {
+		t.Fatalf("warnings = %v, want the damaged value named", status.Warnings)
+	}
+	var raw string
+	for _, q := range []string{
+		"SELECT value FROM settings WHERE key='acme_dns_config'",
+		"SELECT value FROM settings WHERE key='oidc_client_secret'",
+		"SELECT client_secret FROM oidc_providers",
+		"SELECT key_pem FROM custom_certs",
+	} {
+		if err := again.db.QueryRow(q).Scan(&raw); err != nil || keyIDOf(raw) != status.KeyID {
+			t.Errorf("%s: %.30q (%v) is not under the new key %s: one damaged value stopped the rest", q, raw, err, status.KeyID)
+		}
+	}
+	if got := again.GetSetting("acme_dns_config", ""); got != dns {
+		t.Fatalf("acme_dns_config = %q", got)
+	}
+	if err := again.db.QueryRow("SELECT totp_secret FROM users").Scan(&raw); err != nil || raw != moved {
+		t.Fatalf("the damaged value was not kept as it was: %.30q %v", raw, err)
+	}
+	if n, warnings, err := again.sealExisting(); err != nil || n != 0 || len(warnings) != 1 {
+		t.Fatalf("a second pass: n=%d warnings=%v err=%v", n, warnings, err)
 	}
 }
 

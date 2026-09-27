@@ -283,11 +283,24 @@ func (st *Stream) Validate(others []Stream, reserved []int) error {
 			return fmt.Errorf("port %d is reserved by the proxy engine", p)
 		}
 	}
-	if strings.TrimSpace(st.ForwardHost) == "" && len(st.SNIRoutes) == 0 {
+	st.ForwardHost = strings.TrimSpace(st.ForwardHost)
+	if st.ForwardHost == "" && len(st.SNIRoutes) == 0 {
 		return errors.New("forward host is required")
 	}
-	if st.ForwardPort != 0 && (st.ForwardPort < 1 || st.ForwardPort > 65535) {
+	if st.ForwardHost != "" && !validHostName(st.ForwardHost) {
+		return fmt.Errorf("forward host %q must be an IP address or a hostname", st.ForwardHost)
+	}
+	if st.ForwardPort < 0 || st.ForwardPort > 65535 {
 		return fmt.Errorf("forward port %d out of range", st.ForwardPort)
+	}
+	// A single port forwards to one port, which must be named. A range may
+	// leave it 0 (each port forwards to its own number) and otherwise counts
+	// up from it, so its last forward port must exist too.
+	if st.ForwardPort == 0 && st.ListenPortEnd == 0 && st.ForwardHost != "" {
+		return errors.New("forward port is required")
+	}
+	if st.ListenPortEnd > 0 && st.ForwardPort > 0 && st.ForwardPort+(st.ListenPortEnd-st.ListenPort) > 65535 {
+		return fmt.Errorf("forward port range %d-%d goes past 65535", st.ForwardPort, st.ForwardPort+(st.ListenPortEnd-st.ListenPort))
 	}
 	switch st.SendProxyProtocol {
 	case "", "v1", "v2":
@@ -317,9 +330,17 @@ func (st *Stream) Validate(others []Stream, reserved []int) error {
 	if tcpOnly && st.Protocol != "tcp" {
 		return errors.New("PROXY protocol, TLS termination and SNI routing are TCP-only")
 	}
-	for i, sr := range st.SNIRoutes {
-		if strings.TrimSpace(sr.Host) == "" || strings.TrimSpace(sr.ForwardHost) == "" || sr.ForwardPort < 1 {
+	for i := range st.SNIRoutes {
+		sr := &st.SNIRoutes[i]
+		sr.Host, sr.ForwardHost = strings.TrimSpace(sr.Host), strings.TrimSpace(sr.ForwardHost)
+		if sr.Host == "" || sr.ForwardHost == "" || sr.ForwardPort < 1 {
 			return fmt.Errorf("SNI route %d: host, forwardHost and forwardPort are required", i+1)
+		}
+		if sr.ForwardPort > 65535 {
+			return fmt.Errorf("SNI route %d: forward port %d out of range", i+1, sr.ForwardPort)
+		}
+		if !validHostName(sr.ForwardHost) {
+			return fmt.Errorf("SNI route %d: forward host %q must be an IP address or a hostname", i+1, sr.ForwardHost)
 		}
 	}
 	for i, c := range st.AllowedCIDRs {

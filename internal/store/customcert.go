@@ -8,6 +8,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -158,6 +160,11 @@ func (s *Store) UpdateCustomCertPEM(id int64, c *CustomCert) error {
 	return nil
 }
 
+// selfSignedMaxDays bounds a self-signed certificate's validity: ten years,
+// well past what any client accepts for a public certificate, and enough for
+// an internal one that is never renewed.
+const selfSignedMaxDays = 3650
+
 // GenerateSelfSigned creates and stores a self-signed cert for the domains,
 // for internal / .lan hosts where ACME cannot reach.
 func (s *Store) GenerateSelfSigned(name string, domains []string, days int) (*CustomCert, error) {
@@ -166,6 +173,9 @@ func (s *Store) GenerateSelfSigned(name string, domains []string, days int) (*Cu
 	}
 	if days <= 0 {
 		days = 825
+	}
+	if days > selfSignedMaxDays {
+		return nil, fmt.Errorf("a self-signed certificate is valid for at most %d days, got %d", selfSignedMaxDays, days)
 	}
 	certPEM, keyPEM, err := selfSignedPEM(domains, days)
 	if err != nil {
@@ -178,21 +188,67 @@ func (s *Store) GenerateSelfSigned(name string, domains []string, days int) (*Cu
 	return c, nil
 }
 
+// pemFileMax is the most a certificate or key file may hold. A chain of a few
+// certificates is a few KiB; anything past this is not what was meant.
+const pemFileMax = 512 << 10
+
 // ImportCertFromFile reads a cert and key from disk paths and stores them.
 func (s *Store) ImportCertFromFile(name, certPath, keyPath string) (*CustomCert, error) {
-	certBytes, err := os.ReadFile(certPath)
+	certBytes, err := readPEMFile("certificate", certPath)
 	if err != nil {
-		return nil, fmt.Errorf("read cert: %w", err)
+		return nil, err
 	}
-	keyBytes, err := os.ReadFile(keyPath)
+	keyBytes, err := readPEMFile("key", keyPath)
 	if err != nil {
-		return nil, fmt.Errorf("read key: %w", err)
+		return nil, err
 	}
 	c := &CustomCert{Name: name, CertPEM: string(certBytes), KeyPEM: string(keyBytes)}
 	if err := s.CreateCustomCert(c); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// readPEMFile reads a certificate or key file an administrator named. The path
+// is taken as given and symbolic links are followed (certbot's live directory
+// is made of them), but what it names must be a regular file of at most
+// pemFileMax bytes: a FIFO would block the read for good, a device would never
+// end it, and quicgate runs as root. The errors say what went wrong and name
+// the path the administrator supplied, nothing else about the filesystem.
+func readPEMFile(what, path string) ([]byte, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("%s file path is required", what)
+	}
+	fi, err := os.Stat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, fmt.Errorf("%s file %s does not exist", what, path)
+	case errors.Is(err, fs.ErrPermission):
+		return nil, fmt.Errorf("%s file %s cannot be read (permission denied)", what, path)
+	case err != nil:
+		return nil, fmt.Errorf("%s file %s cannot be read", what, path)
+	case !fi.Mode().IsRegular():
+		return nil, fmt.Errorf("%s file %s is not a regular file", what, path)
+	case fi.Size() > pemFileMax:
+		return nil, fmt.Errorf("%s file %s is larger than %d KiB", what, path, pemFileMax>>10)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s file %s cannot be read", what, path)
+	}
+	defer f.Close()
+	// The checks above and the open are two steps: check the open file too.
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() || fi.Size() > pemFileMax {
+		return nil, fmt.Errorf("%s file %s is not a regular file of at most %d KiB", what, path, pemFileMax>>10)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, pemFileMax+1))
+	if err != nil {
+		return nil, fmt.Errorf("%s file %s cannot be read", what, path)
+	}
+	if len(data) > pemFileMax {
+		return nil, fmt.Errorf("%s file %s is larger than %d KiB", what, path, pemFileMax>>10)
+	}
+	return data, nil
 }
 
 func (s *Store) DeleteCustomCert(id int64) error {
