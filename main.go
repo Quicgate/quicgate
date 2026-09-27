@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -177,11 +178,28 @@ func main() {
 		go dockerProvider.Run(ctx)
 	}
 
+	// The admin port is bound here, before the engine starts, so a stream that
+	// is configured on it is the one that fails to listen, not the admin UI
+	// (which would otherwise die in a crash loop, taking every site with it).
+	// ReadTimeout bounds how long a request body may trickle in (the restore
+	// upload extends its own deadline); IdleTimeout ends keep-alive
+	// connections nobody uses. There is no WriteTimeout: a backup download or
+	// a log read may legitimately take longer than any fixed limit.
 	adminAddr := env("QG_ADMIN", ":81")
-	adminSrv := &http.Server{Addr: adminAddr, Handler: adm.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	adminLn, err := net.Listen("tcp", adminAddr)
+	if err != nil {
+		log.Fatalf("admin listener: %v", err)
+	}
+	adminSrv := &http.Server{
+		Addr:              adminAddr,
+		Handler:           adm.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		log.Printf("admin: ui listening on %s", adminAddr)
-		if err := adminSrv.ListenAndServe(); err != http.ErrServerClosed {
+		if err := adminSrv.Serve(adminLn); err != http.ErrServerClosed {
 			log.Fatalf("admin listener: %v", err)
 		}
 	}()
