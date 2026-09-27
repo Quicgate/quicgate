@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,19 @@ type PortMapping struct {
 }
 
 func (p PortMapping) key() string { return fmt.Sprintf("%s:%d", p.Proto, p.Port) }
+
+// parseMappingKey reads a key made by PortMapping.key back into its parts.
+func parseMappingKey(key string) (proto string, port uint16, err error) {
+	parts := strings.SplitN(key, ":", 2)
+	if len(parts) != 2 || parts[0] == "" {
+		return "", 0, fmt.Errorf("mapping key %q is not PROTO:port", key)
+	}
+	n, err := strconv.ParseUint(parts[1], 10, 16)
+	if err != nil || n == 0 {
+		return "", 0, fmt.Errorf("mapping key %q has no usable port", key)
+	}
+	return parts[0], uint16(n), nil
+}
 
 // UPnPManager keeps FRITZ!Box (IGD) port forwards in sync with the ports the
 // engine and its streams listen on. Mappings are leased and re-added on a
@@ -145,10 +159,15 @@ func (m *UPnPManager) Sync(desired []PortMapping) {
 		if _, ok := want[key]; ok {
 			continue
 		}
-		parts := strings.SplitN(key, ":", 2)
-		var port uint16
-		fmt.Sscanf(parts[1], "%d", &port)
-		if err := m.client.DeletePortMapping("", port, parts[0]); err != nil {
+		proto, port, err := parseMappingKey(key)
+		if err != nil {
+			// A key this manager made, so it cannot happen; if it did, the
+			// mapping would be left on the router and said so, not port 0 unmapped.
+			log.Printf("upnp: cannot unmap %s: %v", key, err)
+			delete(m.mapped, key)
+			continue
+		}
+		if err := m.client.DeletePortMapping("", port, proto); err != nil {
 			log.Printf("upnp: unmap %s: %v", key, err)
 		} else {
 			log.Printf("upnp: unmapped %s", key)
@@ -193,10 +212,13 @@ func (m *UPnPManager) Close() {
 		return
 	}
 	for key := range m.mapped {
-		parts := strings.SplitN(key, ":", 2)
-		var port uint16
-		fmt.Sscanf(parts[1], "%d", &port)
-		if err := m.client.DeletePortMapping("", port, parts[0]); err != nil {
+		proto, port, err := parseMappingKey(key)
+		if err != nil {
+			log.Printf("upnp: cannot clean up %s: %v", key, err)
+			delete(m.mapped, key)
+			continue
+		}
+		if err := m.client.DeletePortMapping("", port, proto); err != nil {
 			log.Printf("upnp: cleanup %s: %v", key, err)
 		}
 		delete(m.mapped, key)

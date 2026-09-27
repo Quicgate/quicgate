@@ -3,39 +3,62 @@ package engine
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"time"
 )
 
+// sniMaxRecords bounds the TLS records peekSNI reads for one ClientHello. A
+// ClientHello normally fits one record; a client with large key shares, or a
+// middlebox, may split it over a few. Beyond this the peer is not talking TLS
+// in any way worth waiting for.
+const sniMaxRecords = 4
+
 // peekSNI reads the TLS ClientHello from conn, extracts the SNI server name,
 // and returns it along with the raw bytes consumed so they can be re-sent to
-// the backend (passthrough). It never consumes more than the ClientHello.
+// the backend (passthrough). It reads whole records, as many as the ClientHello
+// spans, and never past the record that completes it. The name comes back as
+// the client sent it; callers normalise it for matching.
 func peekSNI(conn net.Conn) (string, *bytes.Buffer, error) {
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	defer conn.SetReadDeadline(time.Time{})
 
-	// TLS record header: type(1) version(2) length(2).
-	hdr := make([]byte, 5)
-	if _, err := io.ReadFull(conn, hdr); err != nil {
-		return "", nil, err
+	buf := &bytes.Buffer{} // every byte read, for the backend
+	var hs []byte          // the handshake message, joined across records
+	for rec := 0; rec < sniMaxRecords; rec++ {
+		// TLS record header: type(1) version(2) length(2).
+		hdr := make([]byte, 5)
+		if _, err := io.ReadFull(conn, hdr); err != nil {
+			return "", nil, err
+		}
+		if hdr[0] != 0x16 { // handshake record
+			return "", nil, errors.New("not a TLS handshake")
+		}
+		recLen := int(hdr[3])<<8 | int(hdr[4])
+		if recLen < 1 || recLen > 16384 {
+			return "", nil, errors.New("bad record length")
+		}
+		body := make([]byte, recLen)
+		if _, err := io.ReadFull(conn, body); err != nil {
+			return "", nil, err
+		}
+		buf.Write(hdr)
+		buf.Write(body)
+		hs = append(hs, body...)
+		if len(hs) < 4 {
+			continue // not even the handshake header yet
+		}
+		// Handshake header: type(1) length(3).
+		if hs[0] != 0x01 {
+			return "", nil, errors.New("first handshake message is not a ClientHello")
+		}
+		msgLen := int(hs[1])<<16 | int(hs[2])<<8 | int(hs[3])
+		if len(hs) >= 4+msgLen {
+			return parseSNI(hs[:4+msgLen]), buf, nil
+		}
 	}
-	if hdr[0] != 0x16 { // handshake record
-		return "", nil, errors.New("not a TLS handshake")
-	}
-	recLen := int(hdr[3])<<8 | int(hdr[4])
-	if recLen < 4 || recLen > 16384 {
-		return "", nil, errors.New("bad record length")
-	}
-	body := make([]byte, recLen)
-	if _, err := io.ReadFull(conn, body); err != nil {
-		return "", nil, err
-	}
-	buf := &bytes.Buffer{}
-	buf.Write(hdr)
-	buf.Write(body)
-	sni := parseSNI(body)
-	return sni, buf, nil
+	return "", nil, fmt.Errorf("ClientHello spans more than %d records", sniMaxRecords)
 }
 
 // parseSNI walks a ClientHello handshake body and returns the server_name.

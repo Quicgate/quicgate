@@ -10,7 +10,6 @@ import (
 	"net/netip"
 	"sort"
 	"strconv"
-	"sync"
 	"time"
 
 	"quicgate/internal/store"
@@ -278,7 +277,6 @@ func withVia(r *http.Request, via int64) *http.Request {
 // a connection to 192.168.1.10 on the local network to a request meant for
 // 192.168.1.10 behind a site, or the other way round (S46).
 type viaTransports struct {
-	mu    sync.Mutex
 	byVia map[int64]*http.Transport
 }
 

@@ -4,9 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
+	"errors"
+	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,7 +21,6 @@ import (
 type healthChecker struct {
 	mu      sync.RWMutex
 	targets map[string]*targetHealth // key: upstreamKey
-	client  *http.Client
 	// dial connects to a target, through its WireGuard site when it has one.
 	// Set by the engine; nil in tests that only probe the host network.
 	dial func(via int64, network, addr string, timeout time.Duration) (net.Conn, error)
@@ -27,6 +30,10 @@ type healthChecker struct {
 type healthTarget struct {
 	scheme, hostport string
 	via              int64
+	// tlsSkipVerify and tlsServerName are how the host's own traffic verifies
+	// this backend's certificate; the probe verifies it the same way.
+	tlsSkipVerify bool
+	tlsServerName string
 }
 
 type targetHealth struct {
@@ -36,22 +43,31 @@ type targetHealth struct {
 	scheme   string
 	hostport string
 	via      int64
+	// client makes the HTTP probe, built for this target's TLS settings.
+	client        *http.Client
+	tlsSkipVerify bool
+	tlsServerName string
 }
 
 func newHealthChecker() *healthChecker {
-	h := &healthChecker{
-		targets: map[string]*targetHealth{},
-		client: &http.Client{
-			Timeout: 5 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
-				DisableKeepAlives: true,
-			},
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
-	}
+	h := &healthChecker{targets: map[string]*targetHealth{}}
 	go h.loop()
 	return h
+}
+
+// probeClient builds the HTTP client of one target's probe. Certificates are
+// verified unless the host that uses the backend skips verification for its
+// own traffic: a probe that believed any certificate would let whoever sits in
+// the path keep a dead or foreign backend "healthy".
+func probeClient(skipVerify bool, serverName string) *http.Client {
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig:   &tls.Config{InsecureSkipVerify: skipVerify, ServerName: serverName},
+			DisableKeepAlives: true,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 // setTargets reconciles the tracked set; new targets start optimistically up.
@@ -64,8 +80,14 @@ func (h *healthChecker) setTargets(want map[string]healthTarget) {
 		}
 	}
 	for key, v := range want {
-		if _, ok := h.targets[key]; !ok {
-			h.targets[key] = &targetHealth{up: true, scheme: v.scheme, hostport: v.hostport, via: v.via}
+		t, ok := h.targets[key]
+		if !ok {
+			t = &targetHealth{up: true, scheme: v.scheme, hostport: v.hostport, via: v.via}
+			h.targets[key] = t
+		}
+		if t.client == nil || t.tlsSkipVerify != v.tlsSkipVerify || t.tlsServerName != v.tlsServerName {
+			t.tlsSkipVerify, t.tlsServerName = v.tlsSkipVerify, v.tlsServerName
+			t.client = probeClient(v.tlsSkipVerify, v.tlsServerName)
 		}
 	}
 }
@@ -95,17 +117,33 @@ func (h *healthChecker) up(key string) bool {
 	return !ok || t.up // unknown target: assume up
 }
 
+// markDown records that a request could not reach a target, so the balancer
+// avoids it from now until the periodic probe finds it answering again. A
+// target the checker does not track is left alone.
+func (h *healthChecker) markDown(key string, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	t, ok := h.targets[key]
+	if !ok || !t.up {
+		return
+	}
+	t.up, t.lastErr, t.checked = false, err.Error(), time.Now()
+	log.Printf("health: %s marked down after a failed connection: %v", key, err)
+}
+
 func (h *healthChecker) loop() {
 	for {
 		time.Sleep(15 * time.Second)
 		h.mu.RLock()
 		snapshot := make([]*targetHealth, 0, len(h.targets))
+		clients := make([]*http.Client, 0, len(h.targets))
 		for _, t := range h.targets {
 			snapshot = append(snapshot, t)
+			clients = append(clients, t.client)
 		}
 		h.mu.RUnlock()
-		for _, t := range snapshot {
-			up, errStr := h.probe(t.scheme, t.hostport, t.via)
+		for i, t := range snapshot {
+			up, errStr := h.probe(t.scheme, t.hostport, t.via, clients[i])
 			h.mu.Lock()
 			t.up, t.lastErr, t.checked = up, errStr, time.Now()
 			h.mu.Unlock()
@@ -114,8 +152,10 @@ func (h *healthChecker) loop() {
 }
 
 // probe does a cheap liveness check: TCP connect, then an HTTP HEAD/GET that
-// counts any response (even 4xx/5xx) as "the backend is alive".
-func (h *healthChecker) probe(scheme, hostport string, via int64) (bool, string) {
+// counts any response (even 4xx/5xx) as "the backend is alive". A backend
+// whose certificate does not verify the way the host expects is down: the
+// proxy would refuse it too.
+func (h *healthChecker) probe(scheme, hostport string, via int64, client *http.Client) (bool, string) {
 	dial := h.dial
 	if dial == nil {
 		if via != 0 {
@@ -139,13 +179,27 @@ func (h *healthChecker) probe(scheme, hostport string, via int64) (bool, string)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+hostport+"/", nil)
-	resp, err := h.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
+		if isCertError(err) {
+			return false, err.Error()
+		}
 		// TCP was fine; treat a non-HTTP backend as alive rather than flap.
 		return true, ""
 	}
 	resp.Body.Close()
 	return true, ""
+}
+
+// isCertError reports whether a probe failed on the backend's certificate.
+func isCertError(err error) bool {
+	var (
+		verify   *tls.CertificateVerificationError
+		unknown  x509.UnknownAuthorityError
+		hostname x509.HostnameError
+		invalid  x509.CertificateInvalidError
+	)
+	return errors.As(err, &verify) || errors.As(err, &unknown) || errors.As(err, &hostname) || errors.As(err, &invalid)
 }
 
 // balancer round-robins over a fixed target list, preferring healthy ones.
@@ -156,10 +210,11 @@ type balancer struct {
 }
 
 type balTarget struct {
-	key      string // scheme://host:port
-	url      string
-	hostport string
-	id       string // opaque affinity id (short hash of key) for sticky sessions
+	key string // scheme://host:port plus the site: the health checker's key
+	url string
+	id  string   // opaque affinity id (short hash of key) for sticky sessions
+	via int64    // the WireGuard site the backend is reached through; 0 is the host network
+	u   *url.URL // the backend as the proxy's target
 }
 
 // targetID is the opaque cookie value identifying a backend for sticky
@@ -170,12 +225,12 @@ func targetID(key string) string {
 }
 
 // stickyPick honors the affinity cookie when it maps to a healthy backend,
-// otherwise round-robins to a healthy one. Returns the chosen url and its id.
-func (b *balancer) stickyPick(cookieVal string) (string, string) {
+// otherwise round-robins to a healthy one.
+func (b *balancer) stickyPick(cookieVal string) balTarget {
 	if cookieVal != "" {
 		for _, t := range b.targets {
 			if t.id == cookieVal && b.health.up(t.key) {
-				return t.url, t.id
+				return t
 			}
 		}
 	}
@@ -184,26 +239,25 @@ func (b *balancer) stickyPick(cookieVal string) (string, string) {
 	for i := 0; i < n; i++ {
 		t := b.targets[(int(start)+i)%n]
 		if b.health.up(t.key) {
-			return t.url, t.id
+			return t
 		}
 	}
-	t := b.targets[int(start)%n]
-	return t.url, t.id
+	return b.targets[int(start)%n]
 }
 
-func (b *balancer) pick() string {
+func (b *balancer) pick() balTarget {
 	n := len(b.targets)
 	if n == 1 {
-		return b.targets[0].url
+		return b.targets[0]
 	}
 	start := b.next.Add(1)
 	// First pass: first healthy target in round-robin order.
 	for i := 0; i < n; i++ {
 		t := b.targets[(int(start)+i)%n]
 		if b.health.up(t.key) {
-			return t.url
+			return t
 		}
 	}
 	// All down: still try one so a transient full-outage recovers.
-	return b.targets[int(start)%n].url
+	return b.targets[int(start)%n]
 }
