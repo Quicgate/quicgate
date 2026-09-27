@@ -475,14 +475,17 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 		}
 		if len(c.users) > 0 && authOK {
 			markIdentified(r)
-		}
-		// Strip the credential only when this list actually consumed it for
-		// basic-auth and the user opted not to pass it on (NPM's "Pass Auth
-		// to Host"). A pure IP/CIDR list must never eat the header: backends
-		// like Vaultwarden and gitea authenticate with Authorization: Bearer,
-		// and deleting it here silently breaks their logins.
-		if !c.passAuth && len(c.users) > 0 {
-			r.Header.Del("Authorization")
+			// Strip the credential only when this list consumed it: a Basic
+			// credential that named one of its users, on a list that does not
+			// pass it on (NPM's "Pass Auth to Host"). A request admitted by its
+			// address keeps what it carries, whatever the scheme: backends like
+			// Vaultwarden and gitea authenticate with Authorization: Bearer,
+			// and a "LAN or password" list that ate the header broke their
+			// logins for every LAN client. A pure address list never checks a
+			// credential and never strips one either.
+			if !c.passAuth {
+				r.Header.Del("Authorization")
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
