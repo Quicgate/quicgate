@@ -59,8 +59,11 @@ quicgate is reviewed from outside when somebody is willing to, and the results a
   its own address), twenty medium, the rest low or informational; none an unauthenticated remote
   attack. Twelve functional defects were found on the way, among them a TLS-terminating stream
   listener that restarted on every reload and a portal button that could never work. Everything is
-  fixed in the Unreleased section of the changelog, each with a regression test, and the fixes have
-  not been reviewed from outside yet.
+  fixed in 1.18.0, each with a regression test. A review of the fixes before the release changed
+  three of them: auto-ban counts refusals by address again (only what a browser was made to send
+  for another site's page is left out), wrong passwords no longer lock an account (only wrong
+  second-factor codes do, per account, and failures per network), and TCP streams keep the
+  kernel's zero-copy path. The fixes have not been reviewed from outside yet.
 
 A review is not a guarantee. If you find something, the section above says how to tell us, and we
 would rather hear it bluntly than not at all.

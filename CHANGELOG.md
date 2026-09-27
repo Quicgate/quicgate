@@ -4,7 +4,7 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.18.0] - 2026-09-27
 
 Fixes from the September 2026 security, technology and functional scan (the record is in
 SECURITY.md). Every change below carries a regression test that fails without it.
