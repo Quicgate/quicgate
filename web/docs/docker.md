@@ -62,3 +62,7 @@ A container on `docker92` is then reached at `192.168.1.92:<published port>`. Re
 ## Socket security
 
 The provider is read-only, but the socket still grants broad access to the daemon. Mount it `:ro`, and for least privilege put a read-only socket proxy (e.g. `tecnativa/docker-socket-proxy` with only `CONTAINERS=1` and `EVENTS=1`) in front of it and point `QG_DOCKER_SOCKET` at the proxy.
+
+## Trust boundary
+
+Labels are configuration, and whoever can set labels on a watched daemon configures quicgate. Any container that opts in can publish itself under **every name that no manual host claims**, with a certificate; can **attach any existing access list by name**, including a list with *Pass Authorization header* on, which then forwards your users' credentials to that container; and can bind **any free port** as a stream. Manual hosts always win a name (exact names, names under a manual wildcard, and the names of a manual host that is switched off), but the rest is up to the containers on that daemon. Put containers you do not trust on a daemon quicgate does not watch, or behind a socket proxy per trust level, and treat a remote `tcp://` endpoint as what it is: whoever answers on that port defines routes. Use an `https://` endpoint with a CA and a client certificate for a daemon on another machine.

@@ -7,11 +7,12 @@ quicgate has three gates you can put in front of a proxy host, combinable and â€
 An access list is an ordered set of rules plus optional basic-auth users, reusable across hosts and streams.
 
 - **Rules**: allow/deny by IP/CIDR, by hostname (dynamic DNS, re-resolved periodically), or by GeoIP country. First match wins; no match denies. A rule can be scoped to specific HTTP verbs â€” e.g. allow `GET` from everywhere but gate `POST`/`PUT`.
-- **Users**: bcrypt basic auth. **Satisfy any** = IP rule *or* login passes; **satisfy all** = both must pass.
+- **Users**: bcrypt basic auth. **Satisfy any** = IP rule *or* login passes; **satisfy all** = both must pass. Under *satisfy any*, valid credentials admit a client that an explicit `deny` address rule refuses (the NPM semantics); use *satisfy all* when a denied network must stay out whatever it knows.
 - **Pass Authorization header**: off by default when the list has users (quicgate consumes the header for basic auth). A pure IP list never strips it, so bearer-token APIs behind an IP allowlist keep working.
 - CORS preflights (`OPTIONS` with `Access-Control-Request-Method`) skip the basic-auth check, because a preflight carries no credentials, but never the address rules: those are evaluated for the method the preflight announces, so a preflight gets through exactly where the real request could. With *satisfy any* and users, the real request may log in from anywhere, so its preflight passes from anywhere too.
 - **A failing rule never widens access.** If a hostname rule stops resolving, it keeps its last resolved addresses for up to 24 hours; after that (or with no earlier answer) an unresolved *allow* matches nobody and an unresolved *deny* denies everyone who reaches it. Country rules behave the same way while the GeoIP database is not loaded. Only a list with no IP, hostname or country rule at all is unrestricted by address. Affected routes show a warning in the effective-config view.
 - **In-use lists cannot be deleted.** A list that a host, a path rule or a stream still uses is refused on delete; detach it first. A reference that is missing anyway (an old row, a restored backup) closes the host, path or stream instead of opening it.
+- **Unknown countries.** A client whose country the GeoIP database does not know (a private address, an address missing from the database) matches no country rule at all: it passes a `deny`-country list and is refused by an `allow`-country list. Without a database, country rules behave as if every client were unknown.
 
 ## Built-in OIDC SSO
 
