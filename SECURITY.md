@@ -52,5 +52,15 @@ quicgate is reviewed from outside when somebody is willing to, and the results a
   in SPEC-wireguard.md, section 16, round 3. The fixes have not been reviewed from outside yet,
   which is why LAN access is still marked experimental.
 
+- **27 September 2026, whole product with a functional check (on 1.17.5):** a code review of
+  every package, automated scanning, live probing, and a claim-by-claim check of the advertised
+  features against real ACME, OpenID Connect, Docker and WireGuard test doubles. One finding rated
+  high (behind a proxy that sends `X-Forwarded-For` as separate header lines, a client could choose
+  its own address), twenty medium, the rest low or informational; none an unauthenticated remote
+  attack. Twelve functional defects were found on the way, among them a TLS-terminating stream
+  listener that restarted on every reload and a portal button that could never work. Everything is
+  fixed in the Unreleased section of the changelog, each with a regression test, and the fixes have
+  not been reviewed from outside yet.
+
 A review is not a guarantee. If you find something, the section above says how to tell us, and we
 would rather hear it bluntly than not at all.
