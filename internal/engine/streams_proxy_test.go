@@ -275,8 +275,10 @@ func TestUDPSessionCap(t *testing.T) {
 		n, err := c.Read(buf)
 		return err == nil && string(buf[:n]) == "ping"
 	}
-	if !roundTrip() || !roundTrip() {
-		t.Fatal("the first two UDP sources should be served")
+	for i := 0; i < 2; i++ {
+		if !roundTrip() {
+			t.Fatalf("UDP source %d should be served (the cap is two)", i+1)
+		}
 	}
 	if roundTrip() {
 		t.Fatal("a third UDP source was served past a cap of 2 sessions")
