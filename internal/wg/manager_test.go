@@ -505,6 +505,49 @@ func TestValidateSite(t *testing.T) {
 	}
 }
 
+// A site's endpoint must be somewhere a peer can be: not loopback, not the
+// unspecified, a multicast, link-local, broadcast or reserved address, and
+// not one of quicgate's own listeners (L-38). A name, or an address of this
+// machine on another port, passes.
+func TestValidateEndpoint(t *testing.T) {
+	own := []netip.Addr{netip.MustParseAddr("192.168.178.54"), netip.MustParseAddr("::ffff:203.0.113.9")}
+	ports := []uint16{80, 443, 51820}
+	for _, tc := range []struct {
+		endpoint string
+		ok       bool
+	}{
+		{"vpn.example.com:51820", true},
+		{"203.0.113.7:51820", true},
+		{"[2001:db8::7]:51820", true},
+		{"192.168.178.54:22", true}, // this machine, another port: a WireGuard router next to quicgate
+		{"192.168.178.54:51820", false},
+		{"[::ffff:192.168.178.54]:443", false},
+		{"203.0.113.9:80", false}, // an own address listed in its IPv4-mapped form
+		{"127.0.0.1:51820", false},
+		{"[::1]:51820", false},
+		{"0.0.0.0:51820", false},
+		{"[::]:51820", false},
+		{"224.0.0.1:51820", false},
+		{"[ff02::1]:51820", false},
+		{"169.254.169.254:80", false},
+		{"[fe80::1]:51820", false},
+		{"255.255.255.255:51820", false},
+		{"240.0.0.1:51820", false},
+		{"0.1.2.3:51820", false},
+		{"no-port", false},
+		{":51820", false},
+		{"host:", false},
+		{"host:0", false},
+		{"host:70000", false},
+		{"host:abc", false},
+	} {
+		err := ValidateEndpoint(tc.endpoint, own, ports)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: %v, want ok=%v", tc.endpoint, err, tc.ok)
+		}
+	}
+}
+
 // An endpoint name that does not resolve is that site's problem alone: the
 // endpoint keeps running, the other sites keep working, the site is listed
 // with a warning, and it gets its endpoint once the name resolves.

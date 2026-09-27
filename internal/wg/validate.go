@@ -3,7 +3,9 @@ package wg
 import (
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 )
 
@@ -52,6 +54,54 @@ func CanonicalKey(b64 string) (string, error) {
 
 // TunnelAddress returns quicgate's own address: the first host of the prefix.
 func TunnelAddress(tunnel netip.Prefix) netip.Addr { return tunnel.Masked().Addr().Next() }
+
+// ValidateEndpoint checks where quicgate would send a site's handshakes:
+// "host:port" with a port, and, when the host is an address, one that a peer
+// on another network can have. Loopback, unspecified, multicast, link-local,
+// broadcast and reserved addresses cannot be a site; a hostname is accepted
+// and resolved later. own are this machine's addresses and listenerPorts the
+// ports quicgate itself listens on: an endpoint that names one of quicgate's
+// own listeners would make quicgate shake hands with itself, or hand a site's
+// traffic to whatever the listener is (L-38). An own address with another
+// port is allowed: a WireGuard router next to quicgate is a site like any.
+func ValidateEndpoint(endpoint string, own []netip.Addr, listenerPorts []uint16) error {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(endpoint))
+	if err != nil || host == "" || port == "" {
+		return fmt.Errorf("the endpoint must look like host:port")
+	}
+	p, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || p == 0 {
+		return fmt.Errorf("endpoint %q: %q is not a port", endpoint, port)
+	}
+	a, err := netip.ParseAddr(host)
+	if err != nil {
+		return nil // a name: it is resolved when the site is configured
+	}
+	a = a.Unmap().WithZone("")
+	switch {
+	case a.IsLoopback():
+		return fmt.Errorf("endpoint %s is a loopback address: a site is on another machine", a)
+	case a.IsUnspecified():
+		return fmt.Errorf("endpoint %s is the unspecified address", a)
+	case a.IsMulticast(), a.IsInterfaceLocalMulticast(), a.IsLinkLocalMulticast():
+		return fmt.Errorf("endpoint %s is a multicast address", a)
+	case a.IsLinkLocalUnicast():
+		return fmt.Errorf("endpoint %s is a link-local address", a)
+	case a.Is4() && (v4This.Contains(a) || v4Reserved.Contains(a)):
+		return fmt.Errorf("endpoint %s is a reserved address", a)
+	}
+	for _, o := range own {
+		if o.Unmap().WithZone("") != a {
+			continue
+		}
+		for _, lp := range listenerPorts {
+			if uint64(lp) == p {
+				return fmt.Errorf("endpoint %s is one of quicgate's own listeners", endpoint)
+			}
+		}
+	}
+	return nil
+}
 
 // ValidateSite checks one site against the tunnel network, the server's own
 // public key, the other sites and the machine's own networks (S3, S4).
