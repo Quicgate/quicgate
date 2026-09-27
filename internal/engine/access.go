@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log"
@@ -42,8 +43,12 @@ type compiledAccess struct {
 	restricted bool
 	// denyAll closes the list entirely. It stands in for a reference to an
 	// access list that no longer exists.
-	denyAll  bool
-	users    map[string]string // username -> bcrypt hash
+	denyAll bool
+	users   map[string]string // username -> bcrypt hash
+	// decoy is a real bcrypt hash, at the cost of the stored hashes, that the
+	// password of an unknown user is compared against, so that refusal takes
+	// as long as a wrong password for a known user (see dummyBcryptHash).
+	decoy    []byte
 	geo      *geoDB
 	ban      *banManager
 	warnings []string // problems found while compiling, surfaced to the operator
@@ -191,7 +196,61 @@ func compileAccess(a store.AccessList, geo *geoDB, ban *banManager, dns *dnsCach
 	for _, u := range a.Users {
 		c.users[u.Username] = u.Hash
 	}
+	if len(c.users) > 0 {
+		c.decoy = dummyBcryptHash(bcryptCostOf(c.users))
+	}
 	return c
+}
+
+// bcryptCostOf is the highest cost among the stored hashes that parse, so the
+// decoy comparison costs what a real one costs on this list, or the cost the
+// store hashes with when none parses. It is capped: a hash claiming cost 31
+// would take hours to compare anyway, and must not make a reload take as long.
+func bcryptCostOf(users map[string]string) int {
+	cost := 0
+	for _, h := range users {
+		if c, err := bcrypt.Cost([]byte(h)); err == nil && c > cost {
+			cost = c
+		}
+	}
+	switch {
+	case cost < bcrypt.MinCost:
+		return bcrypt.DefaultCost
+	case cost > maxDecoyCost:
+		return maxDecoyCost
+	}
+	return cost
+}
+
+const maxDecoyCost = bcrypt.DefaultCost + 4
+
+var (
+	decoyMu     sync.Mutex
+	decoyHashes = map[int][]byte{}
+)
+
+// dummyBcryptHash returns a bcrypt hash at the given cost of a secret nobody
+// holds, made once per process and cost. Comparing an unknown user's password
+// against it takes as long as comparing a known user's, so the response time
+// does not tell a probe which usernames exist. Its outcome is never looked at,
+// so what the secret is does not matter; only the cost does. (The 41-byte
+// stand-in used before was refused by bcrypt in microseconds, ErrHashTooShort,
+// against some 70 ms for a real comparison.)
+func dummyBcryptHash(cost int) []byte {
+	decoyMu.Lock()
+	defer decoyMu.Unlock()
+	if h, ok := decoyHashes[cost]; ok {
+		return h
+	}
+	secret := make([]byte, 32)
+	_, _ = rand.Read(secret) // never fails on this Go; and any value serves
+	h, err := bcrypt.GenerateFromPassword(secret, cost)
+	if err != nil {
+		// Only an out-of-range cost fails, which bcryptCostOf rules out.
+		h, _ = bcrypt.GenerateFromPassword(secret, bcrypt.DefaultCost)
+	}
+	decoyHashes[cost] = h
+	return h
 }
 
 // ipAllowed evaluates the ordered rules for the given method; first match
@@ -322,8 +381,14 @@ func (c *compiledAccess) authOK(r *http.Request) bool {
 	}
 	hash, exists := c.users[user]
 	if !exists {
-		// Constant-ish cost for unknown users so probing is not cheap.
-		_ = bcrypt.CompareHashAndPassword([]byte("$2a$10$invalidinvalidinvalidinvalidinvali"), []byte(pass))
+		// An unknown user costs a real comparison, like a wrong password for
+		// a known one, so the response time does not reveal which usernames
+		// exist. The result is irrelevant: the user is unknown.
+		decoy := c.decoy
+		if decoy == nil { // a list compiled without compileAccess
+			decoy = dummyBcryptHash(bcrypt.DefaultCost)
+		}
+		_ = bcrypt.CompareHashAndPassword(decoy, []byte(pass))
 		return false
 	}
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pass)) == nil
