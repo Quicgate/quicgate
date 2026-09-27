@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +23,7 @@ import (
 	"github.com/caddyserver/certmagic"
 	"github.com/libdns/transip"
 	"github.com/mholt/acmez/v3"
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
 	"quicgate/internal/store"
@@ -131,12 +134,14 @@ func (t *routingTable) lookup(hostport string) *route {
 
 // Engine owns the routing table and all data-plane listeners.
 type Engine struct {
-	cfg     Config
-	store   *store.Store
-	table   atomic.Pointer[routingTable]
-	magic   *certmagic.Config
-	acme    *certmagic.ACMEIssuer
-	h3      *http3.Server
+	cfg   Config
+	store *store.Store
+	table atomic.Pointer[routingTable]
+	magic *certmagic.Config
+	acme  *certmagic.ACMEIssuer
+	// h3 is the HTTP/3 server, nil when HTTP/3 is off. Run publishes it before
+	// the TLS listener serves a request, and requests read it from here.
+	h3      atomic.Pointer[http3.Server]
 	streams *StreamManager
 	upnp    *UPnPManager
 
@@ -177,6 +182,7 @@ type Engine struct {
 	wgSeen        map[string]wg.PeerStatus       // the peers' byte totals at the last look, for the traffic overview
 	publicReqs    publicRequests                 // what is being served on the public listeners, per host
 	realIP        atomic.Pointer[realIPConfig]   // compiled trusted-proxy / real-client-IP config
+	unmatched     atomic.Pointer[defaultSite]    // what a request for an unknown host gets, compiled at reload
 	oidcProviders sync.Map                       // issuer -> *discoveredProvider (lazy IdP discovery)
 	oidcSecretMu  sync.Mutex
 	oidcSecretKey []byte    // HMAC key for SSO session cookies, persisted in settings
@@ -322,6 +328,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	defer e.reloadMu.Unlock()
 	e.applyACMESettings()
 	e.buildRealIP()
+	e.compileDefaultSite()
 	banCfg := e.banConfig()
 	e.banCfg.Store(&banCfg)
 	e.ban.liftExempt()
@@ -375,8 +382,30 @@ func (e *Engine) Reload(ctx context.Context) error {
 		}
 		r := e.buildRoute(h, acl, access, oidcProv)
 		r.warnings = e.routeWarnings(h, acl, access)
+		// configured reports whether a database host has name d: the same
+		// name, or a wildcard that covers it (lookup prefers an exact name, so
+		// a container's api.example.com would otherwise take that traffic from
+		// a manual *.example.com). Disabled hosts count: a configured name is
+		// configured whether or not it is served right now.
+		configured := func(d string) bool {
+			parent := ""
+			if i := strings.IndexByte(d, '.'); i > 0 && !strings.HasPrefix(d, "*.") {
+				parent = "*." + d[i+1:]
+			}
+			for _, m := range hosts {
+				for _, md := range m.Domains {
+					if md == d || (parent != "" && md == parent) {
+						return true
+					}
+				}
+			}
+			return false
+		}
 		placed := false
 		for _, d := range h.Domains {
+			if fromDocker && configured(d) {
+				continue
+			}
 			if strings.HasPrefix(d, "*.") {
 				key := d[2:]
 				if fromDocker {
@@ -415,6 +444,31 @@ func (e *Engine) Reload(ctx context.Context) error {
 	if dh := e.dockerHosts.Load(); dh != nil {
 		for _, h := range *dh {
 			place(h, true)
+		}
+	}
+	// A probe verifies a backend's certificate the way the host's own traffic
+	// does: against the host's upstream SNI or the address, and not at all
+	// only when the host skips verification itself.
+	probeTLS := func(h store.Host) {
+		if !h.Enabled || (!h.Options.SkipTLSVerify && h.Options.UpstreamSNI == "") {
+			return
+		}
+		for _, u := range append([]store.Upstream{h.Upstream}, h.Upstreams...) {
+			if ht, ok := healthTargets[upstreamKey(u)]; ok {
+				ht.tlsSkipVerify = ht.tlsSkipVerify || h.Options.SkipTLSVerify
+				if ht.tlsServerName == "" {
+					ht.tlsServerName = h.Options.UpstreamSNI
+				}
+				healthTargets[upstreamKey(u)] = ht
+			}
+		}
+	}
+	for _, h := range hosts {
+		probeTLS(h)
+	}
+	if dh := e.dockerHosts.Load(); dh != nil {
+		for _, h := range *dh {
+			probeTLS(h)
 		}
 	}
 	old := e.table.Swap(t)
@@ -688,26 +742,9 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 		// applies, a host-level OIDC gate would only get in its way.
 		return &route{host: h, proxy: wrapCommon(h.Domains, e.portalHandler(h), o, acl, acls, nil, newGate)}
 	case "static":
-		fs := http.FileServer(http.Dir(h.StaticRoot))
-		return &route{host: h, proxy: wrapCommon(h.Domains, fs, o, acl, acls, sso, newGate)}
+		files := http.FileServer(staticFS{root: http.Dir(h.StaticRoot)})
+		return &route{host: h, proxy: wrapCommon(h.Domains, files, o, acl, acls, sso, newGate)}
 	}
-
-	// Build the balancer target list: primary plus any pool members.
-	bal := &balancer{health: e.health}
-	pool := append([]store.Upstream{h.Upstream}, h.Upstreams...)
-	// viaOf gives the site of a backend by its URL. Within a host an address
-	// is only ever reached one way (the store refuses anything else), so the
-	// URL is enough to tell.
-	viaOf := map[string]int64{}
-	for _, u := range pool {
-		hp := hostPort(u.Host, u.Port)
-		bal.targets = append(bal.targets, balTarget{
-			key: upstreamKey(u), url: u.Scheme + "://" + hp, hostport: hp,
-			id: targetID(upstreamKey(u)),
-		})
-		viaOf[u.Scheme+"://"+hp] = u.Via
-	}
-	target := &url.URL{Scheme: h.Upstream.Scheme, Host: hostPort(h.Upstream.Host, h.Upstream.Port)}
 
 	transport := e.newHostTransports(h)
 
@@ -718,66 +755,17 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 		flush = -1
 	}
 
-	rewrite := compileRewrite(o.PathRewrite)
-	proxy := &httputil.ReverseProxy{
-		Transport:     transport,
-		FlushInterval: flush,
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			// Pick a (healthy) backend per request for load balancing.
-			pick := target
-			if len(bal.targets) > 1 {
-				if o.StickySessions {
-					cookieVal := ""
-					if ck, err := pr.In.Cookie(stickyCookieName); err == nil {
-						cookieVal = ck.Value
-					}
-					u, id := bal.stickyPick(cookieVal)
-					if pu, err := url.Parse(u); err == nil {
-						pick = pu
-					}
-					pr.Out = pr.Out.WithContext(context.WithValue(pr.Out.Context(), stickyKey, stickyInfo{id: id, had: cookieVal == id}))
-				} else if u, err := url.Parse(bal.pick()); err == nil {
-					pick = u
-				}
-			}
-			pr.Out = withVia(pr.Out, viaOf[pick.Scheme+"://"+pick.Host])
-			pr.SetURL(pick)
-			pr.SetXForwarded()
-			setRealIP(pr)
-			normalizeBodyless(pr)
-			if rewrite != nil {
-				pr.Out.URL.Path = rewrite.apply(pr.Out.URL.Path)
-			}
-			// Preserve the client's Host header by default (like Traefik/nginx
-			// proxy_set_header Host $host) so host-validating backends work.
-			if o.HostOverride != "" {
-				pr.Out.Host = o.HostOverride
-			} else {
-				pr.Out.Host = pr.In.Host
-			}
-			applyHeaderRules(pr.Out.Header, o.RequestHeaders, pr.In)
-		},
-		ModifyResponse: func(resp *http.Response) error {
-			if o.StickySessions && len(bal.targets) > 1 {
-				if info, ok := resp.Request.Context().Value(stickyKey).(stickyInfo); ok && info.id != "" && !info.had {
-					ck := &http.Cookie{Name: stickyCookieName, Value: info.id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode}
-					resp.Header.Add("Set-Cookie", ck.String())
-				}
-			}
-			if o.BlockIndexing {
-				resp.Header.Set("X-Robots-Tag", "noindex, nofollow, nosnippet, noarchive")
-			}
-			applyHeaderRules(resp.Header, o.ResponseHeaders, nil)
-			return nil
-		},
-		ErrorHandler: badGatewayHandler(target, o.BadGatewayHTML),
-	}
-
-	var handler http.Handler = proxy
+	// The default backends: the primary upstream plus any pool members.
+	var handler http.Handler = e.newUpstreamProxy(o, transport, flush,
+		newBalancer(e.health, append([]store.Upstream{h.Upstream}, h.Upstreams...)), compileRewrite(o.PathRewrite))
 
 	// Custom locations: route matching path prefixes to their own upstreams.
+	// A location is a path decision, so the same ambiguous paths that a path
+	// rule refuses (empty segments, backslashes, `;`, double encoding) are
+	// refused here: the upstream chosen by a text compare must be the one the
+	// path means everywhere.
 	if len(h.Locations) > 0 {
-		handler = e.locationDispatcher(h, handler, transport)
+		handler = rejectAmbiguousPaths(e.locationDispatcher(h, handler, transport, flush))
 	}
 
 	// Response cache sits inside gzip so it stores uncompressed bodies and each
@@ -848,8 +836,9 @@ const stickyKey stickyCtxKey = 0
 const stickyCookieName = "qg_affinity"
 
 type stickyInfo struct {
-	id  string
-	had bool
+	id     string
+	had    bool
+	secure bool // the client's connection was encrypted, so the cookie is Secure
 }
 
 // maintenanceHandler serves a 503 "under maintenance" page instead of proxying.
@@ -918,11 +907,121 @@ func wrapCommon(domains []string, handler http.Handler, o store.Options, acl *co
 	})
 }
 
+// newBalancer builds the target set of one group of backends: a host's primary
+// upstream with its pool, or a custom location's single upstream.
+func newBalancer(health *healthChecker, pool []store.Upstream) *balancer {
+	bal := &balancer{health: health}
+	for _, u := range pool {
+		hp := hostPort(u.Host, u.Port)
+		bal.targets = append(bal.targets, balTarget{
+			key: upstreamKey(u), url: u.Scheme + "://" + hp, id: targetID(upstreamKey(u)),
+			via: u.Via, u: &url.URL{Scheme: u.Scheme, Host: hp},
+		})
+	}
+	return bal
+}
+
+// pickedTargetKey carries the health key of the backend a request was sent to
+// from Rewrite to the error handler, which marks the backend down when it
+// could not be reached.
+type pickedTargetKey struct{}
+
+// newUpstreamProxy builds the reverse proxy for one group of backends of a
+// host: the primary upstream with its pool, or a custom location's upstream.
+// Everything the host's options say about requests and responses (the Host
+// header, header rules, X-Robots-Tag, sticky sessions, buffering, the error
+// page) applies to every group alike, so a location is no way around them.
+func (e *Engine) newUpstreamProxy(o store.Options, transport http.RoundTripper, flush time.Duration, bal *balancer, rewrite *compiledRewrite) *httputil.ReverseProxy {
+	sticky := o.StickySessions && len(bal.targets) > 1
+	return &httputil.ReverseProxy{
+		Transport:     transport,
+		FlushInterval: flush,
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			// Pick a (healthy) backend per request for load balancing.
+			pick := bal.targets[0]
+			if len(bal.targets) > 1 {
+				if sticky {
+					cookieVal := ""
+					if ck, err := pr.In.Cookie(stickyCookieName); err == nil {
+						cookieVal = ck.Value
+					}
+					pick = bal.stickyPick(cookieVal)
+					pr.Out = pr.Out.WithContext(context.WithValue(pr.Out.Context(), stickyKey,
+						stickyInfo{id: pick.id, had: cookieVal == pick.id, secure: clientScheme(pr.In) == "https"}))
+				} else {
+					pick = bal.pick()
+				}
+			}
+			pr.Out = withVia(pr.Out, pick.via)
+			pr.Out = pr.Out.WithContext(context.WithValue(pr.Out.Context(), pickedTargetKey{}, pick.key))
+			pr.SetURL(pick.u)
+			pr.SetXForwarded()
+			// SetXForwarded describes the connection to quicgate. When TLS ended
+			// at a trusted proxy in front, the client's connection was encrypted
+			// all the same, and that is what the upstream needs to know.
+			pr.Out.Header.Set("X-Forwarded-Proto", clientScheme(pr.In))
+			setRealIP(pr)
+			normalizeBodyless(pr)
+			if rewrite != nil {
+				pr.Out.URL.Path = rewrite.apply(pr.Out.URL.Path)
+			}
+			// Preserve the client's Host header by default (like Traefik/nginx
+			// proxy_set_header Host $host) so host-validating backends work.
+			if o.HostOverride != "" {
+				pr.Out.Host = o.HostOverride
+			} else {
+				pr.Out.Host = pr.In.Host
+			}
+			applyHeaderRules(pr.Out.Header, o.RequestHeaders, pr.In)
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			if sticky {
+				if info, ok := resp.Request.Context().Value(stickyKey).(stickyInfo); ok && info.id != "" && !info.had {
+					ck := &http.Cookie{Name: stickyCookieName, Value: info.id, Path: "/", HttpOnly: true, Secure: info.secure, SameSite: http.SameSiteLaxMode}
+					resp.Header.Add("Set-Cookie", ck.String())
+				}
+			}
+			if o.BlockIndexing {
+				resp.Header.Set("X-Robots-Tag", "noindex, nofollow, nosnippet, noarchive")
+			}
+			applyHeaderRules(resp.Header, o.ResponseHeaders, nil)
+			return nil
+		},
+		ErrorHandler: e.badGatewayHandler(o.BadGatewayHTML),
+	}
+}
+
+// clientScheme is the scheme of the client's own connection: https when TLS
+// ended here or, by the portal's rule (connectionEncrypted), at a trusted proxy in
+// front of quicgate that says so in X-Forwarded-Proto. The header from anybody
+// else is not believed, and a TLS request is never reported as http. The
+// upstream's X-Forwarded-Proto, forward auth and the {scheme} placeholder all
+// get this one answer.
+func clientScheme(r *http.Request) string {
+	if connectionEncrypted(r) {
+		return "https"
+	}
+	return "http"
+}
+
+// isDialError reports whether a proxy error means the backend could not be
+// connected to at all, as opposed to a request that failed once connected.
+func isDialError(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
+}
+
 // badGatewayHandler renders the upstream-down page, using a per-host custom
-// HTML body when one is configured.
-func badGatewayHandler(target *url.URL, customHTML string) func(http.ResponseWriter, *http.Request, error) {
+// HTML body when one is configured. A backend that could not be connected to
+// is marked down for the load balancer at once, so the next requests go to
+// another member of the pool instead of waiting for the periodic probe to
+// notice; the probe brings it back when it answers again.
+func (e *Engine) badGatewayHandler(customHTML string) func(http.ResponseWriter, *http.Request, error) {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("proxy %s -> %s: %v", r.Host, target.Host, err)
+		log.Printf("proxy %s -> %s: %v", r.Host, r.URL.Host, err)
+		if key, ok := r.Context().Value(pickedTargetKey{}).(string); ok && isDialError(err) {
+			e.health.markDown(key, err)
+		}
 		status := http.StatusBadGateway
 		if errors.Is(err, context.DeadlineExceeded) {
 			status = http.StatusGatewayTimeout
@@ -940,37 +1039,22 @@ func badGatewayHandler(target *url.URL, customHTML string) func(http.ResponseWri
 // locationDispatcher routes requests whose path matches a location prefix
 // (longest wins) to that location's own upstream + rewrite; everything else
 // falls through to the host's default handler.
-func (e *Engine) locationDispatcher(h store.Host, def http.Handler, transport http.RoundTripper) http.Handler {
+func (e *Engine) locationDispatcher(h store.Host, def http.Handler, transport http.RoundTripper, flush time.Duration) http.Handler {
 	type loc struct {
 		prefix string
 		proxy  http.Handler
 	}
 	var locs []loc
 	for _, l := range h.Locations {
-		target := &url.URL{Scheme: l.Upstream.Scheme, Host: hostPort(l.Upstream.Host, l.Upstream.Port)}
-		rw := compileRewrite(l.PathRewrite)
-		via := l.Upstream.Via
-		lp := &httputil.ReverseProxy{
-			Transport: transport,
-			Rewrite: func(pr *httputil.ProxyRequest) {
-				pr.Out = withVia(pr.Out, via)
-				pr.SetURL(target)
-				pr.SetXForwarded()
-				setRealIP(pr)
-				normalizeBodyless(pr)
-				pr.Out.Host = pr.In.Host
-				if rw != nil {
-					pr.Out.URL.Path = rw.apply(pr.Out.URL.Path)
-				}
-			},
-			ErrorHandler: badGatewayHandler(target, h.Options.BadGatewayHTML),
-		}
+		// A location's proxy is the host's proxy with another backend and its
+		// own rewrite: the host's header rules and the rest apply here too.
+		lp := e.newUpstreamProxy(h.Options, transport, flush, newBalancer(e.health, []store.Upstream{l.Upstream}), compileRewrite(l.PathRewrite))
 		locs = append(locs, loc{prefix: l.Path, proxy: lp})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		best := -1
 		for i, l := range locs {
-			if strings.HasPrefix(r.URL.Path, l.prefix) && (best < 0 || len(l.prefix) > len(locs[best].prefix)) {
+			if pathWithin(r.URL.Path, l.prefix) && (best < 0 || len(l.prefix) > len(locs[best].prefix)) {
 				best = i
 			}
 		}
@@ -1005,25 +1089,41 @@ func expandPlaceholders(v string, in *http.Request) string {
 	if h, _, err := net.SplitHostPort(ip); err == nil {
 		ip = h
 	}
-	scheme := "https"
-	if in.TLS == nil {
-		scheme = "http"
-	}
-	repl := strings.NewReplacer("{client_ip}", ip, "{host}", in.Host, "{scheme}", scheme)
+	repl := strings.NewReplacer("{client_ip}", ip, "{host}", in.Host, "{scheme}", clientScheme(in))
 	return repl.Replace(v)
+}
+
+// defaultSite is what a request for a name no host serves gets, compiled from
+// the default_site settings at reload: a request for an unknown name, which is
+// what most scanner traffic is, must not cost a database read.
+type defaultSite struct {
+	mode  string // 404 | html | redirect
+	value string // the page body, or the redirect target
+}
+
+func (e *Engine) compileDefaultSite() {
+	e.unmatched.Store(&defaultSite{
+		mode:  e.store.GetSetting("default_site", "404"),
+		value: e.store.GetSetting("default_site_value", ""),
+	})
 }
 
 // serveUnmatched handles requests for hostnames with no configured host,
 // per the default-site setting: 404 page (default), custom HTML, or redirect.
 func (e *Engine) serveUnmatched(w http.ResponseWriter, r *http.Request) {
-	switch e.store.GetSetting("default_site", "404") {
+	ds := e.unmatched.Load()
+	if ds == nil {
+		serveDefault404(w)
+		return
+	}
+	switch ds.mode {
 	case "html":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, e.store.GetSetting("default_site_value", ""))
+		fmt.Fprint(w, ds.value)
 	case "redirect":
-		if url := e.store.GetSetting("default_site_value", ""); url != "" {
-			http.Redirect(w, r, url, http.StatusFound)
+		if ds.value != "" {
+			http.Redirect(w, r, ds.value, http.StatusFound)
 			return
 		}
 		serveDefault404(w)
@@ -1061,6 +1161,7 @@ func (e *Engine) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Strict-Transport-Security", v)
 	}
+	h3 := e.h3.Load()
 	switch {
 	case o.HTTP3 != nil && !*o.HTTP3:
 		// Host opted out of HTTP/3. Actively clear any Alt-Svc the browser
@@ -1068,9 +1169,9 @@ func (e *Engine) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		// falls back to h2 for this host, while other hosts keep h3. Needed
 		// for backends whose web clients misbehave over h3 (e.g. Vaultwarden).
 		w.Header().Set("Alt-Svc", "clear")
-	case e.h3 != nil && r.ProtoMajor < 3 && !viaVPN(r):
+	case h3 != nil && r.ProtoMajor < 3 && !viaVPN(r):
 		// Advertise h3 so browsers upgrade to HTTP/3 on the next request.
-		_ = e.h3.SetQUICHeaders(w.Header())
+		_ = h3.SetQUICHeaders(w.Header())
 	}
 	rt.proxy.ServeHTTP(w, r)
 }
@@ -1098,6 +1199,13 @@ func (e *Engine) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h
+		}
+		// The address names the HTTPS listener's port when it is not the
+		// default one, or the redirect would point at a port nothing answers on.
+		if p := portOf(e.cfg.HTTPSAddr); p > 0 && p != 443 {
+			host = net.JoinHostPort(host, strconv.Itoa(p))
+		} else if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+			host = "[" + host + "]" // a bare IPv6 literal
 		}
 		http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), code)
 		return
@@ -1308,6 +1416,16 @@ func (e *Engine) Run(ctx context.Context) error {
 		tlsCfg := e.tlsConfig()
 		httpsHandler := e.wrapRealIP(e.ban.wrap(e.accessLog.wrap(e.serveHTTPS)))
 		httpsSrv = newPublicServer(e.cfg.HTTPSAddr, httpsHandler, tlsCfg)
+		// HTTP/3 is opt-out: when disabled there is no h3 server, which also
+		// stops Alt-Svc advertisement (serveHTTPS checks for one), so browsers
+		// never upgrade and existing ones fall back to h2. The server is
+		// published before the TLS listener serves a request, which may
+		// already advertise it.
+		var h3 *http3.Server
+		if !e.cfg.DisableH3 {
+			h3 = e.newHTTP3Server(httpsHandler, tlsCfg)
+			e.h3.Store(h3)
+		}
 		go func() {
 			ln, err := e.listenCounted(e.cfg.HTTPSAddr)
 			if err == nil {
@@ -1315,13 +1433,8 @@ func (e *Engine) Run(ctx context.Context) error {
 			}
 			errCh <- fmt.Errorf("https listener: %w", err)
 		}()
-
-		// HTTP/3 is opt-out: when disabled we never create e.h3, which also
-		// stops Alt-Svc advertisement (serveHTTPS checks e.h3 != nil), so
-		// browsers never upgrade and existing ones fall back to h2.
-		if !e.cfg.DisableH3 {
-			e.h3 = e.newHTTP3Server(httpsHandler, tlsCfg)
-			go func() { errCh <- fmt.Errorf("http3 listener: %w", e.h3.ListenAndServe()) }()
+		if h3 != nil {
+			go func() { errCh <- fmt.Errorf("http3 listener: %w", h3.ListenAndServe()) }()
 			log.Printf("engine: https + http/3 listening on %s (tcp+udp)", e.cfg.HTTPSAddr)
 		} else {
 			log.Printf("engine: https listening on %s (tcp); http/3 disabled", e.cfg.HTTPSAddr)
@@ -1339,8 +1452,8 @@ func (e *Engine) Run(ctx context.Context) error {
 		if httpsSrv != nil {
 			_ = httpsSrv.Shutdown(shutdownCtx)
 		}
-		if e.h3 != nil {
-			_ = e.h3.Close()
+		if h3 := e.h3.Load(); h3 != nil {
+			_ = h3.Close()
 		}
 		e.streams.StopAll()
 		e.wg.Close()
@@ -1376,9 +1489,13 @@ func (e *Engine) listenCounted(addr string) (net.Listener, error) {
 // statistics.
 func (e *Engine) newHTTP3Server(handler http.Handler, tlsCfg *tls.Config) *http3.Server {
 	return &http3.Server{
-		Addr:        e.cfg.HTTPSAddr,
-		Handler:     handler,
-		TLSConfig:   http3.ConfigureTLSConfig(tlsCfg),
+		Addr:      e.cfg.HTTPSAddr,
+		Handler:   handler,
+		TLSConfig: http3.ConfigureTLSConfig(tlsCfg),
+		// No 0-RTT: early data can be replayed by whoever captured it, and
+		// nothing behind quicgate is written to tolerate a replayed request.
+		// quic-go allows it unless told otherwise.
+		QUICConfig:  &quic.Config{Allow0RTT: false},
 		ConnContext: e.traffic.quicConnContext("udp:" + strconv.Itoa(portOf(e.cfg.HTTPSAddr))),
 	}
 }
@@ -1484,6 +1601,12 @@ func (e *Engine) ReservedPorts() []int {
 	// The WireGuard port is UDP; a stream may not take it on either protocol,
 	// which costs nothing and keeps the rule simple.
 	if p := e.wgPort(); p > 0 {
+		out = append(out, p)
+	}
+	// The admin listener's port, last so that the HTTP and HTTPS ports keep
+	// their places: a stream there would race the admin server for the port
+	// at startup, and whichever lost would fail.
+	if p := portOf(e.cfg.AdminAddr); p > 0 {
 		out = append(out, p)
 	}
 	return out
@@ -1621,6 +1744,50 @@ func serveDefault404(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusNotFound)
 	fmt.Fprintf(w, errorPage, http.StatusNotFound, http.StatusNotFound, "This address is not served here")
+}
+
+// staticFS is the file system of a static host. It serves files only: a
+// directory is served through its index.html and never listed, and a name
+// that starts with a dot (.git, .env, .htpasswd) does not exist, except under
+// /.well-known/, which the web uses for public discovery.
+type staticFS struct{ root http.Dir }
+
+func (s staticFS) Open(name string) (http.File, error) {
+	if hiddenPath(name) {
+		return nil, fs.ErrNotExist
+	}
+	f, err := s.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if st.IsDir() {
+		// http.FileServer lists a directory that has no index.html. A directory
+		// without one does not exist here; with one, the file server opens the
+		// index itself.
+		idx, err := s.root.Open(path.Join(name, "index.html"))
+		if err != nil {
+			_ = f.Close()
+			return nil, fs.ErrNotExist
+		}
+		_ = idx.Close()
+	}
+	return f, nil
+}
+
+// hiddenPath reports whether a slash-separated path has a dot-prefixed
+// segment, other than a leading .well-known.
+func hiddenPath(name string) bool {
+	for i, seg := range strings.Split(strings.TrimPrefix(name, "/"), "/") {
+		if strings.HasPrefix(seg, ".") && !(i == 0 && seg == ".well-known") {
+			return true
+		}
+	}
+	return false
 }
 
 // countOf writes a count with its noun: "1 device", "2 devices".

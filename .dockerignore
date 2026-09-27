@@ -1,0 +1,12 @@
+# Keep the build context to what the binary needs. web/ (including web/docs)
+# is embedded with go:embed and must stay in; root-level Markdown, the brand
+# assets, CI files and local data directories are not part of the build.
+.git
+.github
+brand
+data
+devdata
+*.md
+docker-compose.yml
+quicgate
+quicgate.exe*

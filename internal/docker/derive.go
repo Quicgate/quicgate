@@ -2,6 +2,7 @@ package docker
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,12 +22,77 @@ type derived struct {
 
 // reachPlan describes how quicgate reaches a container's ports. The rule is
 // uniform: connect to the Docker host's address on the port's published
-// mapping. A host-networked container binds host ports directly, so its port is
-// reachable at the address as-is.
+// mapping for that protocol. A host-networked container binds host ports
+// directly, so its port is reachable at the address as-is.
 type reachPlan struct {
-	host       string                // the Docker host's address
-	candidates []int                 // container ports usable here (before exclude-ports)
-	portFor    func(int) (int, bool) // maps a container port to its reachable host port
+	host       string                        // the Docker host's address
+	candidates []int                         // container TCP ports usable for HTTP (before exclude-ports)
+	portFor    func(int, string) (int, bool) // maps a container port + protocol to its reachable host port
+}
+
+// knownLabels are the keys derive reads, without the prefix. Any other key
+// under the prefix is refused: a container that carries quicgate.access_list
+// instead of quicgate.access-list asked for a restriction, and publishing it
+// without one would be exactly the mistake the label was meant to prevent.
+var knownLabels = []string{"enable", "host", "port", "exclude-ports", "scheme", "tls", "tls-skip-verify", "access-list", "streams"}
+
+// unknownLabels lists the container's labels under the prefix that quicgate
+// does not know, each with the known key it most likely meant.
+func unknownLabels(labels map[string]string, pfx string) []string {
+	var keys []string
+	for k := range labels {
+		if strings.HasPrefix(k, pfx) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	var out []string
+	for _, k := range keys {
+		short := k[len(pfx):]
+		if slices.Contains(knownLabels, short) {
+			continue
+		}
+		w := "unknown label " + k
+		if s := suggestLabel(short); s != "" {
+			w += "; did you mean " + pfx + s + "?"
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// suggestLabel names the known key closest to an unknown one, or "" when none
+// is close: a different separator or case, or up to two edits away.
+func suggestLabel(short string) string {
+	norm := strings.ReplaceAll(strings.ToLower(short), "_", "-")
+	best, bestDist := "", 3
+	for _, k := range knownLabels {
+		if d := editDistance(norm, k); d < bestDist {
+			best, bestDist = k, d
+		}
+	}
+	return best
+}
+
+// editDistance is the Levenshtein distance between two short strings.
+func editDistance(a, b string) int {
+	prev := make([]int, len(b)+1)
+	cur := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(b)]
 }
 
 // derive interprets one container into a proxy host and/or a set of L4 streams.
@@ -41,6 +107,11 @@ func (p *Provider) derive(in containerInspect, address string) derived {
 		return d // did not opt in
 	}
 	d.enabled = true
+	if unknown := unknownLabels(in.Config.Labels, pfx); len(unknown) > 0 {
+		d.warnings = append(d.warnings, unknown...)
+		d.warnings = append(d.warnings, "the container is not routed while it carries a label quicgate does not know")
+		return d
+	}
 	if !in.State.Running {
 		d.warnings = append(d.warnings, "container is not running")
 		return d
@@ -86,9 +157,9 @@ func (p *Provider) derive(in containerInspect, address string) derived {
 
 	switch {
 	case portWarn == "" && len(domains) > 0:
-		rport, ok := plan.portFor(cport)
+		rport, ok := plan.portFor(cport, "tcp")
 		if !ok {
-			d.warnings = append(d.warnings, fmt.Sprintf("port %d is not published on %s (publish it to route)", cport, address))
+			d.warnings = append(d.warnings, fmt.Sprintf("port %d/tcp is not published on %s (publish it to route)", cport, address))
 			break
 		}
 		h := p.buildHost(lbl, domains, plan.host, rport, aclID)
@@ -113,24 +184,28 @@ func (p *Provider) derive(in containerInspect, address string) derived {
 }
 
 // resolvePlan resolves how quicgate reaches a container: always the Docker
-// host's address on the container port's published host port. A host-networked
-// container binds host ports directly, so its container port is reachable as-is.
+// host's address on the container port's published host port for the protocol
+// asked for (Docker publishes 53/tcp and 53/udp separately, and may map them
+// to different host ports). A host-networked container binds host ports
+// directly, so its container port is reachable as-is on either protocol.
 func resolvePlan(in containerInspect, address string) reachPlan {
 	published := parsePublished(in.NetworkSettings.Ports)
-	if in.HostConfig.NetworkMode == "host" {
-		cands := parseExposed(in.Config.ExposedPorts)
-		if len(cands) == 0 {
-			for cp := range published {
-				cands = append(cands, cp)
-			}
-		}
-		return reachPlan{host: address, candidates: cands, portFor: func(cp int) (int, bool) { return cp, true }}
-	}
 	var cands []int
-	for cp := range published {
-		cands = append(cands, cp)
+	for k := range published {
+		if k.proto == "tcp" {
+			cands = append(cands, k.port)
+		}
 	}
-	return reachPlan{host: address, candidates: cands, portFor: func(cp int) (int, bool) { hp, ok := published[cp]; return hp, ok }}
+	if in.HostConfig.NetworkMode == "host" {
+		if exposed := parseExposed(in.Config.ExposedPorts); len(exposed) > 0 {
+			cands = exposed
+		}
+		return reachPlan{host: address, candidates: cands, portFor: func(cp int, _ string) (int, bool) { return cp, true }}
+	}
+	return reachPlan{host: address, candidates: cands, portFor: func(cp int, proto string) (int, bool) {
+		hp, ok := published[portKey{cp, proto}]
+		return hp, ok
+	}}
 }
 
 // buildHost assembles the proxy host from the resolved upstream and labels.
@@ -179,9 +254,32 @@ func deriveStreams(spec string, plan reachPlan, aclID *int64) ([]store.Stream, [
 			warns = append(warns, fmt.Sprintf("stream %q: %v", part, err))
 			continue
 		}
-		rport, ok := plan.portFor(container)
-		if !ok {
-			warns = append(warns, fmt.Sprintf("stream %q: container port %d is not published on %s", part, container, plan.host))
+		// Each protocol has its own publication. A "both" stream forwards
+		// both to one host port, so the container must publish them on the
+		// same one; sending UDP to the TCP mapping would reach nothing, or
+		// something else.
+		protos := []string{proto}
+		if proto == "both" {
+			protos = []string{"tcp", "udp"}
+		}
+		rport, missing := -1, []string(nil)
+		for _, pr := range protos {
+			hp, ok := plan.portFor(container, pr)
+			switch {
+			case !ok:
+				missing = append(missing, fmt.Sprintf("%d/%s", container, pr))
+			case rport == -1:
+				rport = hp
+			case hp != rport:
+				warns = append(warns, fmt.Sprintf("stream %q: container port %d is published on host port %d for tcp and %d for udp; a both stream forwards both protocols to one port, so publish them on the same host port", part, container, rport, hp))
+				rport = -2
+			}
+		}
+		if len(missing) > 0 {
+			warns = append(warns, fmt.Sprintf("stream %q: container port %s is not published on %s", part, strings.Join(missing, " and "), plan.host))
+			continue
+		}
+		if rport < 0 {
 			continue
 		}
 		if listenSeen[listen] {
@@ -313,38 +411,48 @@ func isOff(s string) bool {
 	return false
 }
 
-// tcpPort parses a Docker port key ("3000/tcp") and keeps TCP ports only.
-func tcpPort(key string) (int, bool) {
+// portKey is a container port on one protocol, the way Docker keys its port
+// maps ("53/udp").
+type portKey struct {
+	port  int
+	proto string
+}
+
+// parsePortKey parses a Docker port key ("3000/tcp", "53/udp", "443"; no
+// protocol means tcp). Only tcp and udp are kept.
+func parsePortKey(key string) (portKey, bool) {
 	num, proto := key, "tcp"
 	if i := strings.IndexByte(key, '/'); i >= 0 {
-		num, proto = key[:i], key[i+1:]
+		num, proto = key[:i], strings.ToLower(key[i+1:])
 	}
-	if proto != "tcp" {
-		return 0, false
+	if proto != "tcp" && proto != "udp" {
+		return portKey{}, false
 	}
 	n, err := strconv.Atoi(num)
 	if err != nil || n < 1 || n > 65535 {
-		return 0, false
+		return portKey{}, false
 	}
-	return n, true
+	return portKey{n, proto}, true
 }
 
-// parseExposed returns the container's declared (EXPOSE) TCP ports.
+// parseExposed returns the container's declared (EXPOSE) TCP ports: the
+// candidates for its HTTP port.
 func parseExposed(m map[string]struct{}) []int {
 	var out []int
 	for k := range m {
-		if p, ok := tcpPort(k); ok {
-			out = append(out, p)
+		if pk, ok := parsePortKey(k); ok && pk.proto == "tcp" {
+			out = append(out, pk.port)
 		}
 	}
 	return out
 }
 
-// parsePublished maps container TCP port to its first published host port.
-func parsePublished(m map[string][]portBinding) map[int]int {
-	out := map[int]int{}
+// parsePublished maps each published container port and protocol to its first
+// published host port.
+func parsePublished(m map[string][]portBinding) map[portKey]int {
+	out := map[portKey]int{}
 	for k, binds := range m {
-		cp, ok := tcpPort(k)
+		pk, ok := parsePortKey(k)
 		if !ok {
 			continue
 		}
@@ -353,8 +461,8 @@ func parsePublished(m map[string][]portBinding) map[int]int {
 			if err != nil {
 				continue
 			}
-			if _, exists := out[cp]; !exists {
-				out[cp] = hp
+			if _, exists := out[pk]; !exists {
+				out[pk] = hp
 			}
 		}
 	}

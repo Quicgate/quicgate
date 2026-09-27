@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,7 +14,9 @@ import (
 )
 
 // The ban list says who is banned, for which host and why, and a ban can be
-// lifted by hand.
+// lifted by hand. What a visitor's browser was made to send for another site's
+// page never puts an address there (any page can make a browser fetch from a
+// host the visitor is not allowed on); see TestAddressRefusalsThatBan.
 func TestBansShowWhoAndWhy(t *testing.T) {
 	e, st := newTestEngine(t)
 	up := backend(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
@@ -25,6 +28,7 @@ func TestBansShowWhoAndWhy(t *testing.T) {
 	e.banCfg.Store(&banConfig{enabled: true, threshold: 2, window: time.Hour, banFor: time.Hour})
 
 	serve := e.ban.wrap(e.accessLog.wrap(e.serveHTTPS))
+	crossSite := false
 	do := func(host, ip, auth string) (int, string) {
 		r := httptest.NewRequest(http.MethodGet, "http://"+host+"/", nil)
 		r.Host = host
@@ -32,12 +36,25 @@ func TestBansShowWhoAndWhy(t *testing.T) {
 		if auth != "" {
 			r.Header.Set("Authorization", auth)
 		}
+		if crossSite {
+			r.Header.Set("Sec-Fetch-Site", "cross-site")
+		}
 		rr := httptest.NewRecorder()
 		serve(rr, r)
 		return rr.Code, strings.TrimSpace(rr.Body.String())
 	}
+	crossSite = true
+	for i := 0; i < 3; i++ {
+		if code, _ := do("acl.test", "203.0.113.5", ""); code != http.StatusForbidden {
+			t.Fatalf("refused by address, attempt %d: %d, want the list's 403", i+1, code)
+		}
+	}
+	crossSite = false
+	if bans := e.Bans(); len(bans) != 0 {
+		t.Fatalf("refusals of requests made for another site's page led to a ban: %+v", bans)
+	}
 	for i := 0; i < 2; i++ {
-		do("acl.test", "203.0.113.5", "")
+		do("vault.test", "203.0.113.5", basic("family", "wrong"))
 	}
 	time.Sleep(5 * time.Millisecond)
 	for i := 0; i < 2; i++ {
@@ -50,7 +67,7 @@ func TestBansShowWhoAndWhy(t *testing.T) {
 	}
 	want := []BanInfo{
 		{IP: "198.51.100.7", Host: "vault.test", Reason: `wrong credentials for access list "vault"`, Failures: 2},
-		{IP: "203.0.113.5", Host: "acl.test", Reason: `address not allowed by access list "lan"`, Failures: 2},
+		{IP: "203.0.113.5", Host: "vault.test", Reason: `wrong credentials for access list "vault"`, Failures: 2},
 	}
 	for i, w := range want {
 		b := bans[i]
@@ -209,5 +226,86 @@ func TestMonitorsAndLoginPromptsDoNotBan(t *testing.T) {
 	}
 	if bans := e.Bans(); len(bans) != 1 || bans[0].IP != "198.51.100.7" {
 		t.Fatalf("wrong credentials three times: bans = %+v, want 198.51.100.7", bans)
+	}
+}
+
+// A refusal by address counts toward a ban: that is what bans the scanners
+// that walk every host. What the refused client did not choose does not count:
+// a request its browser sent for another site's page (an image tag on any page
+// can make it), a CORS preflight, an IPv6 visitor of a list that opens to every
+// IPv4 address and to no IPv6 one, and an allowed address that has not sent
+// its credentials yet or sends the backend's own token.
+func TestAddressRefusalsThatBan(t *testing.T) {
+	e, st := newTestEngine(t)
+	up := backend(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
+	lan := mustCreateACL(t, st, &store.AccessList{Name: "lan", Satisfy: "all", Rules: []store.AccessRule{{Action: "allow", CIDR: "10.0.0.0/8"}}})
+	both := mustCreateACL(t, st, &store.AccessList{Name: "lan and password", Satisfy: "all",
+		Rules: []store.AccessRule{{Action: "allow", CIDR: "10.0.0.0/8"}}, Users: []store.AccessUser{{Username: "family", Password: "right"}}})
+	getOnly := mustCreateACL(t, st, &store.AccessList{Name: "public GET", Satisfy: "any",
+		Rules: []store.AccessRule{{Action: "allow", CIDR: "0.0.0.0/0", Methods: []string{"GET"}}}})
+	mustCreateHost(t, st, &store.Host{Type: "proxy", Domains: []string{"img.test"}, Upstream: up, AccessListID: &lan})
+	mustCreateHost(t, st, &store.Host{Type: "proxy", Domains: []string{"both.test"}, Upstream: up, AccessListID: &both})
+	mustCreateHost(t, st, &store.Host{Type: "proxy", Domains: []string{"get.test"}, Upstream: up, AccessListID: &getOnly})
+	reload(t, e)
+	e.banCfg.Store(&banConfig{enabled: true, threshold: 2, window: time.Hour, banFor: time.Hour})
+
+	serve := e.ban.wrap(e.accessLog.wrap(e.serveHTTPS))
+	do := func(method, host, ip string, hdr map[string]string) (int, string) {
+		r := httptest.NewRequest(method, "http://"+host+"/", nil)
+		r.Host = host
+		r.RemoteAddr = net.JoinHostPort(ip, "40000")
+		for k, v := range hdr {
+			r.Header.Set(k, v)
+		}
+		rr := httptest.NewRecorder()
+		serve(rr, r)
+		return rr.Code, strings.TrimSpace(rr.Body.String())
+	}
+	stranger, member := "203.0.113.5", "10.1.2.3"
+	for i := 0; i < 5; i++ {
+		for _, c := range []struct {
+			what, method, host, ip string
+			hdr                    map[string]string
+			want                   int
+		}{
+			{"an image another site's page loads", http.MethodGet, "img.test", stranger, map[string]string{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "no-cors"}, http.StatusForbidden},
+			{"a fetch from a sibling site's page", http.MethodGet, "img.test", stranger, map[string]string{"Sec-Fetch-Site": "same-site"}, http.StatusForbidden},
+			{"a preflight to a LAN-only host", http.MethodOptions, "img.test", stranger, map[string]string{"Access-Control-Request-Method": "GET"}, http.StatusForbidden},
+			{"an IPv6 client of a 0.0.0.0/0 list", http.MethodGet, "get.test", "2001:db8::7", nil, http.StatusForbidden},
+			{"an allowed address without credentials", http.MethodGet, "both.test", member, nil, http.StatusUnauthorized},
+			{"an allowed address with the backend's token", http.MethodGet, "both.test", member, map[string]string{"Authorization": "Bearer t0k3n"}, http.StatusUnauthorized},
+		} {
+			code, body := do(c.method, c.host, c.ip, c.hdr)
+			if code != c.want || body == "temporarily banned" {
+				t.Fatalf("%s, attempt %d: %d %q, want the list's own %d", c.what, i+1, code, body, c.want)
+			}
+		}
+	}
+	if bans := e.Bans(); len(bans) != 0 {
+		t.Fatalf("refusals the client did not choose led to bans: %+v", bans)
+	}
+
+	// A scanner: refused by address, twice, with nothing that says a page
+	// made it. That bans, and the ban then covers every host.
+	scanner := "198.51.100.9"
+	for i := 0; i < 2; i++ {
+		do(http.MethodGet, "img.test", scanner, nil)
+	}
+	if code, body := do(http.MethodGet, "get.test", scanner, nil); code != http.StatusForbidden || body != "temporarily banned" {
+		t.Fatalf("a scanner refused by address twice: %d %q, want 403 temporarily banned on every host", code, body)
+	}
+
+	// A wrong password from an allowed address counts, and so does one from a
+	// refused address: the credentials were tried either way.
+	for i := 0; i < 2; i++ {
+		do(http.MethodGet, "both.test", member, map[string]string{"Authorization": basic("family", "wrong")})
+		do(http.MethodGet, "both.test", stranger, map[string]string{"Authorization": basic("family", "wrong")})
+	}
+	bans := e.Bans()
+	if len(bans) != 3 {
+		t.Fatalf("scanner and wrong passwords: %d bans, want all three addresses: %+v", len(bans), bans)
+	}
+	if code, body := do(http.MethodGet, "img.test", stranger, nil); code != http.StatusForbidden || body != "temporarily banned" {
+		t.Fatalf("after the ban: %d %q, want 403 temporarily banned", code, body)
 	}
 }

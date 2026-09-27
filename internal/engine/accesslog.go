@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -207,6 +208,29 @@ func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, http.ErrNotSupported
 }
 
+// Client-controlled fields are cut before a record is encoded: a request with
+// a megabyte of User-Agent must not take a megabyte of the queue of 1,024
+// records, nor of the file. 253 bytes is the longest host name there is,
+// 2 KiB is more path than browsers send, and 512 bytes covers every real user
+// agent.
+const (
+	logMaxHost = 253
+	logMaxPath = 2048
+	logMaxUA   = 512
+)
+
+// clipField cuts s to at most n bytes, at a character boundary, so what
+// remains is still valid text.
+func clipField(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 // wrap returns next wrapped with JSON access logging.
 func (l *accessLogger) wrap(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -256,15 +280,15 @@ func (l *accessLogger) wrap(next http.HandlerFunc) http.HandlerFunc {
 		rec := accessRecord{
 			Time:     start.UTC().Format(time.RFC3339Nano),
 			ClientIP: ip,
-			Host:     r.Host,
+			Host:     clipField(r.Host, logMaxHost),
 			Method:   r.Method,
-			Path:     r.URL.Path,
+			Path:     clipField(r.URL.Path, logMaxPath),
 			Status:   sw.status,
 			Bytes:    sw.bytes,
 			DurMS:    time.Since(start).Milliseconds(),
 			Proto:    r.Proto,
 			Scheme:   scheme,
-			UA:       r.UserAgent(),
+			UA:       clipField(r.UserAgent(), logMaxUA),
 		}
 		line, err := json.Marshal(rec)
 		if err != nil {

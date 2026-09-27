@@ -6,16 +6,16 @@ on:
     tags: ["v*"]
   pull_request:
 
+# Least privilege: the test and scan jobs run arbitrary test code and need
+# nothing but the checkout. Only the build job publishes and signs.
 permissions:
   contents: read
-  packages: write
-  id-token: write          # keyless signing of the build provenance
-  attestations: write      # publish the provenance attestation
-  artifact-metadata: write # record where the attested image is stored
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -31,11 +31,22 @@ jobs:
           image="go$(sed -nE 's/^FROM golang:([0-9.]+)-alpine.*/\1/p' Dockerfile)"
           echo "go.mod toolchain: $want, runner: $got, build image: $image"
           test -n "$want" && test "$got" = "$want" && test "$image" = "$want"
+      # CONTRIBUTING.md asks for gofmt-clean code; enforce it.
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then echo "not gofmt-clean:"; echo "$out"; exit 1; fi
       - run: go vet ./...
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
       - run: go test -race ./...
 
   vulncheck:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -49,6 +60,12 @@ jobs:
   build:
     needs: [test, vulncheck]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write          # keyless signing of the build provenance
+      attestations: write      # publish the provenance attestation
+      artifact-metadata: write # record where the attested image is stored
     steps:
       - uses: actions/checkout@v7
         with:
@@ -98,6 +115,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # A software bill of materials travels with the image, next to the
+          # signed provenance below.
+          sbom: ${{ github.event_name != 'pull_request' }}
 
       # Signed build provenance for the pushed image digest, verifiable with
       # `gh attestation verify oci://ghcr.io/quicgate/quicgate:<tag> --owner Quicgate`.

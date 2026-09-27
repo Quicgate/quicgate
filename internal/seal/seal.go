@@ -1,7 +1,13 @@
 // Package seal encrypts the secrets quicgate keeps in its database, so that a
-// leaked database file or backup archive does not hand over client secrets,
-// private keys and tokens. It protects against a leaked database, not against
-// someone who can read the whole data directory when the key lives there too.
+// leaked database file or backup archive does not hand over what is stored
+// there: identity-provider client secrets, DNS credentials, the SSO cookie
+// key, the WireGuard server key and preshared keys, two-factor secrets, VPN
+// refresh tokens and the private keys of uploaded certificates. It protects
+// against a leaked database, not against someone who can read the whole data
+// directory when the key lives there too. And it covers the database only:
+// the ACME account key and the certificates quicgate obtains itself, private
+// keys included, are plain files under certs/ in the data directory, and a
+// backup archive carries them as they are.
 //
 // A sealed value is text: "qgs1.<key id>.<base64url(nonce || ciphertext)>",
 // XChaCha20-Poly1305 with a random nonce per value. The associated data names

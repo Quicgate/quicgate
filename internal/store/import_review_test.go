@@ -75,6 +75,8 @@ func TestImportRefusesToRemoveProtection(t *testing.T) {
 		h := *refTestHost("edge.test")
 		h.Options.ForwardAuth = &ForwardAuth{URL: "http://127.0.0.1:9/auth"}
 		h.CertMode = "auto"
+		h.ForceSSL = true
+		h.Options.MinTLSVersion = "1.3"
 		h.Options.ClientCert = &ClientCert{Mode: "require", CAPEM: caPEM}
 		return h
 	}
@@ -84,8 +86,13 @@ func TestImportRefusesToRemoveProtection(t *testing.T) {
 		h.Options.AuthRules = []AuthRule{{Path: "/admin/", Mode: "accessList", AccessListID: &acl}}
 		return h
 	}
-	vault, paths, edgeHost := protected(), gated(), edge()
-	for _, h := range []*Host{&vault, &paths, &edgeHost} {
+	tunnel := func() Host {
+		h := *refTestHost("tunnel.test")
+		h.Options.VPNOnly = true
+		return h
+	}
+	vault, paths, edgeHost, tunnelHost := protected(), gated(), edge(), tunnel()
+	for _, h := range []*Host{&vault, &paths, &edgeHost, &tunnelHost} {
 		if err := st.CreateHost(h); err != nil {
 			t.Fatal(err)
 		}
@@ -102,6 +109,16 @@ func TestImportRefusesToRemoveProtection(t *testing.T) {
 	noFwd.Options.ForwardAuth = nil
 	noCert.Options.ClientCert = nil
 	public.Options.AuthRules = []AuthRule{{Path: "/admin/", Mode: "public"}}
+	// Protections a document can also weaken without leaving a field out
+	// entirely: the client-certificate mode, the VPN-only restriction and the
+	// TLS settings (an omitted vpnOnly, forceSsl or minTlsVersion reads as
+	// false or "" and would make the host public, plain, or older-TLS).
+	certOptional, noVPN, noForce, noTLS, oldTLS := edge(), tunnel(), edge(), edge(), edge()
+	certOptional.Options.ClientCert = &ClientCert{Mode: "request", CAPEM: caPEM}
+	noVPN.Options.VPNOnly = false
+	noForce.ForceSSL = false
+	noTLS.CertMode, noTLS.ForceSSL = "none", false
+	oldTLS.Options.MinTLSVersion = ""
 	for name, c := range map[string]struct {
 		doc    ImportDoc
 		reason string
@@ -111,6 +128,11 @@ func TestImportRefusesToRemoveProtection(t *testing.T) {
 		"path gate made public":        {ImportDoc{Hosts: []Host{public}}, "/admin/"},
 		"host without forward auth":    {ImportDoc{Hosts: []Host{noFwd}}, "forward authentication"},
 		"host without client certs":    {ImportDoc{Hosts: []Host{noCert}}, "client certificate"},
+		"client certs made optional":   {ImportDoc{Hosts: []Host{certOptional}}, "require would become request"},
+		"host without its VPN-only":    {ImportDoc{Hosts: []Host{noVPN}}, "VPN-only"},
+		"host without forced HTTPS":    {ImportDoc{Hosts: []Host{noForce}}, "forceSsl"},
+		"host without TLS":             {ImportDoc{Hosts: []Host{noTLS}}, "certMode would become none"},
+		"host without TLS 1.3 minimum": {ImportDoc{Hosts: []Host{oldTLS}}, "minTlsVersion"},
 		"stream without its restriction": {ImportDoc{Streams: []Stream{{ListenPort: 40200, Protocol: "tcp",
 			ForwardHost: "127.0.0.1", ForwardPort: 80, Enabled: true}}}, "source restriction"},
 		"access list without rules or users": {ImportDoc{AccessLists: []AccessList{{Name: "lan", Satisfy: "any"}}}, "admit everyone"},
@@ -126,6 +148,13 @@ func TestImportRefusesToRemoveProtection(t *testing.T) {
 	}
 	if got, _ := st.GetHost(paths.ID); len(got.Options.AuthRules) != 1 || got.Options.AuthRules[0].Mode != "accessList" {
 		t.Fatalf("path gate changed: %+v", got.Options.AuthRules)
+	}
+	if got, _ := st.GetHost(edgeHost.ID); got.CertMode != "auto" || !got.ForceSSL || got.Options.MinTLSVersion != "1.3" ||
+		got.Options.ClientCert == nil || got.Options.ClientCert.Mode != "require" {
+		t.Fatalf("TLS or client-certificate protection changed: %+v %+v", got, got.Options.ClientCert)
+	}
+	if got, _ := st.GetHost(tunnelHost.ID); !got.Options.VPNOnly {
+		t.Fatalf("the VPN-only host became public: %+v", got.Options)
 	}
 	streams, _ := st.ListStreams()
 	if len(streams) != 1 || len(streams[0].AllowedCIDRs) != 1 {

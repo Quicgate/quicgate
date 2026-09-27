@@ -4,6 +4,223 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Fixes from the September 2026 security, technology and functional scan (the record is in
+SECURITY.md). Every change below carries a regression test that fails without it.
+
+### Security
+- **The real client address is read from every `X-Forwarded-For` header line, not the first only.**
+  Behind a trusted proxy that appends the client as a separate header line (HAProxy's
+  `option forwardfor`, any Go proxy), a client could put an address of its own choosing in a first
+  line it wrote itself and walk past IP allowlists, rate limits, auto-ban and the never-ban list.
+- **A basic-auth login with an unknown username takes as long to refuse as a wrong password for a
+  known one.** It was refused in microseconds, so the response time told which usernames exist.
+- **Paths an upstream may read differently are refused on hosts with path rules or custom
+  locations.** A path with an empty segment (`//`), a backslash, a `;` inside a segment or a `%`
+  left after decoding is answered 400 before any rule or gate, like a dot segment: nginx, IIS and
+  Tomcat normalise those, so `//admin/secret` reached a gated `/admin/`. Hosts without path rules
+  or locations are unaffected. Prefix rules and locations match whole segments: `/api` covers
+  `/api` and `/api/...`, no longer `/api-internal`; a rule ending in `/` is a plain prefix as before.
+- **HTTP/3 refuses 0-RTT early data**, which a network attacker could replay.
+- **Admin API request bodies are bounded and the listener has timeouts.** Any client that could
+  reach port 81 could send an unauthenticated login with a body of hundreds of megabytes and drive
+  the process towards an out-of-memory kill of the whole proxy; bodies are now limited to 16 KiB
+  on credential endpoints and 4 MiB on configuration endpoints (413 above that), and the admin
+  server has a 30-second read timeout (the restore upload gets fifteen minutes) and a 120-second
+  idle timeout.
+- **Failed admin logins are counted per network, and wrong codes per account.** Ten failures in
+  fifteen minutes lock the client out; an IPv6 client is counted per /64, so rotating through one
+  network's addresses no longer buys unlimited attempts. Ten wrong second-factor codes lock the
+  account's code step from any address (only someone with the password gets that far), and ten
+  failed password confirmations by a signed-in session lock those confirmations. Wrong passwords
+  are not counted per account on purpose: that lockout would refuse the right password too, so
+  anyone who can reach the login could keep the administrator out. A wrong code costs the same
+  delay as a wrong password, a locked entry is never evicted when the table is full, and an unknown
+  account costs the same comparison as a known one (the response time no longer says which
+  addresses are accounts).
+- **A TOTP code is accepted once.** The time step of the last accepted code is remembered per
+  account and that step and earlier ones are refused, at login, when enabling 2FA and when creating
+  a break-glass device.
+- **The admin listener honours trusted proxies.** Behind a proxy listed under trusted proxies the
+  login throttle keys on the address the proxy reports, so one careless colleague behind the proxy
+  no longer locks everyone out and a client behind it cannot spoof its address. The settings are
+  validated on save (addresses or CIDRs, `/0` refused, a valid header name).
+- **The 2FA setup secret is bound to the session.** `/api/2fa/enable` confirms the secret that
+  `/api/2fa/setup` produced for this session (fifteen minutes), not one the client sends.
+- **Cookie-authenticated admin writes need an `Origin` or `Referer` header**, which browsers
+  always send; a request with neither is refused. Scripts use API tokens, which are exempt.
+- **SSO hosts are HTTPS only.** A host with single sign-on on the host or on a path rule redirects
+  plain HTTP to HTTPS (308) and refuses other methods, like the VPN portal, unless quicgate runs
+  with `QG_TLS=off`; the login and the session cookie were served over plain HTTP when force-SSL
+  was off. `X-Forwarded-Proto` is believed only from a trusted proxy, for the cookie's `Secure`
+  flag and the redirect URI alike.
+- **The SSO session cookie is not forwarded to the upstream** or to a forward-auth server; every
+  other cookie is passed unchanged. A backend no longer holds a replayable credential for its host.
+- **Identity headers are stripped on forward-auth hosts too.** `Remote-User`, `Remote-Email` and
+  `Remote-Groups` in any spelling are removed from inbound requests whenever any identity gate
+  exists, not only with the built-in SSO.
+- **A group name cannot inject groups.** Commas, percent signs and control characters in a group
+  name are percent-encoded in `Remote-Groups` (`Sales, EMEA` arrives as `Sales%2C EMEA`).
+- **`preferred_username` satisfies no e-mail rule.** When the ID token carries no `email` claim
+  the username is used as the identity, but it passes allowed-emails and allowed-domains rules only
+  when `email_verified` is true; group rules still apply.
+- **The SSO signing key is never regenerated over one that cannot be opened.** After a restore
+  under another sealing key, single sign-on answers 503 and the log says why, instead of silently
+  making a new key that signed everyone out for good once the right key came back.
+- The admin OIDC sign-in uses distinct random values for `state` and `nonce` and compares the
+  state in constant time; the SSO gate does the same.
+- Provider discovery runs under its own context (a visitor who disconnected mid-discovery no
+  longer poisons the cache), is refreshed hourly and retried ten seconds after a failure.
+- The VPN portal limits login starts and device enrolments to ten per minute per client address.
+- **The declarative import refuses to drop a host's VPN-only restriction**, to downgrade its
+  client-certificate mode from *require*, to turn its certificate mode into *none*, to drop
+  force-SSL or to drop a minimum TLS version of 1.3: a document that omits the field left a private
+  host public. Include the field, or change the host in the UI or API.
+- **Manual hosts win over Docker labels in every case.** A container could take an exact name
+  under a manual wildcard host (`api.example.com` under `*.example.com`) or any name of a manual
+  host that was switched off, and have a certificate issued for it. Both are refused now.
+- **A Docker label key quicgate does not know leaves the container unrouted.** A typo in the key
+  (`quicgate.access_list`) used to publish the container without the access list it asked for; the
+  Docker page now names the key and the one it probably meant.
+- **Remote Docker endpoints can use TLS with a client certificate** (`caFile`, `certFile`,
+  `keyFile`, Docker's `--tlsverify` model). A `tcp://` endpoint without them is plaintext and trusts
+  whoever answers on that port; the guide says so now.
+- **VPN refresh tokens are part of the seal inventory**: key rotation re-seals them and `-unseal`
+  writes them back; before they stayed under the old key.
+- The database file and its `-wal`/`-shm` companions are made owner-only (0600) at start, whatever
+  the data directory's permissions.
+
+### Changed
+- **Auto-ban no longer counts what a visitor's browser was made to send.** Any web page could make
+  a visitor's browser send five requests to an address-listed host (image tags will do) and get the
+  visitor, and everyone behind the same NAT, banned from every host for an hour. A request the
+  browser marks as sent for another site's page (`Sec-Fetch-Site: cross-site` or `same-site`), a
+  refused CORS preflight, a missing credential and a token of another scheme are refused as before
+  but not counted. Wrong basic-auth passwords and refusals by address of everything else (scanners,
+  direct visits) still count, so auto-ban keeps banning the scanners that walk every host. An IPv6
+  client refused by a list that opens to every IPv4 address (`0.0.0.0/0`) and to no IPv6 one is not
+  banned either: add `::/0` next to `0.0.0.0/0` to let IPv6 visitors in.
+- **The response cache is bounded to 64 MiB per host** (entries up to 2 MiB as before) and evicts
+  the least recently used response; before, 512 entries of up to 2 MiB each could be filled with
+  cache-busting query strings.
+- **TCP streams have an idle timeout and a per-client cap.** A connection that carries nothing in
+  either direction for ten minutes is closed with its backend connection (within ten more
+  minutes; traffic one way keeps it open, so a download with a silent client runs as long as it
+  likes), and one client address may hold at most 256 connections per listener (the listener's
+  total stays 4096). Behind a trusted PROXY-protocol peer the cap counts the real client. The copy
+  itself is unchanged: plain TCP streams keep the kernel's zero-copy path, and the idle timeout
+  costs one deadline per ten minutes, not one per read.
+- **SNI routes match DNS names.** Case and a trailing dot no longer matter, a ClientHello split
+  over several TLS records is read whole, a connection that does not start with a ClientHello is
+  closed, and a connection sent to the default target for want of a matching name is logged.
+- **Health checks verify certificates.** The probe of an HTTPS upstream accepted any certificate;
+  it now verifies the way the host's own traffic does (with the host's upstream SNI) and skips
+  verification only for hosts that skip it themselves.
+- **Static hosts serve files only.** A directory without `index.html` answers 404 instead of a
+  listing, and dot-prefixed names (`.env`, `.git`) are not served, except under `/.well-known/`.
+- Access-log records cut the host to 253 bytes, the path to 2 KiB and the user agent to 512 bytes.
+- A stream cannot take the admin port; it is reserved like 80 and 443, as the guide already said,
+  and the admin port is bound before the engine starts, so a stream configured on it fails as a
+  stream instead of crashing the admin UI.
+- **Admin OIDC sign-in needs only a selected identity provider.** `oidc_enabled` is no longer
+  required, and when the redirect URL is empty the callback URL is derived from the request (the
+  scheme from `X-Forwarded-Proto` only when it comes from a trusted proxy). Starting a sign-in is
+  limited to 30 per client address per fifteen minutes, a full table of pending sign-ins refuses
+  new ones instead of evicting one in progress, and provider error details are logged, not shown.
+- The identity-provider session lifetime (`sessionHours`) is capped at 720 hours (30 days); longer
+  stored values are treated as 720.
+- The admin UI no longer lists directories, `/api/version` no longer includes the Go version, and
+  every `/api/*` and `/metrics` response carries `Cache-Control: no-store`.
+- One admin account holds at most 32 live sessions; the oldest ends when another starts. A
+  password longer than 72 bytes is refused with 400 and a clear message instead of a 500.
+- **Validation is complete on every host and stream field.** Domain labels are limited to 63 and
+  names to 253 characters; upstream, forward and redirect hosts must be an IP or hostname; a static
+  root must be an absolute path; a forward-auth URL must be http(s); header rules cannot touch
+  `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `Keep-Alive`, `TE` or
+  `Trailer`; timeouts are capped at an hour, `cacheSec` at 30 days, `maxBodyMb` at 10240,
+  `hsts.maxAge` at two years, self-signed certificates at 3650 days; a single-port stream needs a
+  forward port. Existing rows are not rewritten, but a row outside these bounds is refused on its
+  next save.
+- **`docker_endpoints` is validated strictly.** An unknown field, a `connect` that is not a socket
+  path, `tcp://host:port` or `https://host:port`, or an `address` that is not an IP or hostname
+  refuses the whole list; the refusal is logged and no Docker host is watched until it is fixed
+  (before, an invalid list fell back to the local socket silently).
+- Certificate import from a file path requires a regular file of at most 512 KiB (symlinks are
+  followed, so certbot's `live/` paths work); a FIFO or device is refused without being opened.
+- The build context leaves out `.git`, brand assets and root Markdown (`.dockerignore`); CI runs
+  gofmt and staticcheck, only the build job may publish and sign, and the image carries an SBOM.
+- Dependencies: quic-go 0.63.0, golang.org/x/net 0.59.0, acmez 3.1.7, klauspost/compress 1.20.1,
+  and the gVisor netstack moved from a May 2025 commit to the current `go` branch (it is untagged,
+  so Dependabot never proposed it; sixteen months of upstream fixes to the packet parser every
+  WireGuard peer talks to).
+
+### Fixed
+- **TLS-terminating streams no longer restart on every reload.** The change detection compared the
+  address of the certificate id rather than its value, so every configuration save, Docker
+  reconcile and five-minute periodic reload stopped and restarted every TLS-terminating listener
+  and cut its connections. Only a real change restarts a listener now.
+- **Custom locations follow the host's rules.** Request and response header rules, `X-Robots-Tag`,
+  the Host override, sticky sessions and the buffering setting applied to the default upstream
+  only; a path routed to a location got none of them.
+- **A list with users no longer strips `Authorization` from a request admitted by its address**
+  (satisfy any) or from a non-Basic scheme; bearer-token APIs behind a "LAN or password" list work
+  again. The header is removed only when the list itself checked a Basic credential naming one of
+  its users and Pass Auth is off.
+- **Behind a trusted proxy that ends TLS, upstreams see `X-Forwarded-Proto: https`**, and so do the
+  forward-auth server and the `{scheme}` placeholder. The header is believed only from a trusted
+  proxy, and a request quicgate received over TLS is never reported as plain.
+- **A pool member that cannot be reached is taken out at once.** The request that failed to
+  connect marks it down, so the following requests go to the other members instead of every other
+  one answering 502 for up to fifteen seconds; the health check brings it back when it answers.
+- **The force-SSL redirect keeps a non-standard HTTPS port.**
+- **"Remove device" on the VPN portal works.** The page sent the request without a content type
+  and the portal refused it as not coming from the portal, so a device could never be removed
+  from the page; the page and the check agree now, and the test drives the request as a browser
+  sends it.
+- **Declining the login at the identity provider shows a refusal page (403)** instead of a 502
+  from an empty token exchange.
+- `GET /api/me` with an API token answers `{"email": "", "token": true, ...}` instead of a 500.
+- The portal's `/api/me` reports `connected: false` for a device that has never connected.
+- **LAN access (experimental): the flow log and site-endpoint lookups no longer run under the
+  WireGuard endpoint's global lock**, the forwarder's view of this machine's addresses and
+  listeners is cached, and UDP admission runs on worker goroutines instead of the packet-decrypt
+  path, so a slow disk or resolver no longer stalls the tunnel, tunnel DNS, reloads, the status
+  page or the public proxy's connections through sites. "No record, no flow" still holds.
+- **A denied UDP flow is remembered briefly** so its repeat datagrams are dropped without a new
+  decision or record; deny records are rate-limited per device; an allowed flow refused because
+  the flow-log queue is full is counted in the dropped-records figure the Overview shows.
+- **Relay buffers are pooled and sized to their direction**, cutting the memory a device's UDP
+  flows can hold to about a quarter, and one device can no longer fill the forwarder's half-open
+  connection table (64 per device; the excess is reset).
+- **The flow log never records a LAN flow as allowed when it was refused** because the log was too
+  slow; the record is written as a refusal.
+- The tunnel network cannot be changed while devices exist (as was already the case for sites), and
+  a device whose address falls outside the tunnel network is left out rather than misconfigured.
+- A WireGuard site's endpoint is validated beyond `host:port`: loopback, unspecified, multicast,
+  link-local, broadcast and reserved addresses, and quicgate's own listeners, are refused.
+- The test of "removing a site closes its connections" no longer fails under the race detector on
+  small machines (crossed handshake initiations).
+- **`quicgate.streams` entries with `/udp` work.** Only TCP publications were read, so the
+  documented `53/udp` example warned "not published"; `/both` now needs the same host port for
+  both protocols and is refused with a warning naming both otherwise. A label stream whose listen
+  port a manual stream, quicgate itself or another container already uses is shown as skipped in
+  the container's status instead of only in the log.
+- **Docker routes follow manual hosts without a container event.** Creating or deleting a manual
+  host left the Docker status stale, and a label route displaced by a manual host did not return
+  after the manual host was deleted; routes are re-aggregated every 30 seconds as well.
+- **A damaged stored secret no longer stops the sealing migration.** One value that does not open
+  is left as it is and named in the secret status (`warnings`), and everything else is sealed;
+  before, the whole migration was skipped while the status said "sealed".
+- The sticky-session cookie is `Secure` when the client's connection is encrypted; a forward-auth
+  refusal is relayed without the auth server's hop-by-hop headers; the default-site setting is
+  compiled at reload, so a request for an unknown host no longer reads the database; a UPnP
+  mapping key that does not parse is dropped instead of unmapping port 0.
+
+### Added
+- An access list with users under "satisfy any" that also has deny rules shows a warning on its
+  hosts: valid credentials admit a client the deny rules refuse.
+
 ## [1.17.5] - 2026-09-27
 
 ### Added

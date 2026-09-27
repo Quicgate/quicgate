@@ -6,10 +6,9 @@ package main
 import (
 	"context"
 	"embed"
-	"encoding/json"
-	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,28 +25,21 @@ import (
 // dockerEndpoints resolves the Docker hosts to watch. A JSON list in
 // QG_DOCKER_ENDPOINTS or the docker_endpoints setting is authoritative when
 // present; otherwise a single local endpoint is derived from the socket env.
+// A list that does not parse or validate names no endpoint at all: it is
+// logged and nothing is watched, rather than guessing at what was meant or
+// quietly watching the local socket instead of the daemons that were named.
 func dockerEndpoints(st *store.Store) []docker.Endpoint {
 	raw := os.Getenv("QG_DOCKER_ENDPOINTS")
 	if strings.TrimSpace(raw) == "" {
 		raw = st.GetSetting("docker_endpoints", "")
 	}
 	if strings.TrimSpace(raw) != "" {
-		var eps []docker.Endpoint
-		if err := json.Unmarshal([]byte(raw), &eps); err == nil && len(eps) > 0 {
-			for i := range eps {
-				if eps[i].Connect == "" {
-					eps[i].Connect = "/var/run/docker.sock"
-				}
-				if eps[i].Address == "" {
-					eps[i].Address = "127.0.0.1"
-				}
-				if eps[i].Name == "" {
-					eps[i].Name = fmt.Sprintf("endpoint%d", i+1)
-				}
-			}
-			return eps
+		eps, err := docker.ParseEndpoints(raw)
+		if err != nil {
+			log.Printf("docker: %v; no Docker host is watched until the list is fixed", err)
+			return nil
 		}
-		log.Printf("docker: ignoring invalid docker_endpoints JSON, falling back to the local socket")
+		return eps
 	}
 	return []docker.Endpoint{{
 		Name:    "local",
@@ -153,14 +145,31 @@ func main() {
 				}
 				m := map[string]bool{}
 				for _, h := range hosts {
-					if !h.Enabled {
-						continue
-					}
+					// A configured name is configured whether or not its host
+					// is switched on: a container must not take it over while
+					// the host is disabled.
 					for _, d := range h.Domains {
 						m[strings.ToLower(d)] = true
 					}
 				}
 				return m
+			},
+			UsedPorts: func() map[int]bool {
+				used := map[int]bool{}
+				for _, p := range eng.ReservedPorts() {
+					used[p] = true
+				}
+				streams, err := st.ListStreams()
+				if err != nil {
+					return used
+				}
+				for _, s := range streams {
+					last := max(s.ListenPort, s.ListenPortEnd)
+					for p := s.ListenPort; p <= last; p++ {
+						used[p] = true
+					}
+				}
+				return used
 			},
 			Setting: st.GetSetting,
 		})
@@ -177,11 +186,28 @@ func main() {
 		go dockerProvider.Run(ctx)
 	}
 
+	// The admin port is bound here, before the engine starts, so a stream that
+	// is configured on it is the one that fails to listen, not the admin UI
+	// (which would otherwise die in a crash loop, taking every site with it).
+	// ReadTimeout bounds how long a request body may trickle in (the restore
+	// upload extends its own deadline); IdleTimeout ends keep-alive
+	// connections nobody uses. There is no WriteTimeout: a backup download or
+	// a log read may legitimately take longer than any fixed limit.
 	adminAddr := env("QG_ADMIN", ":81")
-	adminSrv := &http.Server{Addr: adminAddr, Handler: adm.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	adminLn, err := net.Listen("tcp", adminAddr)
+	if err != nil {
+		log.Fatalf("admin listener: %v", err)
+	}
+	adminSrv := &http.Server{
+		Addr:              adminAddr,
+		Handler:           adm.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		log.Printf("admin: ui listening on %s", adminAddr)
-		if err := adminSrv.ListenAndServe(); err != http.ErrServerClosed {
+		if err := adminSrv.Serve(adminLn); err != http.ErrServerClosed {
 			log.Fatalf("admin listener: %v", err)
 		}
 	}()

@@ -23,6 +23,12 @@ type OIDCProvider struct {
 	SkipTLSVerify bool     `json:"skipTlsVerify,omitempty"` // IdP with an internal/self-signed CA
 }
 
+// MaxSessionHours caps the SSO session lifetime at 30 days. Sessions are
+// stateless: a cookie is valid until it expires, and nothing but a key
+// rotation ends one early, so a lifetime of years is a credential that cannot
+// be taken back.
+const MaxSessionHours = 720
+
 func (p *OIDCProvider) Validate() error {
 	p.Name = strings.TrimSpace(p.Name)
 	p.Issuer = strings.TrimRight(strings.TrimSpace(p.Issuer), "/")
@@ -48,6 +54,9 @@ func (p *OIDCProvider) Validate() error {
 	}
 	if p.SessionHours < 0 {
 		return errors.New("sessionHours cannot be negative")
+	}
+	if p.SessionHours > MaxSessionHours {
+		return fmt.Errorf("sessionHours cannot exceed %d (30 days): SSO sessions cannot be revoked one by one before they expire", MaxSessionHours)
 	}
 	if p.SessionHours == 0 {
 		p.SessionHours = 12

@@ -4,11 +4,14 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +37,13 @@ var (
 	udpMaxSessionsPerIP = 64
 	// tcpMaxConns caps concurrent connections per TCP listener.
 	tcpMaxConns = 4096
+	// tcpMaxConnsPerIP caps the connections one client address may hold on a
+	// TCP listener, so a single client cannot take every slot for everyone.
+	tcpMaxConnsPerIP = 256
+	// tcpIdleTimeout ends a TCP connection that has carried nothing in either
+	// direction for this long, so an abandoned connection does not hold its
+	// slot and its backend connection forever.
+	tcpIdleTimeout = 10 * time.Minute
 	// streamHandshakeTimeout bounds TLS termination handshakes.
 	streamHandshakeTimeout = 10 * time.Second
 	// proxyHeaderTimeout bounds how long a trusted peer may take to send its
@@ -101,8 +111,9 @@ type tcpOpts struct {
 	// built, so connection goroutines never read the shared variables.
 	headerTimeout    time.Duration
 	handshakeTimeout time.Duration
+	idleTimeout      time.Duration
 	tlsCert          *tls.Certificate  // set => terminate TLS
-	sniRoutes        map[string]string // sni host -> "host:port" (passthrough)
+	sniRoutes        map[string]string // normalised sni host -> "host:port" (passthrough)
 	defaultDest      string            // fallback for SNI routing / plain forward
 }
 
@@ -292,6 +303,7 @@ func buildStreamSpec(s store.Stream, loadCert certLoader, resolveACL aclResolver
 			defaultDest:      target,
 			headerTimeout:    proxyHeaderTimeout,
 			handshakeTimeout: streamHandshakeTimeout,
+			idleTimeout:      tcpIdleTimeout,
 		},
 	}
 	fail := func(format string, args ...any) {
@@ -362,14 +374,28 @@ func buildStreamSpec(s store.Stream, loadCert certLoader, resolveACL aclResolver
 	if len(s.SNIRoutes) > 0 {
 		spec.tcp.sniRoutes = map[string]string{}
 		for _, r := range s.SNIRoutes {
-			spec.tcp.sniRoutes[r.Host] = hostPort(r.ForwardHost, r.ForwardPort)
+			// A server name is a DNS name: case and a trailing dot do not
+			// distinguish two names, so routes are keyed the way they are
+			// matched. Two routes for one name would leave one of them dead.
+			key := routeName(r.Host)
+			if _, dup := spec.tcp.sniRoutes[key]; dup {
+				spec.warnings = append(spec.warnings, fmt.Sprintf("SNI route %q names the same server as an earlier route; the later one is used", r.Host))
+			}
+			spec.tcp.sniRoutes[key] = hostPort(r.ForwardHost, r.ForwardPort)
 		}
 	}
 	// The signature decides whether a running listener is replaced, so it
 	// covers everything the listener was built from, including the certificate
-	// contents (a replaced certificate must restart the listener).
-	spec.sig = fmt.Sprintf("%s|%s|pp:%s/%v/%v|tls:%v/%v/%s|sni:%v|via:%d", target, srcSig,
-		s.SendProxyProtocol, s.AcceptProxyProtocol, s.TrustedProxies, s.TerminateTLS, s.CertID, certSig, s.SNIRoutes, s.Via)
+	// contents (a replaced certificate must restart the listener). Only values
+	// go in: the certificate id is a pointer that ListStreams allocates afresh
+	// on every call, and formatting the pointer restarted every TLS-terminating
+	// listener on every reload.
+	certID := "-"
+	if s.CertID != nil {
+		certID = strconv.FormatInt(*s.CertID, 10)
+	}
+	spec.sig = fmt.Sprintf("%s|%s|pp:%s/%v/%v|tls:%v/%s/%s|sni:%v|via:%d", target, srcSig,
+		s.SendProxyProtocol, s.AcceptProxyProtocol, s.TrustedProxies, s.TerminateTLS, certID, certSig, s.SNIRoutes, s.Via)
 	return spec
 }
 
@@ -520,6 +546,37 @@ func (t *connTracker) closeAll() {
 	}
 }
 
+// sourceCap counts a TCP listener's open connections per client address and
+// refuses a client at its limit, so one client cannot hold every slot. It is
+// keyed on the effective client (the PROXY header's address from a trusted
+// peer), so a load balancer in front is not itself the one capped.
+type sourceCap struct {
+	mu    sync.Mutex
+	max   int
+	perIP map[string]int
+}
+
+func newSourceCap(max int) *sourceCap { return &sourceCap{max: max, perIP: map[string]int{}} }
+
+// acquire counts a connection for ip; false means ip is at its limit.
+func (c *sourceCap) acquire(ip string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.perIP[ip] >= c.max {
+		return false
+	}
+	c.perIP[ip]++
+	return true
+}
+
+func (c *sourceCap) release(ip string) {
+	c.mu.Lock()
+	if c.perIP[ip]--; c.perIP[ip] <= 0 {
+		delete(c.perIP, ip)
+	}
+	c.mu.Unlock()
+}
+
 func startTCP(key, addr string, spec *streamSpec, acct streamAcct) (*forwarder, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -529,7 +586,8 @@ func startTCP(key, addr string, spec *streamSpec, acct streamAcct) (*forwarder, 
 	maxConns := tcpMaxConns
 	slots := make(chan struct{}, maxConns)
 	open := newConnTracker()
-	var limited throttledLog
+	perSource := newSourceCap(tcpMaxConnsPerIP)
+	limited := &throttledLog{}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -555,7 +613,7 @@ func startTCP(key, addr string, spec *streamSpec, acct streamAcct) (*forwarder, 
 				go func() {
 					defer func() { <-slots }()
 					defer open.untrack(conn)
-					handleTCP(key, conn, spec, open, acct)
+					handleTCP(key, conn, spec, open, acct, perSource, limited)
 				}()
 			default:
 				open.untrack(conn)
@@ -573,7 +631,7 @@ func startTCP(key, addr string, spec *streamSpec, acct streamAcct) (*forwarder, 
 
 // handleTCP applies PROXY-accept, SNI routing or TLS termination as
 // configured, then splices the connection to the chosen backend.
-func handleTCP(key string, raw net.Conn, spec *streamSpec, open *connTracker, acct streamAcct) {
+func handleTCP(key string, raw net.Conn, spec *streamSpec, open *connTracker, acct streamAcct, perSource *sourceCap, limited *throttledLog) {
 	defer raw.Close()
 	var clientConn net.Conn = raw
 	clientAddr := raw.RemoteAddr()
@@ -598,6 +656,13 @@ func handleTCP(key string, raw net.Conn, spec *streamSpec, open *connTracker, ac
 		log.Printf("stream %s: refused %s (not in whitelist)", key, clientAddr)
 		return
 	}
+	// One client may not hold the whole listener.
+	src := clientIP(clientAddr.String())
+	if !perSource.acquire(src) {
+		limited.printf("stream %s: %s holds %d connections, refusing its new ones", key, src, perSource.max)
+		return
+	}
+	defer perSource.release(src)
 
 	var upstreamReader io.Reader = clientConn
 	dest := spec.tcp.defaultDest
@@ -610,8 +675,14 @@ func handleTCP(key string, raw net.Conn, spec *streamSpec, open *connTracker, ac
 			log.Printf("stream %s: SNI peek failed: %v", key, err)
 			return
 		}
-		if d, ok := spec.tcp.sniRoutes[sni]; ok {
+		// Server names are DNS names: the route for a.example matches
+		// A.EXAMPLE and a.example. too.
+		if d, ok := spec.tcp.sniRoutes[routeName(sni)]; ok {
 			dest = d
+		} else if sni == "" {
+			limited.printf("stream %s: ClientHello from %s names no server, using the default backend %s", key, clientAddr, dest)
+		} else {
+			limited.printf("stream %s: no route for server name %q from %s, using the default backend %s", key, sni, clientAddr, dest)
 		}
 		upstreamReader = io.MultiReader(peeked, clientConn)
 
@@ -651,13 +722,55 @@ func handleTCP(key string, raw net.Conn, spec *streamSpec, open *connTracker, ac
 		}
 	}
 
+	// From here on the connection lives as long as it carries traffic in
+	// either direction; one with nothing to say for the idle timeout, both
+	// ways, ends together with its backend.
+	var quiet idlePair
 	go func() {
-		io.Copy(backend, upstreamReader)
+		quiet.copy(0, backend, upstreamReader, clientConn, spec.tcp.idleTimeout)
 		if tc, ok := backend.(*net.TCPConn); ok {
 			tc.CloseWrite()
 		}
 	}()
-	io.Copy(clientConn, backend)
+	quiet.copy(1, clientConn, backend, backend, spec.tcp.idleTimeout)
+}
+
+// idlePair is the idle state of the two directions of a spliced connection.
+//
+// Each direction copies with io.Copy on the connections themselves, so a plain
+// TCP to TCP stream keeps the kernel's zero-copy path (splice on Linux), and
+// renews one read deadline per idle period rather than touching deadlines on
+// every read. A direction whose period passed without a byte marks itself
+// quiet; the pair ends when a direction finds both quiet. A download with a
+// silent client therefore runs as long as it likes, and a connection with
+// nothing in either direction ends between one and two idle periods later.
+//
+// Only read deadlines are used. A read that times out loses nothing and can
+// simply be retried; a write that times out may have sent part of a buffer,
+// and the stream could not be resumed without corrupting it.
+type idlePair struct {
+	quiet [2]atomic.Bool
+}
+
+// copy moves src to dst for direction dir (0 or 1) until src ends, a copy
+// fails, or both directions have been quiet for a whole period. srcConn is the
+// connection src reads from, whose read deadline measures the period.
+func (p *idlePair) copy(dir int, dst io.Writer, src io.Reader, srcConn net.Conn, idle time.Duration) {
+	for {
+		_ = srcConn.SetReadDeadline(time.Now().Add(idle))
+		n, err := io.Copy(dst, src)
+		if err == nil || !errors.Is(err, os.ErrDeadlineExceeded) {
+			return // the source ended, or a copy failed
+		}
+		if n > 0 {
+			p.quiet[dir].Store(false)
+			continue
+		}
+		p.quiet[dir].Store(true)
+		if p.quiet[1-dir].Load() {
+			return
+		}
+	}
 }
 
 func startUDP(key, addr string, spec *streamSpec, acct streamAcct) (*forwarder, error) {

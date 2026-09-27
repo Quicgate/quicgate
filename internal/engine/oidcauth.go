@@ -5,12 +5,16 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,12 +40,22 @@ const (
 	oidcLogoutPath   = "/.qg/oidc/logout"
 	oidcSessionName  = "qg_id"
 	oidcStateName    = "qg_oidc_state"
+	// oidcMaxSession bounds a session's lifetime whatever the provider row
+	// says (the store refuses more, older rows may still carry more): sessions
+	// are stateless and cannot be revoked one by one.
+	oidcMaxSession = time.Duration(store.MaxSessionHours) * time.Hour
 )
 
 // identityHeaders are always stripped from inbound requests on a host with
-// OIDC configured (public paths included) so a client can never spoof them,
-// and injected upstream when the host opts in to passIdentity.
+// any identity gate (public paths included) so a client can never spoof them,
+// and injected upstream when an OIDC gate opts in to passIdentity.
 var identityHeaders = []string{"Remote-User", "Remote-Email", "Remote-Groups"}
+
+// ssoCookieNames are the cookies of the built-in SSO: a credential for this
+// host in the browser's hands and nobody else's business. stripHeaders takes
+// them out of the Cookie header, so they never reach an upstream or a
+// forward-auth server, and hands them to the gate through the context.
+var ssoCookieNames = []string{oidcSessionName, oidcStateName}
 
 // oidcSession is the signed cookie payload. Short JSON keys keep the cookie
 // small; groups can be long lists on directory-backed IdPs.
@@ -51,12 +65,17 @@ type oidcSession struct {
 	Host   string   `json:"h"`
 	Expiry int64    `json:"x"`
 	Prov   int64    `json:"p"` // provider that authenticated this session
+	// Unverified: the address came from preferred_username and the provider
+	// did not vouch for it. It names the person, but satisfies no e-mail or
+	// domain rule of the policy; groups still do.
+	Unverified bool `json:"u,omitempty"`
 }
 
 // oidcState carries the in-flight login through the redirect round-trip.
 type oidcState struct {
 	Return   string `json:"r"` // original requestURI to land back on
-	Nonce    string `json:"n"`
+	State    string `json:"s"` // the state parameter the callback must carry
+	Nonce    string `json:"n"` // the nonce the ID token must carry
 	Verifier string `json:"v"` // PKCE code verifier
 	Host     string `json:"h"`
 	Expiry   int64  `json:"x"`
@@ -71,23 +90,44 @@ type oidcState struct {
 type discoveredProvider struct {
 	provider *oidc.Provider
 	err      error
-	fetched  time.Time
+	refresh  time.Time // when to ask the issuer again
 }
 
-func (e *Engine) oidcDiscover(r *http.Request, p store.OIDCProvider) (*oidc.Provider, error) {
+const (
+	oidcDiscoveryTimeout = 15 * time.Second
+	oidcDiscoveryRefresh = time.Hour        // a good result is asked for again after this
+	oidcDiscoveryRetry   = 10 * time.Second // a failed one is retried after this
+)
+
+// oidcDiscover fetches, or serves from the cache, the provider's discovery
+// document. It runs under a context of its own, never the client's: a browser
+// that gives up mid-redirect must not turn into a cached failure that closes
+// the gate for everyone else. A good result is refreshed after an hour, so a
+// moved endpoint is picked up without a restart; a failure is retried after
+// ten seconds; while a refresh fails the last good result stays in use.
+func (e *Engine) oidcDiscover(p store.OIDCProvider) (*oidc.Provider, error) {
 	key := p.Issuer + "|" + boolKey(p.SkipTLSVerify)
+	var last *discoveredProvider
 	if v, ok := e.oidcProviders.Load(key); ok {
-		d := v.(*discoveredProvider)
-		if d.err == nil || time.Since(d.fetched) < 30*time.Second {
-			return d.provider, d.err
+		last = v.(*discoveredProvider)
+		if time.Now().Before(last.refresh) {
+			return last.provider, last.err
 		}
 	}
-	provider, err := oidc.NewProvider(idpContext(r.Context(), p), p.Issuer)
+	ctx, cancel := context.WithTimeout(context.Background(), oidcDiscoveryTimeout)
+	defer cancel()
+	provider, err := oidc.NewProvider(idpContext(ctx, p), p.Issuer)
 	if err != nil {
 		log.Printf("oidc: discovery for %s failed: %v", p.Issuer, err)
+		if last != nil && last.err == nil {
+			e.oidcProviders.Store(key, &discoveredProvider{provider: last.provider, refresh: time.Now().Add(oidcDiscoveryRetry)})
+			return last.provider, nil
+		}
+		e.oidcProviders.Store(key, &discoveredProvider{err: err, refresh: time.Now().Add(oidcDiscoveryRetry)})
+		return nil, err
 	}
-	e.oidcProviders.Store(key, &discoveredProvider{provider: provider, err: err, fetched: time.Now()})
-	return provider, err
+	e.oidcProviders.Store(key, &discoveredProvider{provider: provider, refresh: time.Now().Add(oidcDiscoveryRefresh)})
+	return provider, nil
 }
 
 // idpContext carries the HTTP client for every request to the provider
@@ -118,43 +158,83 @@ func boolKey(b bool) string {
 	return "0"
 }
 
-// oidcSecret returns the process-wide cookie-signing secret, generating and
-// persisting it on first use so sessions survive restarts.
+const ssoSecretSetting = "sso_cookie_secret"
+
+// oidcSecret returns the process-wide cookie-signing key, or nil when there is
+// none that can be used. Every reload loads it (syncOIDCSecret), making and
+// persisting one on first use so sessions survive restarts; this is the
+// fallback for a request that arrives before that. A stored key that does not
+// open (the store is locked, or the database was restored from an instance
+// with another sealing key) is never replaced: that would sign everyone out
+// for good while the right key could still have come back (QG-04). Single
+// sign-on closes instead, and the reload says why in the log.
 func (e *Engine) oidcSecret() []byte {
 	e.oidcSecretMu.Lock()
 	defer e.oidcSecretMu.Unlock()
-	if len(e.oidcSecretKey) > 0 {
-		return e.oidcSecretKey
+	if len(e.oidcSecretKey) == 0 {
+		e.oidcSecretKey, _ = e.loadSSOSecret()
 	}
-	if hexKey := e.store.GetSetting("sso_cookie_secret", ""); hexKey != "" {
-		if key, err := hex.DecodeString(hexKey); err == nil && len(key) == 32 {
-			e.oidcSecretKey = key
-			return key
-		}
-	}
-	key := make([]byte, 32)
-	rand.Read(key)
-	if err := e.store.SetSetting("sso_cookie_secret", hex.EncodeToString(key)); err != nil {
-		log.Printf("oidc: persisting cookie secret failed (sessions will not survive a restart): %v", err)
-	}
-	e.oidcSecretKey = key
-	return key
+	return e.oidcSecretKey
 }
 
 // syncOIDCSecret applies a replaced or cleared sso_cookie_secret to the running
-// gates. Without it the key stayed cached in memory until a restart, so the
-// documented way to sign everybody out (clearing the key) and a restore did
-// nothing to sessions already issued. Called on every reload.
+// gates, and makes a key when none is stored. Without it the key stayed cached
+// in memory until a restart, so the documented way to sign everybody out
+// (clearing the key) and a restore did nothing to sessions already issued.
+// Called on every reload; what keeps single sign-on closed is logged here,
+// once per reload.
 func (e *Engine) syncOIDCSecret() {
-	hexKey := e.store.GetSetting("sso_cookie_secret", "")
 	e.oidcSecretMu.Lock()
 	defer e.oidcSecretMu.Unlock()
-	if key, err := hex.DecodeString(hexKey); err == nil && len(key) == 32 {
-		e.oidcSecretKey = key
-		return
+	key, problem := e.loadSSOSecret()
+	if problem != "" {
+		log.Printf("oidc: %s", problem)
 	}
-	// Cleared or unusable: the next use generates and persists a fresh key.
-	e.oidcSecretKey = nil
+	e.oidcSecretKey = key
+}
+
+// loadSSOSecret reads the signing key from the store, making and persisting
+// one when nothing is stored. It returns the key, or nil with the reason there
+// is none. Called with e.oidcSecretMu held.
+func (e *Engine) loadSSOSecret() ([]byte, string) {
+	key, problem := decodeSSOSecret(e.store.SecretSetting(ssoSecretSetting))
+	if key != nil || problem != "" {
+		return key, problem
+	}
+	// Nothing is stored: first use. The write only happens if that is still
+	// so; otherwise whatever appeared meanwhile is used.
+	key = make([]byte, 32)
+	rand.Read(key)
+	stored, err := e.store.InitSecretSetting(ssoSecretSetting, hex.EncodeToString(key))
+	if err != nil {
+		return nil, "the SSO cookie signing key cannot be stored, single sign-on stays closed: " + err.Error()
+	}
+	if stored {
+		return key, ""
+	}
+	key, problem = decodeSSOSecret(e.store.SecretSetting(ssoSecretSetting))
+	if key == nil && problem == "" {
+		problem = "the SSO cookie signing key vanished while it was being made; single sign-on stays closed until the next reload"
+	}
+	return key, problem
+}
+
+// decodeSSOSecret turns what the store holds under sso_cookie_secret into a
+// key. It returns the key, or nil when nothing usable is stored: with a
+// problem when something is stored that must not be replaced by a new key,
+// and without one when the setting is simply unset.
+func decodeSSOSecret(hexKey string, state store.SecretState) (key []byte, problem string) {
+	switch state {
+	case store.SecretUnreadable:
+		return nil, "the SSO cookie signing key is stored but cannot be opened with the sealing key in use; " +
+			"single sign-on is closed until the original secret.key is back, or the key is reset (Sessions: sign everyone out of SSO)"
+	case store.SecretReadable:
+		if key, err := hex.DecodeString(hexKey); err == nil && len(key) == 32 {
+			return key, ""
+		}
+		return nil, "sso_cookie_secret is set but is not a 64-character hex key; single sign-on is closed until it is cleared (Sessions: sign everyone out of SSO), which makes a new one"
+	}
+	return nil, ""
 }
 
 // oidcGate is one compiled OIDC policy: a provider plus who it admits. A host
@@ -185,33 +265,48 @@ func oidcGateKey(auth store.OIDCAuth) string {
 // oidcGate constructible in tests without a full engine.
 type engineOIDC struct {
 	secret   func() []byte
-	discover func(*http.Request, store.OIDCProvider) (*oidc.Provider, error)
+	discover func(store.OIDCProvider) (*oidc.Provider, error)
+	// devNoTLS is a development instance started without TLS altogether
+	// (QG_TLS=off): the one place the gate works over plain HTTP.
+	devNoTLS bool
 }
 
 // newOIDCGate resolves the host's provider reference. A missing provider
 // fails closed: the gate still exists and answers 403 instead of proxying.
 func (e *Engine) newOIDCGate(auth store.OIDCAuth, providers map[int64]store.OIDCProvider) *oidcGate {
-	g := &oidcGate{engine: &engineOIDC{secret: e.oidcSecret, discover: e.oidcDiscover}, auth: auth, key: oidcGateKey(auth)}
+	g := &oidcGate{engine: &engineOIDC{secret: e.oidcSecret, discover: e.oidcDiscover, devNoTLS: e.cfg.DisableTLS}, auth: auth, key: oidcGateKey(auth)}
 	if p, ok := providers[auth.ProviderID]; ok {
 		g.provider = p
 	}
 	return g
 }
 
+// errNoSigningKey: there is no cookie-signing key to use (see oidcSecret).
+// Nothing is signed with a made-up one, and nothing verifies.
+var errNoSigningKey = errors.New("the SSO cookie signing key is not available")
+
 // sign MACs payload for one purpose (the cookie name). The login state and the
 // session are signed with the same key and their JSON shares field names, so
 // without the purpose a state cookie, which every anonymous visitor receives,
 // verified as a session.
-func (g *oidcGate) sign(purpose string, payload []byte) string {
-	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(g.mac(purpose, payload))
+func (g *oidcGate) sign(purpose string, payload []byte) (string, error) {
+	mac, err := g.mac(purpose, payload)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(mac), nil
 }
 
-func (g *oidcGate) mac(purpose string, payload []byte) []byte {
-	mac := hmac.New(sha256.New, g.engine.secret())
+func (g *oidcGate) mac(purpose string, payload []byte) ([]byte, error) {
+	key := g.engine.secret()
+	if len(key) == 0 {
+		return nil, errNoSigningKey
+	}
+	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(purpose))
 	mac.Write([]byte{0})
 	mac.Write(payload)
-	return mac.Sum(nil)
+	return mac.Sum(nil), nil
 }
 
 func (g *oidcGate) verify(purpose, value string, out any) bool {
@@ -227,30 +322,35 @@ func (g *oidcGate) verify(purpose, value string, out any) bool {
 	if err != nil {
 		return false
 	}
-	if !hmac.Equal(sig, g.mac(purpose, payload)) {
+	want, err := g.mac(purpose, payload)
+	if err != nil || !hmac.Equal(sig, want) {
 		return false
 	}
 	return json.Unmarshal(payload, out) == nil
 }
 
 // allowed applies the host's policy to a verified identity. Empty lists mean
-// any authenticated user.
-func (g *oidcGate) allowed(email string, groups []string) bool {
+// any authenticated user. An address the provider did not vouch for
+// (emailTrusted false) satisfies no e-mail or domain rule: only its groups can
+// admit it.
+func (g *oidcGate) allowed(email string, groups []string, emailTrusted bool) bool {
 	a := g.auth
 	if len(a.AllowedEmails) == 0 && len(a.AllowedDomains) == 0 && len(a.AllowedGroups) == 0 {
 		return true
 	}
-	email = strings.ToLower(email)
-	for _, e := range a.AllowedEmails {
-		if e == email {
-			return true
-		}
-	}
-	if at := strings.LastIndexByte(email, '@'); at >= 0 {
-		domain := email[at+1:]
-		for _, d := range a.AllowedDomains {
-			if d == domain {
+	if emailTrusted {
+		email = strings.ToLower(email)
+		for _, e := range a.AllowedEmails {
+			if e == email {
 				return true
+			}
+		}
+		if at := strings.LastIndexByte(email, '@'); at >= 0 {
+			domain := email[at+1:]
+			for _, d := range a.AllowedDomains {
+				if d == domain {
+					return true
+				}
 			}
 		}
 	}
@@ -273,20 +373,22 @@ func requestHostname(r *http.Request) string {
 }
 
 func (g *oidcGate) setCookie(w http.ResponseWriter, r *http.Request, name, value string, maxAge int) {
+	// Always Secure. The one exception is a development instance that was
+	// started without TLS altogether, where there is no HTTPS to send it on.
 	http.SetCookie(w, &http.Cookie{
 		Name: name, Value: value, Path: "/", HttpOnly: true,
-		Secure: requestIsTLS(r), SameSite: http.SameSiteLaxMode, MaxAge: maxAge,
+		Secure: connectionEncrypted(r) || !g.engine.devNoTLS, SameSite: http.SameSiteLaxMode, MaxAge: maxAge,
 	})
 }
 
 // session returns the request's valid session, or nil.
 func (g *oidcGate) session(r *http.Request) *oidcSession {
-	c, err := r.Cookie(oidcSessionName)
-	if err != nil {
+	value, ok := ssoCookie(r, oidcSessionName)
+	if !ok {
 		return nil
 	}
 	var s oidcSession
-	if !g.verify(oidcSessionName, c.Value, &s) {
+	if !g.verify(oidcSessionName, value, &s) {
 		return nil
 	}
 	// Bound to the host it was minted for AND to the provider that issued it.
@@ -303,6 +405,20 @@ func (g *oidcGate) session(r *http.Request) *oidcSession {
 // access-list gate: they carry no credentials by spec.
 func (g *oidcGate) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The gate mints a cookie that is a credential for this host and runs
+		// a login whose redirect has to come back over the same scheme. Over
+		// plain HTTP anybody on the path reads the cookie, so there is no gate
+		// over plain HTTP (QG-05, as for the VPN portal): the browser is sent
+		// to HTTPS, anything else is refused. A development instance without
+		// TLS altogether is the one exception.
+		if !connectionEncrypted(r) && !g.engine.devNoTLS {
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusPermanentRedirect)
+				return
+			}
+			http.Error(w, "single sign-on is only served over HTTPS", http.StatusForbidden)
+			return
+		}
 		switch r.URL.Path {
 		case oidcCallbackPath:
 			g.handleCallback(w, r)
@@ -322,7 +438,7 @@ func (g *oidcGate) wrap(next http.Handler) http.Handler {
 			return
 		}
 		if s := g.session(r); s != nil {
-			if !g.allowed(s.Email, s.Groups) {
+			if !g.allowed(s.Email, s.Groups, !s.Unverified) {
 				markBlocked(w, blockSSO)
 				http.Error(w, "forbidden: "+s.Email+" is not permitted here", http.StatusForbidden)
 				return
@@ -331,13 +447,40 @@ func (g *oidcGate) wrap(next http.Handler) http.Handler {
 			if g.auth.PassIdentity {
 				r.Header.Set("Remote-User", s.Email)
 				r.Header.Set("Remote-Email", s.Email)
-				r.Header.Set("Remote-Groups", strings.Join(s.Groups, ","))
+				r.Header.Set("Remote-Groups", headerList(s.Groups))
 			}
 			next.ServeHTTP(w, r)
 			return
 		}
 		g.startLogin(w, r)
 	})
+}
+
+// headerList joins values for a comma-separated header so that the delimiter
+// can never appear inside one: a comma, a percent sign and the control
+// characters (a CR/LF would end the header) are percent-encoded, so a group
+// "Sales, EMEA" arrives as the one group "Sales%2C EMEA" and never as two.
+func headerList(values []string) string {
+	out := make([]string, len(values))
+	for i, v := range values {
+		out[i] = encodeListItem(v)
+	}
+	return strings.Join(out, ",")
+}
+
+func encodeListItem(v string) string {
+	if strings.IndexFunc(v, func(r rune) bool { return r == ',' || r == '%' || r < 0x20 || r == 0x7f }) < 0 {
+		return v
+	}
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		if c := v[i]; c == ',' || c == '%' || c < 0x20 || c == 0x7f {
+			fmt.Fprintf(&b, "%%%02X", c)
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // claimIsTrue reads a boolean claim that some providers send as a string.
@@ -359,7 +502,7 @@ func randToken() string {
 
 func (g *oidcGate) oauthConfig(r *http.Request, provider *oidc.Provider) oauth2.Config {
 	scheme := "http"
-	if requestIsTLS(r) {
+	if connectionEncrypted(r) {
 		scheme = "https"
 	}
 	scopes := g.provider.Scopes
@@ -375,14 +518,16 @@ func (g *oidcGate) oauthConfig(r *http.Request, provider *oidc.Provider) oauth2.
 	}
 }
 
+// ssoUnavailable answers a request the gate cannot serve because there is no
+// cookie-signing key (see oidcSecret): nothing is minted or accepted.
+func ssoUnavailable(w http.ResponseWriter) {
+	http.Error(w, "single sign-on is unavailable: the cookie signing key cannot be read (see the server log)", http.StatusServiceUnavailable)
+}
+
 func (g *oidcGate) startLogin(w http.ResponseWriter, r *http.Request) {
-	provider, err := g.engine.discover(r, g.provider)
-	if err != nil {
-		http.Error(w, "identity provider unreachable", http.StatusBadGateway)
-		return
-	}
 	st := oidcState{
 		Return:   r.URL.RequestURI(),
+		State:    randToken(),
 		Nonce:    randToken(),
 		Verifier: oauth2.GenerateVerifier(),
 		Host:     requestHostname(r),
@@ -391,24 +536,37 @@ func (g *oidcGate) startLogin(w http.ResponseWriter, r *http.Request) {
 		Gate:     g.key,
 	}
 	payload, _ := json.Marshal(st)
-	signed := g.sign(oidcStateName, payload)
+	// Signed before the provider is asked anything: without a key there is
+	// no login to start.
+	signed, err := g.sign(oidcStateName, payload)
+	if err != nil {
+		ssoUnavailable(w)
+		return
+	}
+	provider, err := g.engine.discover(g.provider)
+	if err != nil {
+		http.Error(w, "identity provider unreachable", http.StatusBadGateway)
+		return
+	}
 	g.setCookie(w, r, oidcStateName, signed, 300)
 	cfg := g.oauthConfig(r, provider)
 	// The state parameter only needs to tie the callback to this cookie; the
-	// full payload rides in the cookie itself.
-	http.Redirect(w, r, cfg.AuthCodeURL(st.Nonce,
+	// full payload rides in the cookie itself. The nonce is a value of its own:
+	// the state is visible in the callback URL, the nonce only inside the
+	// signed ID token.
+	http.Redirect(w, r, cfg.AuthCodeURL(st.State,
 		oauth2.S256ChallengeOption(st.Verifier), oidc.Nonce(st.Nonce)), http.StatusFound)
 }
 
 func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
-	c, err := r.Cookie(oidcStateName)
-	if err != nil {
+	value, ok := ssoCookie(r, oidcStateName)
+	if !ok {
 		http.Error(w, "login session expired, retry", http.StatusBadRequest)
 		return
 	}
 	var st oidcState
-	if !g.verify(oidcStateName, c.Value, &st) || st.Host != requestHostname(r) ||
-		time.Now().Unix() > st.Expiry || r.URL.Query().Get("state") != st.Nonce {
+	if !g.verify(oidcStateName, value, &st) || st.Host != requestHostname(r) || time.Now().Unix() > st.Expiry ||
+		subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("state")), []byte(st.State)) != 1 {
 		http.Error(w, "state mismatch", http.StatusBadRequest)
 		return
 	}
@@ -425,7 +583,16 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.setCookie(w, r, oidcStateName, "", -1)
-	provider, err := g.engine.discover(r, g.provider)
+	if code := r.URL.Query().Get("error"); code != "" {
+		// The provider answered the login with an error instead of a code:
+		// the person declined, or the client is misconfigured there. Say so,
+		// rather than posting an empty code to the token endpoint.
+		desc := r.URL.Query().Get("error_description")
+		log.Printf("oidc: %s: the identity provider refused a login: %s (%s)", requestHostname(r), clip(code, 80), clip(desc, 200))
+		writeLoginRefused(w, code, desc, safeReturn(st.Return))
+		return
+	}
+	provider, err := g.engine.discover(g.provider)
 	if err != nil {
 		http.Error(w, "identity provider unreachable", http.StatusBadGateway)
 		return
@@ -459,9 +626,11 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email, _ := claims["email"].(string)
+	fromUsername := false
 	if email == "" {
 		// Some IdPs put the address in preferred_username instead.
 		email, _ = claims["preferred_username"].(string)
+		fromUsername = true
 	}
 	if email == "" {
 		markBlocked(w, blockSSO)
@@ -477,6 +646,11 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "identity provider reports this address as unverified", http.StatusForbidden)
 		return
 	}
+	// A user name the provider does not vouch for as an address is a name,
+	// not a mailbox: it is taken at its word for nothing but who to call the
+	// person. Only the groups can admit it, unless the provider says the
+	// address is verified.
+	unverified := fromUsername && !claimIsTrue(claims["email_verified"])
 	var groups []string
 	if raw, ok := claims[g.provider.GroupsClaim].([]any); ok {
 		for _, v := range raw {
@@ -485,7 +659,7 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if !g.allowed(email, groups) {
+	if !g.allowed(email, groups, !unverified) {
 		markBlocked(w, blockSSO)
 		http.Error(w, "forbidden: "+email+" is not permitted here", http.StatusForbidden)
 		return
@@ -494,20 +668,58 @@ func (g *oidcGate) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if ttl <= 0 {
 		ttl = 12 * time.Hour
 	}
-	sess := oidcSession{Email: strings.ToLower(email), Groups: groups,
+	if ttl > oidcMaxSession {
+		ttl = oidcMaxSession
+	}
+	sess := oidcSession{Email: strings.ToLower(email), Groups: groups, Unverified: unverified,
 		Host: requestHostname(r), Prov: g.provider.ID, Expiry: time.Now().Add(ttl).Unix()}
 	payload, _ := json.Marshal(sess)
-	g.setCookie(w, r, oidcSessionName, g.sign(oidcSessionName, payload), int(ttl.Seconds()))
-	// Only ever return to a same-host relative path: the value came back
-	// through a signed cookie, but defence in depth costs one check.
-	dest := st.Return
-	// Browsers treat a backslash as a path separator in some positions, so
-	// "/\evil.com" can become protocol-relative; CR/LF would split the header.
+	signed, err := g.sign(oidcSessionName, payload)
+	if err != nil {
+		ssoUnavailable(w)
+		return
+	}
+	g.setCookie(w, r, oidcSessionName, signed, int(ttl.Seconds()))
+	http.Redirect(w, r, safeReturn(st.Return), http.StatusFound)
+}
+
+// safeReturn keeps a post-login destination on this host: only ever a relative
+// path. The value came back through a signed cookie, but defence in depth
+// costs one check. Browsers treat a backslash as a path separator in some
+// positions, so "/\evil.com" can become protocol-relative; CR/LF would split
+// the header.
+func safeReturn(dest string) string {
 	if !strings.HasPrefix(dest, "/") || strings.HasPrefix(dest, "//") ||
 		strings.ContainsAny(dest, "\\\r\n") {
-		dest = "/"
+		return "/"
 	}
-	http.Redirect(w, r, dest, http.StatusFound)
+	return dest
+}
+
+// clip shortens a value from the callback URL for the log and the page: the
+// provider's description is short, anything longer is not the provider's.
+func clip(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "..."
+	}
+	return s
+}
+
+// writeLoginRefused is the page for a login the identity provider answered
+// with an error. Both values come from the callback URL, so they are shown
+// escaped and cut short.
+func writeLoginRefused(w http.ResponseWriter, code, desc, retry string) {
+	msg := "the identity provider refused the login: " + htmlEscape(clip(code, 80))
+	if desc != "" {
+		msg += " (" + htmlEscape(clip(desc, 200)) + ")"
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusForbidden)
+	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>Login refused</title>
+<style>body{background:#0e0f13;color:#eef1f4;font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0}
+div{text-align:center;max-width:40em}h1{margin:0 0 .5em}p{color:#8b97a8}a{color:#a3e635}</style></head>
+<body><div><h1>Login refused</h1><p>%s</p><p><a href="%s">Try again</a></p></div></body></html>`, msg, htmlEscape(retry))
 }
 
 // normalizeHeaderName folds a header name the way many application servers do
@@ -517,10 +729,74 @@ func normalizeHeaderName(name string) string {
 	return strings.ReplaceAll(strings.ToLower(name), "_", "-")
 }
 
+// ssoCookiesKey carries quicgate's own SSO cookies, taken out of the Cookie
+// header by stripHeaders, to the gate that reads them.
+type ssoCookiesKey struct{}
+
+// ssoCookie returns one of quicgate's own cookies: from where stripHeaders put
+// it, or from the header when the request did not pass through it.
+func ssoCookie(r *http.Request, name string) (string, bool) {
+	if taken, ok := r.Context().Value(ssoCookiesKey{}).(map[string]string); ok {
+		v, ok := taken[name]
+		return v, ok
+	}
+	c, err := r.Cookie(name)
+	if err != nil {
+		return "", false
+	}
+	return c.Value, true
+}
+
+// takeCookies removes the named cookies from the Cookie header, leaving every
+// other cookie as it was sent, and returns what it took (the first value of a
+// name, as r.Cookie would). The header goes when nothing is left.
+func takeCookies(h http.Header, names []string) map[string]string {
+	lines := h["Cookie"]
+	if len(lines) == 0 {
+		return nil
+	}
+	var taken map[string]string
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		var keep []string
+		for _, part := range strings.Split(line, ";") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			name, value, _ := strings.Cut(part, "=")
+			if !slices.Contains(names, name) {
+				keep = append(keep, part)
+				continue
+			}
+			if taken == nil {
+				taken = map[string]string{}
+			}
+			if _, dup := taken[name]; !dup {
+				taken[name] = value
+			}
+		}
+		if len(keep) > 0 {
+			kept = append(kept, strings.Join(keep, "; "))
+		}
+	}
+	if taken == nil {
+		return nil
+	}
+	if len(kept) == 0 {
+		h.Del("Cookie")
+	} else {
+		h["Cookie"] = kept
+	}
+	return taken
+}
+
 // stripHeaders removes the named headers from every inbound request before any
 // gate runs, public paths included, so an upstream that trusts identity
 // headers can never be fed a spoofed value through quicgate. Only a gate that
-// has just authenticated the request puts them back.
+// has just authenticated the request puts them back. It also takes quicgate's
+// own SSO cookies out of the Cookie header (see ssoCookieNames): the gate
+// reads them from the context, the upstream never sees them.
 func stripHeaders(names []string, next http.Handler) http.Handler {
 	if len(names) == 0 {
 		return next
@@ -537,25 +813,33 @@ func stripHeaders(names []string, next http.Handler) http.Handler {
 				delete(r.Header, k)
 			}
 		}
+		if taken := takeCookies(r.Header, ssoCookieNames); len(taken) > 0 {
+			r = r.WithContext(context.WithValue(r.Context(), ssoCookiesKey{}, taken))
+		}
 		next.ServeHTTP(w, r)
 	})
 }
 
 // trustedIdentityHeaders lists every header name a gate on this host may inject
-// upstream: the Remote-* set when any SSO gate exists (host-level or on any
-// path rule) and the forward-auth response headers when forward auth is set.
+// upstream, or that an upstream behind it may trust: the Remote-* set whenever
+// any identity gate exists (SSO or forward auth, host-level or on any path
+// rule), and the forward-auth response headers when forward auth is set. A
+// forward-auth host whose upstream reads Remote-User must not get the
+// client's own value just because the auth server was told to send another
+// name.
 func trustedIdentityHeaders(o store.Options) []string {
-	var names []string
-	sso := o.OIDC != nil
+	forward := o.ForwardAuth != nil && o.ForwardAuth.URL != ""
+	identity := o.OIDC != nil || forward
 	for _, r := range o.AuthRules {
-		if r.Mode == "oidc" {
-			sso = true
+		if r.Mode == "oidc" || r.Mode == "forwardAuth" {
+			identity = true
 		}
 	}
-	if sso {
+	var names []string
+	if identity {
 		names = append(names, identityHeaders...)
 	}
-	if o.ForwardAuth != nil && o.ForwardAuth.URL != "" {
+	if forward {
 		for _, h := range o.ForwardAuth.ResponseHeaders {
 			if h = strings.TrimSpace(h); h != "" {
 				names = append(names, h)

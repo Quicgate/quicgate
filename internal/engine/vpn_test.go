@@ -69,7 +69,9 @@ func (c *tunnelClient) start(t *testing.T, addr, serverPub string, serverPort in
 	}
 	c.net = tnet
 	c.httpClient = &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
-		DialContext:       func(ctx context.Context, _, _ string) (net.Conn, error) { return tnet.DialContext(ctx, "tcp", "10.77.0.1:80") },
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return tnet.DialContext(ctx, "tcp", "10.77.0.1:80")
+		},
 		DisableKeepAlives: true,
 	}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
@@ -238,5 +240,35 @@ func TestDNSReplyMustRepeatTheQuestion(t *testing.T) {
 	}
 	if sameQuestion(query, []byte{0, 7, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0}) {
 		t.Error("a reply without a question was taken for the answer")
+	}
+}
+
+// A device keeps the address it was given. The API refuses to move the tunnel
+// network while devices exist, but should the setting change by other means,
+// a device whose address lies outside the network is left out of the
+// endpoint's configuration rather than given an AllowedIPs outside the tunnel
+// (L-34).
+func TestADeviceOutsideTheTunnelNetworkIsLeftOut(t *testing.T) {
+	t.Setenv("QG_SECRET_KEY", "")
+	t.Setenv("QG_SECRET_KEY_FILE", "")
+	e, st := newTestEngine(t)
+	_, network, _, err := WGSettings(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := store.WGDevice{Name: "phone", Kind: "admin", PublicKey: newTunnelClient(t).pub, Enabled: true}
+	psk, err := wg.NewPresharedKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateWGDevice(&dev, network, psk, 0); err != nil {
+		t.Fatal(err)
+	}
+	if devs, _ := e.wgDevices(time.Now(), false); len(devs) != 1 || devs[0].Address.String() != dev.Address {
+		t.Fatalf("devices in the network they were made in = %+v, want the one device", devs)
+	}
+	setSettings(t, st, map[string]string{"wg_network": "10.88.0.0/24"})
+	if devs, _ := e.wgDevices(time.Now(), false); len(devs) != 0 {
+		t.Fatalf("a device at %s is configured although the tunnel network is 10.88.0.0/24 now: %+v", dev.Address, devs)
 	}
 }

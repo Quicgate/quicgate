@@ -96,7 +96,7 @@ components:
         clientSecret: { type: string, description: write-mostly, masked in responses }
         scopes: { type: array, items: { type: string }, description: "default: openid email profile" }
         groupsClaim: { type: string, description: "ID-token claim holding groups (default: groups)" }
-        sessionHours: { type: integer, description: "session cookie lifetime (default: 12)" }
+        sessionHours: { type: integer, description: "session cookie lifetime in hours (default: 12, maximum: 720)" }
         skipTlsVerify: { type: boolean }
     AccessList:
       type: object
@@ -138,8 +138,21 @@ components:
         accessListId: { type: integer, description: "reuse an access list's allow CIDR/host rules as the source filter instead of allowedCidrs" }
         sendProxyProtocol: { type: string, enum: ["", v1, v2] }
         acceptProxyProtocol: { type: boolean }
+        trustedProxies: { type: array, items: { type: string }, description: "CIDRs whose PROXY protocol header is believed; required when acceptProxyProtocol is on, other peers are never parsed" }
+        via: { type: integer, description: "id of the WireGuard site the target is reached through; 0 = the local network" }
         terminateTls: { type: boolean }
         certId: { type: integer, nullable: true }
+        listeners:
+          type: array
+          readOnly: true
+          description: "one entry per listening port (a range has several): its state and, when it could not start, why"
+          items:
+            type: object
+            properties:
+              streamId: { type: integer }
+              key: { type: string, example: "tcp:19300" }
+              state: { type: string, enum: [running, failed] }
+              error: { type: string }
         sniRoutes:
           type: array
           items:
@@ -172,7 +185,7 @@ paths:
   /api/logout:
     post: { summary: Log out, responses: { "200": { description: ok } } }
   /api/me:
-    get: { summary: Current user, responses: { "200": { description: "{email, mustChange, totpEnabled}" } } }
+    get: { summary: Current user, responses: { "200": { description: "{email, mustChange, totpEnabled}; for an API token {email: \"\", token: true}" } } }
   /api/password:
     post:
       summary: Change password
@@ -193,7 +206,7 @@ paths:
   /api/2fa/setup:
     post: { summary: Begin 2FA setup, responses: { "200": { description: "{secret, uri}" } } }
   /api/2fa/enable:
-    post: { summary: Enable 2FA, responses: { "200": { description: enabled } } }
+    post: { summary: "Enable 2FA with the secret that /api/2fa/setup bound to this session (within 15 minutes); body {code, password}", responses: { "200": { description: enabled } } }
   /api/2fa/disable:
     post: { summary: Disable 2FA, responses: { "200": { description: disabled } } }
   /api/hosts:

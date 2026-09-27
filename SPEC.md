@@ -72,7 +72,7 @@ Host type that serves a branded 404 with valid TLS. M2.
 
 ### Default site (Settings)
 
-What unmatched hostnames get: 404 page / congratulations page / redirect / custom HTML. M2.
+What unmatched hostnames get: 404 page / redirect / custom HTML. M2.
 
 ### SSL Certificates screen
 

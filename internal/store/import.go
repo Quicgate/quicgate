@@ -166,7 +166,10 @@ func (s *Store) Import(doc ImportDoc, reserved []int) (ImportResult, error) {
 // protectionRemoved names the protection an import entry would take away from
 // the host it updates, or returns "". The document is declarative, but a
 // missing field must not quietly make a protected host, or a gated path of it,
-// public.
+// public: that covers who may reach it (access list, SSO, forward auth, client
+// certificates, the VPN) and how (TLS, the forced redirect to it, its minimum
+// version), because a field left out of a document is exactly what a typo or
+// an older copy of it looks like.
 func protectionRemoved(cur, next Host) string {
 	switch {
 	case cur.AccessListID != nil && next.AccessListID == nil:
@@ -178,6 +181,16 @@ func protectionRemoved(cur, next Host) string {
 		return "forward authentication"
 	case cur.Options.ClientCert != nil && next.Options.ClientCert == nil:
 		return "client certificate requirement"
+	case clientCertMode(cur.Options.ClientCert) == "require" && clientCertMode(next.Options.ClientCert) != "require":
+		return "client certificate requirement (require would become " + clientCertMode(next.Options.ClientCert) + ")"
+	case cur.Options.VPNOnly && !next.Options.VPNOnly:
+		return "VPN-only restriction"
+	case cur.CertMode != "none" && next.CertMode == "none":
+		return "TLS (certMode would become none)"
+	case cur.ForceSSL && !next.ForceSSL:
+		return "forced HTTPS redirect (forceSsl)"
+	case cur.Options.MinTLSVersion == "1.3" && next.Options.MinTLSVersion != "1.3":
+		return "TLS 1.3 minimum (minTlsVersion)"
 	}
 	for _, rule := range cur.Options.AuthRules {
 		if rule.Mode == "public" {
@@ -195,6 +208,19 @@ func protectionRemoved(cur, next Host) string {
 		}
 	}
 	return ""
+}
+
+// clientCertMode is the mode a client-certificate setting takes effect with.
+// Validate defaults an empty mode to require, so the comparison must too; no
+// setting at all is "none".
+func clientCertMode(cc *ClientCert) string {
+	switch {
+	case cc == nil:
+		return "none"
+	case cc.Mode == "":
+		return "require"
+	}
+	return cc.Mode
 }
 
 // domainKey is a host's identity for import matching: its domains, normalised

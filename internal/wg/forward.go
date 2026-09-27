@@ -10,16 +10,28 @@ package wg
 // may reach; this machine's own addresses; policy. For TCP the decision falls
 // before the handshake completes, so a refused connection is reset, never
 // accepted and then closed.
+//
+// Nothing on the packet path waits for the flow log (S31). An admission
+// decides and reserves its place under the manager's lock, then waits for
+// the record of the allowed flow to be written with the lock released, so a
+// slow disk delays that one flow and not the tunnel's other traffic, its DNS,
+// a reload or the public proxy's dials through sites. gVisor calls the UDP
+// forwarder on the goroutine that decrypts the tunnel, so UDP admissions are
+// handed to workers and the handler itself never blocks.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
@@ -27,14 +39,34 @@ import (
 )
 
 // Bounds (S49). They are counted limits; the measured thresholds belong to
-// the release's load tests.
+// the release's load tests. With the relay buffers below, an open UDP flow
+// holds about 66 KiB of relay buffers and a TCP flow 64 KiB, before the
+// stack's own per-endpoint buffers (stack.go).
 const (
 	maxFlowsPerPeer = 512
 	maxFlowsTotal   = 4096
-	tcpInFlight     = 512 // half-open connections the forwarder holds
-	forwardDialWait = 5 * time.Second
-	udpIdle         = 60 * time.Second
-	tcpIdle         = 2 * time.Hour
+	// maxPendingPerPeer bounds the flows of one peer that are between
+	// admission and relay: waiting for their record, or dialling. The TCP
+	// forwarder holds tcpInFlight half-open connections in all, and without
+	// this one device could take every one of them.
+	maxPendingPerPeer = 64
+	tcpInFlight       = 512 // half-open connections the forwarder holds
+	forwardDialWait   = 5 * time.Second
+	udpIdle           = 60 * time.Second
+	tcpIdle           = 2 * time.Hour
+	// UDP admissions wait for a worker in a bounded queue, with a share per
+	// source address so one device cannot fill it for the others.
+	udpAdmitWorkers   = 8
+	udpAdmitQueue     = 256
+	udpAdmitPerSource = 32
+	// A refused UDP flow is remembered by its 4-tuple: its next datagrams are
+	// dropped without a decision or a record. A reload forgets the refusals,
+	// because it may have changed what is allowed.
+	denyCacheFor = 30 * time.Second
+	denyCacheMax = 8192
+	// denyRecordsPerSecond caps the deny records written per peer. What is
+	// suppressed is counted (FlowRecordsSuppressed).
+	denyRecordsPerSecond = 10
 )
 
 // PortRange is an inclusive range of ports.
@@ -67,7 +99,9 @@ func (r Route) allows(proto string, dst netip.AddrPort) bool {
 }
 
 // Guard is what the forwarder must know about the machine it runs on. The
-// engine fills it in; every function may be nil.
+// engine fills it in; every function may be nil. The functions are asked on
+// every admission, so they should answer from a cache (the engine's do), and
+// the forwarder never modifies what they return.
 type Guard struct {
 	// OwnAddrs are this machine's addresses, and OwnNets the subnets on its
 	// interfaces. A destination that is an own address is refused unless a
@@ -106,6 +140,12 @@ type FlowRecord struct {
 type flowID struct {
 	proto string
 	dst   netip.AddrPort
+}
+
+// flowKey is the 4-tuple of a flow with its protocol.
+type flowKey struct {
+	proto    string
+	src, dst netip.AddrPort
 }
 
 var (
@@ -227,6 +267,9 @@ type flowConns struct {
 	conns  []io.Closer
 	ctx    context.Context // cancelled when the flow is closed, also mid-dial
 	cancel context.CancelFunc
+	// settled is set once the flow is past its opening phase (dialled, or
+	// gone), when it stops counting against its peer's pending flows.
+	settled atomic.Bool
 }
 
 func (f *flowConns) add(c io.Closer) bool {
@@ -253,6 +296,57 @@ func (f *flowConns) close() {
 	}
 }
 
+// udpAdmitter hands UDP admissions from the receive path to workers. The
+// handler only checks the deny cache and queues the request; the first
+// datagram travels with the request and reaches the endpoint once it exists.
+// Datagrams of the same flow that arrive while its admission is pending are
+// dropped, as are requests beyond the queue's size or a source's share of it.
+type udpAdmitter struct {
+	mu      sync.Mutex
+	pending map[flowKey]struct{}
+	bySrc   map[netip.Addr]int
+	queue   chan udpRequest
+}
+
+type udpRequest struct {
+	key flowKey
+	r   *udp.ForwarderRequest
+}
+
+func newUDPAdmitter() *udpAdmitter {
+	return &udpAdmitter{pending: map[flowKey]struct{}{}, bySrc: map[netip.Addr]int{}, queue: make(chan udpRequest, udpAdmitQueue)}
+}
+
+// enqueue takes the request unless the flow's admission is already pending,
+// the source has its share of the queue, or the queue is full.
+func (u *udpAdmitter) enqueue(k flowKey, r *udp.ForwarderRequest) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if _, dup := u.pending[k]; dup || u.bySrc[k.src.Addr()] >= udpAdmitPerSource {
+		return false
+	}
+	select {
+	case u.queue <- udpRequest{key: k, r: r}:
+	default:
+		return false
+	}
+	u.pending[k] = struct{}{}
+	u.bySrc[k.src.Addr()]++
+	return true
+}
+
+// settle forgets a pending admission once a worker is through with it.
+func (u *udpAdmitter) settle(k flowKey) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	delete(u.pending, k)
+	if u.bySrc[k.src.Addr()] <= 1 {
+		delete(u.bySrc, k.src.Addr())
+	} else {
+		u.bySrc[k.src.Addr()]--
+	}
+}
+
 // installForwarder makes the interface promiscuous and takes every TCP
 // connection and UDP flow no listener of quicgate's claims.
 func (m *Manager) installForwarder(in *instance) error {
@@ -261,66 +355,228 @@ func (m *Manager) installForwarder(in *instance) error {
 	}
 	tcpFwd := tcp.NewForwarder(in.stack.s, 0, tcpInFlight, func(r *tcp.ForwarderRequest) { m.forwardTCP(in, r) })
 	in.stack.s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
-	udpFwd := udp.NewForwarder(in.stack.s, func(r *udp.ForwarderRequest) { m.forwardUDP(in, r) })
+	in.udp = newUDPAdmitter()
+	// The handler reports whether it took the request: it always does, either
+	// by creating an endpoint, by handing the request to an admission worker,
+	// or by deciding to drop the packet itself, so the stack never answers a
+	// tunnel packet with an ICMP error on our behalf.
+	udpFwd := udp.NewForwarder(in.stack.s, func(r *udp.ForwarderRequest) bool { m.forwardUDP(in, r); return true })
 	in.stack.s.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
+	for i := 0; i < udpAdmitWorkers; i++ {
+		go m.udpWorker(in)
+	}
 	return nil
 }
 
-// admitFlow is the admission of S2 for a forwarded flow: under the manager's
-// lock it finds the device behind the source, decides, takes the log record
-// and registers the flow, before anything is dialled. It returns nil when the
-// flow is refused.
-func (m *Manager) admitFlow(in *instance, proto string, src, dst netip.AddrPort) (*tracked, *flowConns, peer) {
-	now := time.Now()
+// admission is the outcome of admitFlow: a registered flow, or the reason it
+// was refused.
+type admission struct {
+	t      *tracked
+	fc     *flowConns
+	p      peer
+	why    string
+	record func(FlowRecord) bool
+}
+
+// admitFlow is the admission of S2 for a forwarded flow, in three steps.
+// Under the manager's lock it finds the device behind the source, decides,
+// and registers the flow as a reservation that counts against the budgets
+// and that a revocation closes. With the lock released it waits for the
+// record of the allowed flow to be written: no record, no flow (S31). Under
+// the lock again it checks that the reservation survived, and only then does
+// the flow exist. It returns no tracked flow when the flow is refused.
+func (m *Manager) admitFlow(in *instance, proto string, src, dst netip.AddrPort) admission {
+	rec := FlowRecord{Time: time.Now(), Source: src.String(), Dest: dst.String(), Proto: proto}
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	rec := FlowRecord{Time: now, Source: src.String(), Dest: dst.String(), Proto: proto}
-	deny := func(p peer, why string) (*tracked, *flowConns, peer) {
-		rec.Verdict, rec.Reason, rec.Peer, rec.Device, rec.Owner = "deny", why, p.key, p.name, p.owner
-		if m.record != nil {
-			m.record(rec) // best effort
-		}
-		return nil, nil, p
-	}
-	if m.inst != in {
-		return deny(peer{}, "the endpoint was reset")
-	}
-	p, ok := m.peerByAddrLocked(src.Addr())
-	if !ok {
-		return deny(peer{}, "no active device has this address")
-	}
-	if p.site || len(p.routes) == 0 {
-		return deny(p, "this peer has no LAN access")
-	}
-	if allowed, why := decide(m.cfg, p.routes, proto, dst); !allowed {
-		return deny(p, why)
-	}
-	total := 0
-	for _, set := range m.flows {
-		total += len(set)
-	}
-	if len(m.flows[p.key]) >= maxFlowsPerPeer || total >= maxFlowsTotal {
-		return deny(p, "too many open flows")
-	}
-	// No record, no flow (S31).
-	rec.Verdict, rec.Peer, rec.Device, rec.Owner = "allow", p.key, p.name, p.owner
-	if m.record != nil && !m.record(rec) {
-		rec.Verdict, rec.Reason = "deny", "the flow log is full"
-		return nil, nil, p
+	record := m.record
+	p, why := m.decideLocked(in, proto, src, dst)
+	if why != "" {
+		m.mu.Unlock()
+		return m.refuse(record, rec, p, why)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	fc := &flowConns{ctx: ctx, cancel: cancel}
 	t := &tracked{close: fc.close, flow: &flowID{proto: proto, dst: dst}}
 	m.admitLocked(p.key, t)
-	return t, fc, p
+	m.pending[p.key]++
+	m.mu.Unlock()
+
+	rec.Verdict, rec.Peer, rec.Device, rec.Owner = "allow", p.key, p.name, p.owner
+	if record != nil && !record(rec) {
+		m.dropReservation(p.key, t, fc)
+		return m.refuse(record, rec, p, "the flow log is full")
+	}
+
+	m.mu.Lock()
+	if t.closed.Load() || m.inst != in {
+		// Revoked, or no longer allowed by a policy applied meanwhile, or the
+		// stack was reset while the record was written. The record says
+		// allow; the refusal that follows says what became of the flow.
+		m.dropReservationLocked(p.key, t, fc)
+		m.mu.Unlock()
+		return m.refuse(record, rec, p, "the device or the endpoint went away while the flow was admitted")
+	}
+	m.mu.Unlock()
+	return admission{t: t, fc: fc, p: p, record: record}
 }
 
-// endFlow unregisters a flow and writes its closing record, best effort.
-func (m *Manager) endFlow(p peer, t *tracked, fc *flowConns, proto string, src, dst netip.AddrPort, began time.Time, up, down int64) {
+// decideLocked is the part of an admission that needs the manager's state:
+// the peer behind the source, the policy, and the budgets. It returns the
+// peer and, when the flow is refused, why. The caller holds m.mu.
+func (m *Manager) decideLocked(in *instance, proto string, src, dst netip.AddrPort) (peer, string) {
+	if m.inst != in {
+		return peer{}, "the endpoint was reset"
+	}
+	p, ok := m.peerByAddrLocked(src.Addr())
+	if !ok {
+		return peer{}, "no active device has this address"
+	}
+	if p.site || len(p.routes) == 0 {
+		return p, "this peer has no LAN access"
+	}
+	if allowed, why := decide(m.cfg, p.routes, proto, dst); !allowed {
+		return p, why
+	}
+	if !m.roomLocked(p.key) {
+		return p, "too many open flows"
+	}
+	if m.pending[p.key] >= maxPendingPerPeer {
+		return p, "too many flows being opened at once"
+	}
+	return p, ""
+}
+
+// refuse writes the deny record, best effort and at most denyRecordsPerSecond
+// per peer, and returns the refusal.
+func (m *Manager) refuse(record func(FlowRecord) bool, rec FlowRecord, p peer, why string) admission {
+	rec.Verdict, rec.Reason, rec.Peer, rec.Device, rec.Owner = "deny", why, p.key, p.name, p.owner
+	if record != nil {
+		if m.denyRecordAllowed(p.key, time.Now()) {
+			record(rec)
+		} else {
+			m.suppressed.Add(1)
+		}
+	}
+	return admission{p: p, why: why, record: record}
+}
+
+// dropReservation gives a reservation up before the flow exists.
+func (m *Manager) dropReservation(key string, t *tracked, fc *flowConns) {
+	m.mu.Lock()
+	m.dropReservationLocked(key, t, fc)
+	m.mu.Unlock()
+}
+
+func (m *Manager) dropReservationLocked(key string, t *tracked, fc *flowConns) {
+	if !t.closed.Swap(true) {
+		delete(m.flows[key], t)
+	}
+	m.settleLocked(key, fc)
 	fc.close()
-	m.release(p.key, t)
-	if m.record != nil {
-		m.record(FlowRecord{Time: time.Now(), Peer: p.key, Device: p.name, Owner: p.owner, Source: src.String(), Dest: dst.String(),
+}
+
+// settle ends the opening phase of a flow: it is relaying, or it is gone.
+func (m *Manager) settle(key string, fc *flowConns) {
+	if fc.settled.Load() {
+		return
+	}
+	m.mu.Lock()
+	m.settleLocked(key, fc)
+	m.mu.Unlock()
+}
+
+func (m *Manager) settleLocked(key string, fc *flowConns) {
+	if !fc.settled.CompareAndSwap(false, true) {
+		return
+	}
+	if m.pending[key] <= 1 {
+		delete(m.pending, key)
+	} else {
+		m.pending[key]--
+	}
+}
+
+// denyRecordAllowed reports whether one more deny record of the peer may be
+// written this second.
+func (m *Manager) denyRecordAllowed(key string, now time.Time) bool {
+	m.denyMu.Lock()
+	defer m.denyMu.Unlock()
+	if len(m.denyWin) > 4096 {
+		m.denyWin = map[string]denyWindow{}
+	}
+	w := m.denyWin[key]
+	if now.Sub(w.at) >= time.Second {
+		w = denyWindow{at: now}
+	}
+	w.n++
+	m.denyWin[key] = w
+	return w.n <= denyRecordsPerSecond
+}
+
+// denyWindow counts one peer's deny records in the current second.
+type denyWindow struct {
+	at time.Time
+	n  int
+}
+
+// recentlyDenied reports whether the flow was refused within denyCacheFor.
+func (m *Manager) recentlyDenied(k flowKey, now time.Time) bool {
+	m.denyMu.Lock()
+	defer m.denyMu.Unlock()
+	until, ok := m.denied[k]
+	if !ok {
+		return false
+	}
+	if now.After(until) {
+		delete(m.denied, k)
+		return false
+	}
+	return true
+}
+
+// noteDenied remembers a refusal. When the cache is full, expired entries go
+// first; when it is full of live ones, this refusal is not remembered.
+func (m *Manager) noteDenied(k flowKey, now time.Time) {
+	m.denyMu.Lock()
+	defer m.denyMu.Unlock()
+	if len(m.denied) >= denyCacheMax {
+		for key, until := range m.denied {
+			if now.After(until) {
+				delete(m.denied, key)
+			}
+		}
+		if len(m.denied) >= denyCacheMax {
+			return
+		}
+	}
+	m.denied[k] = now.Add(denyCacheFor)
+}
+
+// forgetDenials empties the deny cache: the configuration changed, and with
+// it perhaps what is allowed.
+func (m *Manager) forgetDenials() {
+	m.denyMu.Lock()
+	m.denied = map[flowKey]time.Time{}
+	m.denyMu.Unlock()
+}
+
+// FlowRecordsSuppressed reports how many deny records were not written
+// because a peer exceeded denyRecordsPerSecond. They count as lost
+// best-effort records (S31).
+func (m *Manager) FlowRecordsSuppressed() uint64 { return m.suppressed.Load() }
+
+// endFlow unregisters a flow and writes its closing record, best effort.
+func (m *Manager) endFlow(a admission, proto string, src, dst netip.AddrPort, began time.Time, up, down int64) {
+	a.fc.close()
+	m.mu.Lock()
+	if a.t.closed.CompareAndSwap(false, true) {
+		delete(m.flows[a.p.key], a.t)
+	}
+	m.settleLocked(a.p.key, a.fc)
+	m.mu.Unlock()
+	if a.record != nil {
+		a.record(FlowRecord{Time: time.Now(), Peer: a.p.key, Device: a.p.name, Owner: a.p.owner, Source: src.String(), Dest: dst.String(),
 			Proto: proto, Verdict: "end", BytesUp: up, BytesDn: down, Duration: time.Since(began).Seconds()})
 	}
 }
@@ -330,26 +586,29 @@ func addrPort(a []byte, port uint16) netip.AddrPort {
 	return netip.AddrPortFrom(ip.Unmap(), port)
 }
 
+// forwardTCP runs on a goroutine of its own, one per half-open connection,
+// so it may wait for the record and the dial.
 func (m *Manager) forwardTCP(in *instance, r *tcp.ForwarderRequest) {
 	id := r.ID()
 	src := addrPort(id.RemoteAddress.AsSlice(), id.RemotePort)
 	dst := addrPort(id.LocalAddress.AsSlice(), id.LocalPort)
 	began := time.Now()
-	t, fc, p := m.admitFlow(in, "tcp", src, dst)
-	if t == nil {
+	a := m.admitFlow(in, "tcp", src, dst)
+	if a.t == nil {
 		r.Complete(true) // reset: the handshake never completes
 		return
 	}
 	var up, down int64
-	defer func() { m.endFlow(p, t, fc, "tcp", src, dst, began, up, down) }()
+	defer func() { m.endFlow(a, "tcp", src, dst, began, up, down) }()
 
 	// Dial first: a destination that does not answer is a reset for the
 	// device, not an accepted connection that goes nowhere.
-	ctx, cancel := context.WithTimeout(fc.ctx, forwardDialWait)
+	ctx, cancel := context.WithTimeout(a.fc.ctx, forwardDialWait)
 	var d net.Dialer
 	out, err := d.DialContext(ctx, "tcp4", dst.String())
 	cancel()
-	if err != nil || !fc.add(out) {
+	m.settle(a.p.key, a.fc)
+	if err != nil || !a.fc.add(out) {
 		r.Complete(true)
 		return
 	}
@@ -361,93 +620,279 @@ func (m *Manager) forwardTCP(in *instance, r *tcp.ForwarderRequest) {
 	}
 	r.Complete(false)
 	client := gonet.NewTCPConn(&wq, ep)
-	if !fc.add(client) {
+	if !a.fc.add(client) {
 		return
 	}
-	up, down = relay(client, out, tcpIdle, false)
+	up, down = relay(client, out, tcpIdle)
 }
 
+// forwardUDP runs on the tunnel's receive goroutine: it must not wait. A flow
+// refused lately is dropped here; anything else is queued for a worker.
 func (m *Manager) forwardUDP(in *instance, r *udp.ForwarderRequest) {
 	id := r.ID()
-	src := addrPort(id.RemoteAddress.AsSlice(), id.RemotePort)
-	dst := addrPort(id.LocalAddress.AsSlice(), id.LocalPort)
-	began := time.Now()
-	t, fc, p := m.admitFlow(in, "udp", src, dst)
-	if t == nil {
+	k := flowKey{proto: "udp", src: addrPort(id.RemoteAddress.AsSlice(), id.RemotePort), dst: addrPort(id.LocalAddress.AsSlice(), id.LocalPort)}
+	if m.recentlyDenied(k, time.Now()) {
 		return
 	}
-	// The endpoint is created here, in the handler, so that the next packet of
-	// the same flow finds it instead of asking for another admission.
+	in.udp.enqueue(k, r)
+}
+
+// udpWorker admits the queued UDP flows of one stack instance until it ends.
+func (m *Manager) udpWorker(in *instance) {
+	for {
+		select {
+		case req := <-in.udp.queue:
+			m.admitUDP(in, req)
+			in.udp.settle(req.key)
+		case <-in.stack.done:
+			return
+		}
+	}
+}
+
+func (m *Manager) admitUDP(in *instance, req udpRequest) {
+	k := req.key
+	began := time.Now()
+	a := m.admitFlow(in, "udp", k.src, k.dst)
+	if a.t == nil {
+		m.noteDenied(k, time.Now())
+		return
+	}
+	// The endpoint is created before the worker moves on, so the next
+	// datagram of the flow finds it instead of asking for another admission.
 	var wq waiter.Queue
-	ep, terr := r.CreateEndpoint(&wq)
+	ep, terr := req.r.CreateEndpoint(&wq)
 	if terr != nil {
-		m.endFlow(p, t, fc, "udp", src, dst, began, 0, 0)
+		m.endFlow(a, "udp", k.src, k.dst, began, 0, 0)
 		return
 	}
 	client := gonet.NewUDPConn(&wq, ep)
 	go func() {
 		var up, down int64
-		defer func() { m.endFlow(p, t, fc, "udp", src, dst, began, up, down) }()
-		if !fc.add(client) {
+		defer func() { m.endFlow(a, "udp", k.src, k.dst, began, up, down) }()
+		if !a.fc.add(client) {
 			return
 		}
 		var d net.Dialer
-		ctx, cancel := context.WithTimeout(fc.ctx, forwardDialWait)
-		out, err := d.DialContext(ctx, "udp4", dst.String())
+		ctx, cancel := context.WithTimeout(a.fc.ctx, forwardDialWait)
+		out, err := d.DialContext(ctx, "udp4", k.dst.String())
 		cancel()
-		if err != nil || !fc.add(out) {
+		m.settle(a.p.key, a.fc)
+		if err != nil || !a.fc.add(out) {
 			return
 		}
-		up, down = relay(client, out, udpIdle, true)
+		up, down = relayUDP(client, ep, &wq, out, udpIdle)
 	}()
 }
 
-// maxDatagram is the largest UDP payload there is: a read into a buffer of
-// this size never cuts a datagram short.
-const maxDatagram = 65535
+// Relay buffers (S49). A TCP flow reads each side into a stream buffer. A UDP
+// flow needs a buffer that holds a whole datagram, because a datagram is
+// delivered whole or not at all (QG-11): towards the tunnel that is the
+// largest there is, since a LAN service may send one that large. From the
+// tunnel a datagram arrives in one packet of the tunnel's MTU; only when the
+// device sent it in IP fragments, which the stack reassembles, is it larger.
+// So the tunnel side reads into a small buffer and borrows a large one for
+// the rare reassembled datagram. Every buffer comes from a pool and goes back
+// when the flow ends, so the relay's footprint is what the open flows hold.
+const (
+	streamBuf   = 32 << 10
+	tunnelBuf   = 2048 // more than the MTU: one unfragmented datagram from the tunnel
+	maxDatagram = 65535
+)
 
-// relay copies both ways until either side ends or nothing moved for idle.
-// For datagrams every read is one message and is written as one: the buffer
-// holds the largest datagram there is, so none is cut short (a 32 KiB buffer
-// silently delivered the first 32 KiB of a larger one, QG-11), and an empty
-// datagram is a message too.
-func relay(a, b net.Conn, idle time.Duration, datagrams bool) (aToB, bToA int64) {
-	var wg sync.WaitGroup
-	size := 32 << 10
-	if datagrams {
-		size = maxDatagram
+var (
+	streamBufs = &bufPool{size: streamBuf}
+	tunnelBufs = &bufPool{size: tunnelBuf}
+	largeBufs  = &bufPool{size: maxDatagram}
+)
+
+// bufPool hands out buffers of one size and takes them back.
+type bufPool struct {
+	size int
+	pool sync.Pool
+	// taken counts the buffers out at the moment, for the tests and the
+	// measurement S49 asks for.
+	taken atomic.Int64
+}
+
+func (p *bufPool) get() []byte {
+	p.taken.Add(1)
+	if b, ok := p.pool.Get().(*[]byte); ok {
+		return (*b)[:p.size]
 	}
-	pipe := func(dst, src net.Conn, n *int64) {
-		defer wg.Done()
-		buf := make([]byte, size)
-		for {
-			_ = src.SetReadDeadline(time.Now().Add(idle))
-			c, err := src.Read(buf)
-			if c > 0 || (datagrams && err == nil) {
-				_ = dst.SetWriteDeadline(time.Now().Add(30 * time.Second))
-				if _, werr := dst.Write(buf[:c]); werr != nil {
-					break
-				}
-				*n += int64(c)
-			}
-			if err != nil {
-				break
-			}
+	return make([]byte, p.size)
+}
+
+func (p *bufPool) put(b []byte) {
+	if cap(b) < p.size {
+		return
+	}
+	b = b[:p.size]
+	p.pool.Put(&b)
+	p.taken.Add(-1)
+}
+
+// source is one side of a flow as the relay reads it. next returns the next
+// message, a whole datagram or what a stream had, valid until the next call;
+// release returns the buffers to their pools.
+type source interface {
+	next(deadline time.Time) ([]byte, error)
+	release()
+}
+
+// connSource reads a net.Conn into one pooled buffer.
+type connSource struct {
+	c    net.Conn
+	pool *bufPool
+	buf  []byte
+}
+
+func newConnSource(c net.Conn, pool *bufPool) *connSource {
+	return &connSource{c: c, pool: pool, buf: pool.get()}
+}
+
+func (s *connSource) next(deadline time.Time) ([]byte, error) {
+	_ = s.c.SetReadDeadline(deadline)
+	n, err := s.c.Read(s.buf)
+	return s.buf[:n], err
+}
+
+func (s *connSource) release() {
+	s.pool.put(s.buf)
+	s.buf = nil
+}
+
+// tunnelSource reads datagrams from a stack endpoint the way gonet does, but
+// into a buffer that grows: the stack hands a datagram to any io.Writer, so
+// a reassembled one that does not fit the small buffer is completed in a
+// large one instead of being cut short.
+type tunnelSource struct {
+	ep     tcpip.Endpoint
+	wq     *waiter.Queue
+	entry  waiter.Entry
+	notify chan struct{}
+	small  []byte
+	large  []byte // borrowed for one datagram
+	n      int
+}
+
+func newTunnelSource(ep tcpip.Endpoint, wq *waiter.Queue) *tunnelSource {
+	s := &tunnelSource{ep: ep, wq: wq, small: tunnelBufs.get()}
+	s.entry, s.notify = waiter.NewChannelEntry(waiter.ReadableEvents)
+	wq.EventRegister(&s.entry)
+	return s
+}
+
+// Write collects one datagram; the stack calls it once per piece.
+func (s *tunnelSource) Write(p []byte) (int, error) {
+	if s.large == nil && s.n+len(p) > len(s.small) {
+		if s.n+len(p) > maxDatagram {
+			return 0, io.ErrShortWrite
 		}
-		// One direction ended: end the other too, so the flow does not linger
-		// half open until its idle limit.
-		_ = a.Close()
-		_ = b.Close()
+		s.large = largeBufs.get()
+		copy(s.large, s.small[:s.n])
 	}
+	buf := s.small
+	if s.large != nil {
+		buf = s.large
+	}
+	if s.n+len(p) > len(buf) {
+		return 0, io.ErrShortWrite
+	}
+	s.n += copy(buf[s.n:], p)
+	return len(p), nil
+}
+
+func (s *tunnelSource) next(deadline time.Time) ([]byte, error) {
+	if s.large != nil {
+		largeBufs.put(s.large)
+		s.large = nil
+	}
+	s.n = 0
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	for {
+		_, err := s.ep.Read(s, tcpip.ReadOptions{})
+		switch err.(type) {
+		case nil:
+			if s.large != nil {
+				return s.large[:s.n], nil
+			}
+			return s.small[:s.n], nil
+		case *tcpip.ErrWouldBlock:
+			select {
+			case <-timer.C:
+				return nil, os.ErrDeadlineExceeded
+			case <-s.notify:
+			}
+		case *tcpip.ErrClosedForReceive:
+			return nil, io.EOF
+		default:
+			return nil, errors.New(err.String())
+		}
+	}
+}
+
+func (s *tunnelSource) release() {
+	s.wq.EventUnregister(&s.entry)
+	tunnelBufs.put(s.small)
+	s.small = nil
+	if s.large != nil {
+		largeBufs.put(s.large)
+		s.large = nil
+	}
+}
+
+// pump moves messages from src to dst until src ends or nothing moved for
+// idle, then ends both sides of the flow so it does not linger half open
+// until its idle limit. For datagrams every message is written as one, and
+// an empty datagram is a message too.
+func pump(src source, dst net.Conn, idle time.Duration, datagrams bool, end func()) (n int64) {
+	defer end()
+	defer src.release()
+	for {
+		msg, err := src.next(time.Now().Add(idle))
+		if len(msg) > 0 || (datagrams && err == nil) {
+			_ = dst.SetWriteDeadline(time.Now().Add(30 * time.Second))
+			if _, werr := dst.Write(msg); werr != nil {
+				return n
+			}
+			n += int64(len(msg))
+		}
+		if err != nil {
+			return n
+		}
+	}
+}
+
+// relay copies a TCP connection both ways until either side ends or nothing
+// moved for idle.
+func relay(a, b net.Conn, idle time.Duration) (aToB, bToA int64) {
+	var wg sync.WaitGroup
+	end := func() { _ = a.Close(); _ = b.Close() }
 	wg.Add(2)
-	go pipe(b, a, &aToB)
-	go pipe(a, b, &bToA)
+	go func() { defer wg.Done(); aToB = pump(newConnSource(a, streamBufs), b, idle, false, end) }()
+	go func() { defer wg.Done(); bToA = pump(newConnSource(b, streamBufs), a, idle, false, end) }()
 	wg.Wait()
 	return aToB, bToA
 }
 
+// relayUDP copies one UDP flow both ways: from the tunnel endpoint ep, whose
+// datagrams client writes back, to the LAN socket out and back.
+func relayUDP(client net.Conn, ep tcpip.Endpoint, wq *waiter.Queue, out net.Conn, idle time.Duration) (up, down int64) {
+	var wg sync.WaitGroup
+	end := func() { _ = client.Close(); _ = out.Close() }
+	wg.Add(2)
+	go func() { defer wg.Done(); up = pump(newTunnelSource(ep, wq), out, idle, true, end) }()
+	go func() { defer wg.Done(); down = pump(newConnSource(out, largeBufs), client, idle, true, end) }()
+	wg.Wait()
+	return up, down
+}
+
 // reviewFlowsLocked closes the forwarded flows that the configuration just
-// applied no longer allows: a route was removed, a guard changed (S30).
+// applied no longer allows: a route was removed, a guard changed (S30). A
+// flow still waiting for its record is one of them: its admission finds it
+// closed and refuses it.
 func (m *Manager) reviewFlowsLocked() {
 	for key, set := range m.flows {
 		p, ok := m.peers[key]

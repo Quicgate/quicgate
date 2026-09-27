@@ -203,8 +203,10 @@ func TestUDPSessionCapPerSourceIP(t *testing.T) {
 		n, err := c.Read(buf)
 		return err == nil && string(buf[:n]) == "ping"
 	}
-	if !roundTrip("127.0.0.1") || !roundTrip("127.0.0.1") {
-		t.Fatal("the first two sessions from one address should be served")
+	for i := 0; i < 2; i++ {
+		if !roundTrip("127.0.0.1") {
+			t.Fatalf("session %d from one address should be served (the cap is two)", i+1)
+		}
 	}
 	if roundTrip("127.0.0.1") {
 		t.Fatal("a third session from the same address was served past its per-address cap")

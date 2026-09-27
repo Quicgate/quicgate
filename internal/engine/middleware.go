@@ -74,27 +74,48 @@ func forwardAuth(fa *store.ForwardAuth, next http.Handler) http.Handler {
 			return
 		}
 		// Not authorized: relay the auth response (often a login redirect, which
-		// is not counted as a refusal).
+		// is not counted as a refusal). Headers about the auth server's own
+		// connection are not about this one and stay behind.
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			markBlocked(w, blockForwardAuth)
 		}
-		for k, vs := range resp.Header {
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
-		}
+		copyEndToEndHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
 	})
 }
 
-func copyForwardAuthHeaders(areq, r *http.Request) {
-	scheme := "https"
-	if r.TLS == nil {
-		scheme = "http"
+// hopByHopHeaders describe one connection rather than the message (RFC 9110,
+// section 7.6.1) and are dropped when a response is relayed.
+var hopByHopHeaders = []string{"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade"}
+
+// copyEndToEndHeaders adds src's headers to dst, leaving out the hop-by-hop
+// ones and any that src's Connection header names.
+func copyEndToEndHeaders(dst, src http.Header) {
+	drop := map[string]bool{}
+	for _, h := range hopByHopHeaders {
+		drop[h] = true
 	}
+	for _, v := range src.Values("Connection") {
+		for _, name := range strings.Split(v, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				drop[http.CanonicalHeaderKey(name)] = true
+			}
+		}
+	}
+	for k, vs := range src {
+		if drop[k] {
+			continue
+		}
+		for _, v := range vs {
+			dst.Add(k, v)
+		}
+	}
+}
+
+func copyForwardAuthHeaders(areq, r *http.Request) {
 	areq.Header.Set("X-Forwarded-Method", r.Method)
-	areq.Header.Set("X-Forwarded-Proto", scheme)
+	areq.Header.Set("X-Forwarded-Proto", clientScheme(r))
 	areq.Header.Set("X-Forwarded-Host", r.Host)
 	areq.Header.Set("X-Forwarded-Uri", r.URL.RequestURI())
 	areq.Header.Set("X-Forwarded-For", clientIP(r.RemoteAddr))

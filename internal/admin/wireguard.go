@@ -53,10 +53,21 @@ func (s *Server) checkWGSettings(body map[string]string) error {
 			if err != nil {
 				return err
 			}
-			// Every site has an address in the network and a configuration that
-			// names it. Moving the network would silently break all of them.
-			if len(sites) > 0 && !(cur == "" && p.Masked().String() == "10.77.0.0/24") {
-				return errors.New("the tunnel network cannot change while sites exist: their addresses and configurations depend on it")
+			devices, err := s.store.ListWGDevices()
+			if err != nil {
+				return err
+			}
+			live := 0
+			for _, d := range devices {
+				if d.RevokedAt == "" {
+					live++
+				}
+			}
+			// Every site and device has an address in the network and a
+			// configuration that names it. Moving the network would silently
+			// break all of them (L-34). Revoked devices keep no configuration.
+			if (len(sites) > 0 || live > 0) && !(cur == "" && p.Masked().String() == "10.77.0.0/24") {
+				return errors.New("the tunnel network cannot change while sites or devices exist: their addresses and configurations depend on it")
 			}
 		}
 		body["wg_network"] = p.Masked().String()
@@ -133,9 +144,16 @@ func (s *Server) validateWGSite(in store.WGSite, psk string) error {
 		return err
 	}
 	if in.Endpoint != "" {
-		host, port, err := net.SplitHostPort(strings.TrimSpace(in.Endpoint))
-		if err != nil || host == "" || port == "" {
-			return errors.New("endpoint must look like host:port")
+		// Where quicgate would send the site's handshakes: not nowhere, and
+		// not one of its own listeners (L-38).
+		var own []netip.Addr
+		for _, a := range s.engine.OwnAddresses() {
+			if ip, err := netip.ParseAddr(a.IP); err == nil {
+				own = append(own, ip)
+			}
+		}
+		if err := wg.ValidateEndpoint(in.Endpoint, own, s.engine.ListenerPorts()); err != nil {
+			return err
 		}
 	}
 	site, err := toWGSite(in)
@@ -192,8 +210,8 @@ func (s *Server) handleListWGSites(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateWGSite(w http.ResponseWriter, r *http.Request) {
 	var in store.WGSite
-	if err := decodeStrict(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &in); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	in.ID, in.Address, in.PresharedKey = 0, "", ""
@@ -243,8 +261,8 @@ func (s *Server) handleUpdateWGSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in store.WGSite
-	if err := decodeStrict(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &in); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	in.ID, in.Address = id, cur.Address

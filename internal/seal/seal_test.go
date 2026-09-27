@@ -2,6 +2,7 @@ package seal
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -49,7 +50,16 @@ func TestEmptyPlaintextAndDamage(t *testing.T) {
 		t.Fatalf("plaintext through Open = %q, %v", got, err)
 	}
 	sealed, _ := box.Seal("secret", "x")
-	damaged := sealed[:len(sealed)-2] + "AA"
+	// Flip one bit of the authentication tag. Rewriting the last base64
+	// characters is not a reliable way to damage a value: their low bits may
+	// be padding the decoder ignores, so the "damaged" text could still open.
+	id, body, _ := strings.Cut(sealed[len(prefix):], ".")
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil {
+		t.Fatalf("decode sealed body: %v", err)
+	}
+	raw[len(raw)-1] ^= 0x01
+	damaged := prefix + id + "." + base64.RawURLEncoding.EncodeToString(raw)
 	if _, err := box.Open(damaged, "x"); err == nil {
 		t.Fatal("a damaged value opened")
 	}

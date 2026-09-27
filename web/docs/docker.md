@@ -37,10 +37,11 @@ services:
 | `quicgate.tls` | obtain a Let's Encrypt cert (public side) | `on` |
 | `quicgate.access-list` | attach an existing access list by name; if no list has that name the container is **not routed** (a typo never publishes it unprotected) | none |
 | `quicgate.streams` | raw L4 forwards, comma-separated `[listen:]container[/proto]` | none |
+| any other `quicgate.*` key | refused: a key quicgate does not know (a typo such as `quicgate.access_list`) leaves the container **not routed**, and the Docker page names the key and the one it probably meant | |
 
-`quicgate.streams` exposes non-HTTP ports as TCP/UDP streams, e.g. `quicgate.streams=25565, 2222:22/tcp, 53/udp` (proto `tcp`/`udp`/`both`, default `tcp`; `listen:` remaps the public port). Stream ports are automatically excluded from HTTP port auto-detection, so a container with a web port and a game port needs no `exclude-ports`. A container can be HTTP-only, streams-only (no hostname needed), or both.
+`quicgate.streams` exposes non-HTTP ports as TCP/UDP streams, e.g. `quicgate.streams=25565, 2222:22/tcp, 53/udp` (proto `tcp`/`udp`/`both`, default `tcp`; `listen:` remaps the public port). Stream ports are automatically excluded from HTTP port auto-detection, so a container with a web port and a game port needs no `exclude-ports`. A container can be HTTP-only, streams-only (no hostname needed), or both. An entry with `/udp` uses the container's UDP publication; `/both` needs the port published for both protocols on the same host port, otherwise the stream is refused with a warning naming both. A stream whose listen port a manual stream, quicgate itself or another container already uses is shown as skipped in the container's status.
 
-Manual hosts always win a naming conflict — a label can never silently override a host you configured by hand. Anything beyond these labels (custom locations, header rules, mTLS, rate limits) lives in the UI: use **Convert to host** on the Docker page to turn a derived container into editable configuration with no downtime.
+Manual hosts always win a naming conflict — a label can never silently override a host you configured by hand, not even under a manual wildcard (`*.example.com` keeps `api.example.com`) or while the manual host is switched off. Routes are re-aggregated every 30 seconds as well as on container events, so creating or deleting a manual host is reflected without touching a container. Anything beyond these labels (custom locations, header rules, mTLS, rate limits) lives in the UI: use **Convert to host** on the Docker page to turn a derived container into editable configuration with no downtime.
 
 ## How quicgate reaches containers
 
@@ -59,6 +60,12 @@ quicgate can watch several daemons at once. Give it a JSON list of endpoints (in
 
 A container on `docker92` is then reached at `192.168.1.92:<published port>`. Reach a remote daemon through a **read-only socket proxy** (below) exposing `tcp://` on the LAN. Endpoint-list changes apply on restart; the Docker page shows each host's connection state.
 
+For a daemon on another machine use TLS with a client certificate (Docker's `--tlsverify` model): `{"name":"docker92","connect":"tcp://192.168.1.92:2376","address":"192.168.1.92","caFile":"/etc/quicgate/docker-ca.pem","certFile":"/etc/quicgate/docker-cert.pem","keyFile":"/etc/quicgate/docker-key.pem"}`. A `tcp://` endpoint without those files is plaintext and trusts whoever answers on that port. The list is validated strictly: an unknown field, a `connect` that is not a socket path, `tcp://host:port` or `https://host:port`, or an `address` that is not an IP or hostname refuses the whole list; the refusal is logged and **no Docker host is watched** until it is fixed.
+
 ## Socket security
 
 The provider is read-only, but the socket still grants broad access to the daemon. Mount it `:ro`, and for least privilege put a read-only socket proxy (e.g. `tecnativa/docker-socket-proxy` with only `CONTAINERS=1` and `EVENTS=1`) in front of it and point `QG_DOCKER_SOCKET` at the proxy.
+
+## Trust boundary
+
+Labels are configuration, and whoever can set labels on a watched daemon configures quicgate. Any container that opts in can publish itself under **every name that no manual host claims**, with a certificate; can **attach any existing access list by name**, including a list with *Pass Authorization header* on, which then forwards your users' credentials to that container; and can bind **any free port** as a stream. Manual hosts always win a name (exact names, names under a manual wildcard, and the names of a manual host that is switched off), but the rest is up to the containers on that daemon. Put containers you do not trust on a daemon quicgate does not watch, or behind a socket proxy per trust level, and treat a remote `tcp://` endpoint as what it is: whoever answers on that port defines routes. Use an `https://` endpoint with a CA and a client certificate for a daemon on another machine.
