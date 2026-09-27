@@ -140,6 +140,10 @@ SECURITY.md). Every change below carries a regression test that fails without it
   followed, so certbot's `live/` paths work); a FIFO or device is refused without being opened.
 - The build context leaves out `.git`, brand assets and root Markdown (`.dockerignore`); CI runs
   gofmt and staticcheck, only the build job may publish and sign, and the image carries an SBOM.
+- Dependencies: quic-go 0.63.0, golang.org/x/net 0.59.0, acmez 3.1.7, klauspost/compress 1.20.1,
+  and the gVisor netstack moved from a May 2025 commit to the current `go` branch (it is untagged,
+  so Dependabot never proposed it; sixteen months of upstream fixes to the packet parser every
+  WireGuard peer talks to).
 
 ### Fixed
 - **TLS-terminating streams no longer restart on every reload.** The change detection compared the
@@ -168,6 +172,25 @@ SECURITY.md). Every change below carries a regression test that fails without it
   from an empty token exchange.
 - `GET /api/me` with an API token answers `{"email": "", "token": true, ...}` instead of a 500.
 - The portal's `/api/me` reports `connected: false` for a device that has never connected.
+- **LAN access (experimental): the flow log and site-endpoint lookups no longer run under the
+  WireGuard endpoint's global lock**, the forwarder's view of this machine's addresses and
+  listeners is cached, and UDP admission runs on worker goroutines instead of the packet-decrypt
+  path, so a slow disk or resolver no longer stalls the tunnel, tunnel DNS, reloads, the status
+  page or the public proxy's connections through sites. "No record, no flow" still holds.
+- **A denied UDP flow is remembered briefly** so its repeat datagrams are dropped without a new
+  decision or record; deny records are rate-limited per device; an allowed flow refused because
+  the flow-log queue is full is counted in the dropped-records figure the Overview shows.
+- **Relay buffers are pooled and sized to their direction**, cutting the memory a device's UDP
+  flows can hold to about a quarter, and one device can no longer fill the forwarder's half-open
+  connection table (64 per device; the excess is reset).
+- **The flow log never records a LAN flow as allowed when it was refused** because the log was too
+  slow; the record is written as a refusal.
+- The tunnel network cannot be changed while devices exist (as was already the case for sites), and
+  a device whose address falls outside the tunnel network is left out rather than misconfigured.
+- A WireGuard site's endpoint is validated beyond `host:port`: loopback, unspecified, multicast,
+  link-local, broadcast and reserved addresses, and quicgate's own listeners, are refused.
+- The test of "removing a site closes its connections" no longer fails under the race detector on
+  small machines (crossed handshake initiations).
 - **`quicgate.streams` entries with `/udp` work.** Only TCP publications were read, so the
   documented `53/udp` example warned "not published"; `/both` now needs the same host port for
   both protocols and is refused with a warning naming both otherwise. A label stream whose listen

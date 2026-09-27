@@ -563,9 +563,15 @@ name. Limits in S49.
 
 **S31 *(v3)*. Flow log: no record, no flow.** One JSON line per flow in `vpn-flows.log` (rotated
 like the access log): time, peer, owner, destination, protocol, port, verdict. The writer is a
-bounded queue and never blocks packets, but the record of an **allowed** flow is part of its
-admission: if the record cannot be queued, the flow is refused. So every LAN flow that was
-allowed has an admission record, which is the audit property S33 relies on. Per-peer flow-rate
+bounded queue. The record of an **allowed** flow is part of its admission and is written before
+the flow is admitted, but off the endpoint's lock, so a slow log delays only that one flow, never
+the tunnel's other traffic, its DNS, a reload, the public proxy's dials through sites, or the
+status page; UDP admission runs on worker goroutines, not on the packet-decrypt path. If the
+record cannot be queued or written in time, the flow is refused, and a record whose admission
+gave up waiting is written as a refusal, never left as an allow. So every LAN flow that was
+allowed has an admission record and no record claims a flow that did not happen, which is the
+audit property S33 relies on. A denied UDP flow is remembered briefly so its repeat datagrams are
+dropped without a new decision or record. Per-peer flow-rate
 limits (S49) keep one peer from filling the queue for everyone. Records of denied flows and the
 closing record with bytes and duration are **best effort**: they may be dropped under pressure,
 and the number dropped is a visible counter in the UI and in the metrics.
@@ -588,7 +594,7 @@ forwarder, then the VPN listener, when the process nears its memory limit) befor
 | Dials towards the LAN | rate per peer, concurrent per peer |
 | VPN listener | connections per peer and global; existing header and idle timeouts |
 | Tunnel DNS | queries per peer per second, in-flight relays global, TCP connections per peer and global, 5 s TCP idle, 2 s upstream timeout |
-| Flow log | bounded queue, drop and count |
+| Flow log | bounded queue, drop and count; allowed-flow records waited for off the lock |
 
 Goroutines that quicgate owns in this package recover from panics, log, and close the affected
 flow. A panic elsewhere in the stack ends the process (section 4).

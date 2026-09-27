@@ -356,7 +356,11 @@ func (m *Manager) installForwarder(in *instance) error {
 	tcpFwd := tcp.NewForwarder(in.stack.s, 0, tcpInFlight, func(r *tcp.ForwarderRequest) { m.forwardTCP(in, r) })
 	in.stack.s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
 	in.udp = newUDPAdmitter()
-	udpFwd := udp.NewForwarder(in.stack.s, func(r *udp.ForwarderRequest) { m.forwardUDP(in, r) })
+	// The handler reports whether it took the request: it always does, either
+	// by creating an endpoint, by handing the request to an admission worker,
+	// or by deciding to drop the packet itself, so the stack never answers a
+	// tunnel packet with an ICMP error on our behalf.
+	udpFwd := udp.NewForwarder(in.stack.s, func(r *udp.ForwarderRequest) bool { m.forwardUDP(in, r); return true })
 	in.stack.s.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
 	for i := 0; i < udpAdmitWorkers; i++ {
 		go m.udpWorker(in)
