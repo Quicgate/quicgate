@@ -4,6 +4,81 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Fixes from the September 2026 security, technology and functional scan (the record is in
+SECURITY.md). Every change below carries a regression test that fails without it.
+
+### Security
+- **The real client address is read from every `X-Forwarded-For` header line, not the first only.**
+  Behind a trusted proxy that appends the client as a separate header line (HAProxy's
+  `option forwardfor`, any Go proxy), a client could put an address of its own choosing in a first
+  line it wrote itself and walk past IP allowlists, rate limits, auto-ban and the never-ban list.
+- **A basic-auth login with an unknown username takes as long to refuse as a wrong password for a
+  known one.** It was refused in microseconds, so the response time told which usernames exist.
+- **Paths an upstream may read differently are refused on hosts with path rules or custom
+  locations.** A path with an empty segment (`//`), a backslash, a `;` inside a segment or a `%`
+  left after decoding is answered 400 before any rule or gate, like a dot segment: nginx, IIS and
+  Tomcat normalise those, so `//admin/secret` reached a gated `/admin/`. Hosts without path rules
+  or locations are unaffected. Prefix rules and locations match whole segments: `/api` covers
+  `/api` and `/api/...`, no longer `/api-internal`; a rule ending in `/` is a plain prefix as before.
+- **HTTP/3 refuses 0-RTT early data**, which a network attacker could replay.
+
+### Changed
+- **Auto-ban counts wrong basic-auth passwords only.** A refusal by address, a missing credential,
+  a token of another scheme and a refused CORS preflight are refused as before but no longer
+  counted: any web page could make a visitor's browser send five requests to an address-listed
+  host and get the visitor, and everyone behind the same NAT, banned from every host for an hour.
+  An IPv6 client refused by a `0.0.0.0/0` rule is likewise no longer banned. Expect fewer bans of
+  scanners on address-only hosts.
+- **The response cache is bounded to 64 MiB per host** (entries up to 2 MiB as before) and evicts
+  the least recently used response; before, 512 entries of up to 2 MiB each could be filled with
+  cache-busting query strings.
+- **TCP streams have an idle timeout and a per-client cap.** A connection that carries nothing in
+  either direction for ten minutes is closed with its backend connection, and one client address
+  may hold at most 256 connections per listener (the listener's total stays 4096). Behind a trusted
+  PROXY-protocol peer the cap counts the real client.
+- **SNI routes match DNS names.** Case and a trailing dot no longer matter, a ClientHello split
+  over several TLS records is read whole, a connection that does not start with a ClientHello is
+  closed, and a connection sent to the default target for want of a matching name is logged.
+- **Health checks verify certificates.** The probe of an HTTPS upstream accepted any certificate;
+  it now verifies the way the host's own traffic does (with the host's upstream SNI) and skips
+  verification only for hosts that skip it themselves.
+- **Static hosts serve files only.** A directory without `index.html` answers 404 instead of a
+  listing, and dot-prefixed names (`.env`, `.git`) are not served, except under `/.well-known/`.
+- Access-log records cut the host to 253 bytes, the path to 2 KiB and the user agent to 512 bytes.
+- A stream cannot take the admin port; it is reserved like 80 and 443, as the guide already said.
+- The build context leaves out `.git`, brand assets and root Markdown (`.dockerignore`); CI runs
+  gofmt and staticcheck, only the build job may publish and sign, and the image carries an SBOM.
+
+### Fixed
+- **TLS-terminating streams no longer restart on every reload.** The change detection compared the
+  address of the certificate id rather than its value, so every configuration save, Docker
+  reconcile and five-minute periodic reload stopped and restarted every TLS-terminating listener
+  and cut its connections. Only a real change restarts a listener now.
+- **Custom locations follow the host's rules.** Request and response header rules, `X-Robots-Tag`,
+  the Host override, sticky sessions and the buffering setting applied to the default upstream
+  only; a path routed to a location got none of them.
+- **A list with users no longer strips `Authorization` from a request admitted by its address**
+  (satisfy any) or from a non-Basic scheme; bearer-token APIs behind a "LAN or password" list work
+  again. The header is removed only when the list itself checked a Basic credential naming one of
+  its users and Pass Auth is off.
+- **Behind a trusted proxy that ends TLS, upstreams see `X-Forwarded-Proto: https`**, and so do the
+  forward-auth server and the `{scheme}` placeholder. The header is believed only from a trusted
+  proxy, and a request quicgate received over TLS is never reported as plain.
+- **A pool member that cannot be reached is taken out at once.** The request that failed to
+  connect marks it down, so the following requests go to the other members instead of every other
+  one answering 502 for up to fifteen seconds; the health check brings it back when it answers.
+- **The force-SSL redirect keeps a non-standard HTTPS port.**
+- The sticky-session cookie is `Secure` when the client's connection is encrypted; a forward-auth
+  refusal is relayed without the auth server's hop-by-hop headers; the default-site setting is
+  compiled at reload, so a request for an unknown host no longer reads the database; a UPnP
+  mapping key that does not parse is dropped instead of unmapping port 0.
+
+### Added
+- An access list with users under "satisfy any" that also has deny rules shows a warning on its
+  hosts: valid credentials admit a client the deny rules refuse.
+
 ## [1.17.5] - 2026-09-27
 
 ### Added

@@ -30,7 +30,7 @@ The Settings page edits these without a restart: ACME email / staging / custom C
 
 ## Real client IP behind another proxy
 
-When quicgate sits behind Cloudflare or another load balancer, set **trusted proxies** (CIDRs) and the **real IP header** under Settings. Only when the TCP peer is inside a trusted CIDR does quicgate rewrite the client address from the header (rightmost-untrusted walk, so clients cannot spoof it). Access lists, GeoIP, rate limits, auto-ban and logs then all see the true client.
+When quicgate sits behind Cloudflare or another load balancer, set **trusted proxies** (CIDRs) and the **real IP header** under Settings. Only when the TCP peer is inside a trusted CIDR does quicgate rewrite the client address from the header (rightmost-untrusted walk over every header line, so clients cannot spoof it, and proxies that append the client as a separate line are handled). List trusted proxies as exact addresses or tight ranges, never `0.0.0.0/0`. Access lists, GeoIP, rate limits, auto-ban and logs then all see the true client, and `X-Forwarded-Proto: https` from a trusted proxy is passed on to upstreams, forward auth and the `{scheme}` placeholder. Health checks of HTTPS upstreams verify the certificate the way the host does (with its upstream SNI, skipping verification only when the host skips it).
 
 ## GeoIP
 

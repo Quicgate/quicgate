@@ -21,7 +21,7 @@ columns mean:
 | Custom, self-signed and from-file certificates | yes | no | A replaced or restored certificate is served on the next reload. From-file certificates are read once, at import; later changes to the files are not picked up. |
 | Client certificates (mTLS) | yes, real TLS, HTTP/2 reuse and HTTP/3 | no | Bound to the requested host on every request (421 on SNI/Host mismatch). |
 | HSTS, security headers, header rules | yes | yes | |
-| Load balancing, health checks, sticky sessions | yes | partly (health checks) | Health checks treat any HTTP response as alive. |
+| Load balancing, health checks, sticky sessions | yes | partly (health checks) | Health checks treat any HTTP response as alive, but verify TLS certificates the way the host does; a member that refuses a connection is taken out at once and brought back by the next successful probe. |
 | Custom locations | yes | no | A location overrides its upstream and path rewrite only; other options are host-wide. |
 | Response cache | yes | no | Only anonymous responses: bypassed for cookies, credentials, client certificates and authenticated requests. |
 | Compression, maintenance mode, redirect, dead and static hosts | yes | partly | |
