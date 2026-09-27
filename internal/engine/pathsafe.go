@@ -84,12 +84,3 @@ func rejectTraversal(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-
-// requestIsTLS reports whether the client's connection is encrypted, honouring
-// X-Forwarded-Proto for deployments where TLS terminates on a proxy in front
-// of quicgate. Believing the header can only add the Secure cookie flag or
-// pick the https redirect scheme, never remove either, so a client that lies
-// about it only restricts itself.
-func requestIsTLS(r *http.Request) bool {
-	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
-}

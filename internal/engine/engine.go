@@ -992,13 +992,13 @@ func (e *Engine) newUpstreamProxy(o store.Options, transport http.RoundTripper, 
 }
 
 // clientScheme is the scheme of the client's own connection: https when TLS
-// ended here or, by the portal's rule (portalEncrypted), at a trusted proxy in
+// ended here or, by the portal's rule (connectionEncrypted), at a trusted proxy in
 // front of quicgate that says so in X-Forwarded-Proto. The header from anybody
 // else is not believed, and a TLS request is never reported as http. The
 // upstream's X-Forwarded-Proto, forward auth and the {scheme} placeholder all
 // get this one answer.
 func clientScheme(r *http.Request) string {
-	if portalEncrypted(r) {
+	if connectionEncrypted(r) {
 		return "https"
 	}
 	return "http"

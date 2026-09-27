@@ -35,9 +35,9 @@ func newTLSTestEngine(t *testing.T) (*Engine, *store.Store) {
 	return e, st
 }
 
-// send drives one request through handler as a listener would hand it over:
+// sendVia drives one request through handler as a listener would hand it over:
 // over an encrypted connection or not.
-func send(handler http.Handler, method, host, path, remote string, encrypted bool, hdr map[string]string) *httptest.ResponseRecorder {
+func sendVia(handler http.Handler, method, host, path, remote string, encrypted bool, hdr map[string]string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, "http://"+host+path, nil)
 	r.Host = host
 	r.RemoteAddr = remote
@@ -132,29 +132,29 @@ func TestOIDCGateNeedsHTTPS(t *testing.T) {
 
 	plain := http.HandlerFunc(e.serveHTTP)
 	const client = "203.0.113.9:50000"
-	rr := send(plain, "GET", "sso.test", "/protected?a=1", client, false, nil)
+	rr := sendVia(plain, "GET", "sso.test", "/protected?a=1", client, false, nil)
 	if rr.Code != http.StatusPermanentRedirect || rr.Header().Get("Location") != "https://sso.test/protected?a=1" || len(rr.Result().Cookies()) != 0 {
 		t.Fatalf("plain HTTP: %d to %q with cookies %v, want a 308 to HTTPS and no cookie", rr.Code, rr.Header().Get("Location"), rr.Result().Cookies())
 	}
-	if rr := send(plain, "HEAD", "sso.test", "/protected", client, false, nil); rr.Code != http.StatusPermanentRedirect {
+	if rr := sendVia(plain, "HEAD", "sso.test", "/protected", client, false, nil); rr.Code != http.StatusPermanentRedirect {
 		t.Fatalf("HEAD over plain HTTP: %d, want 308", rr.Code)
 	}
-	if rr := send(plain, "POST", "sso.test", "/protected", client, false, nil); rr.Code != http.StatusForbidden {
+	if rr := sendVia(plain, "POST", "sso.test", "/protected", client, false, nil); rr.Code != http.StatusForbidden {
 		t.Fatalf("POST over plain HTTP: %d, want 403", rr.Code)
 	}
 	// A header anybody can send does not make the connection encrypted.
-	if rr := send(plain, "GET", "sso.test", "/protected", client, false, map[string]string{"X-Forwarded-Proto": "https"}); rr.Code != http.StatusPermanentRedirect || len(rr.Result().Cookies()) != 0 {
+	if rr := sendVia(plain, "GET", "sso.test", "/protected", client, false, map[string]string{"X-Forwarded-Proto": "https"}); rr.Code != http.StatusPermanentRedirect || len(rr.Result().Cookies()) != 0 {
 		t.Fatalf("X-Forwarded-Proto from a stranger was believed: %d, cookies %v", rr.Code, rr.Result().Cookies())
 	}
 	// The reserved paths are no exception: a callback over plain HTTP would
 	// mint the session over it.
-	if rr := send(plain, "GET", "sso.test", oidcCallbackPath+"?code=c&state=s", client, false, nil); rr.Code != http.StatusPermanentRedirect {
+	if rr := sendVia(plain, "GET", "sso.test", oidcCallbackPath+"?code=c&state=s", client, false, nil); rr.Code != http.StatusPermanentRedirect {
 		t.Fatalf("the callback over plain HTTP: %d, want 308", rr.Code)
 	}
 
 	// Over TLS the login runs, with Secure cookies and an https redirect URI.
 	secure := http.HandlerFunc(e.serveHTTPS)
-	r1 := send(secure, "GET", "sso.test", "/protected?a=1", client, true, nil)
+	r1 := sendVia(secure, "GET", "sso.test", "/protected?a=1", client, true, nil)
 	if r1.Code != http.StatusFound {
 		t.Fatalf("login over TLS: %d %q", r1.Code, r1.Body.String())
 	}
@@ -168,7 +168,7 @@ func TestOIDCGateNeedsHTTPS(t *testing.T) {
 		}
 	}
 	idp.nonce = loc.Query().Get("nonce")
-	r2 := send(secure, "GET", "sso.test", oidcCallbackPath+"?code=c1&state="+loc.Query().Get("state"), client, true, map[string]string{"Cookie": cookieHeader(r1)})
+	r2 := sendVia(secure, "GET", "sso.test", oidcCallbackPath+"?code=c1&state="+loc.Query().Get("state"), client, true, map[string]string{"Cookie": cookieHeader(r1)})
 	if r2.Code != http.StatusFound {
 		t.Fatalf("callback over TLS: %d %q", r2.Code, r2.Body.String())
 	}
@@ -178,11 +178,11 @@ func TestOIDCGateNeedsHTTPS(t *testing.T) {
 			t.Fatal("the session cookie is not Secure")
 		}
 	}
-	if rr := send(secure, "GET", "sso.test", "/protected", client, true, map[string]string{"Cookie": session}); rr.Code != http.StatusOK || hits.Load() != 1 {
+	if rr := sendVia(secure, "GET", "sso.test", "/protected", client, true, map[string]string{"Cookie": session}); rr.Code != http.StatusOK || hits.Load() != 1 {
 		t.Fatalf("the session over TLS: %d, upstream hits %d", rr.Code, hits.Load())
 	}
 	// The session is worth nothing over plain HTTP.
-	if rr := send(plain, "GET", "sso.test", "/protected", client, false, map[string]string{"Cookie": session}); rr.Code != http.StatusPermanentRedirect || hits.Load() != 1 {
+	if rr := sendVia(plain, "GET", "sso.test", "/protected", client, false, map[string]string{"Cookie": session}); rr.Code != http.StatusPermanentRedirect || hits.Load() != 1 {
 		t.Fatalf("the session over plain HTTP: %d, upstream hits %d; want a 308 and no upstream request", rr.Code, hits.Load())
 	}
 
@@ -191,12 +191,12 @@ func TestOIDCGateNeedsHTTPS(t *testing.T) {
 	reload(t, e)
 	viaProxy := e.wrapRealIP(plain)
 	fromProxy := map[string]string{"X-Forwarded-For": "203.0.113.9", "X-Forwarded-Proto": "https", "Cookie": session}
-	if rr := send(viaProxy, "GET", "sso.test", "/protected", "10.1.2.3:4000", false, fromProxy); rr.Code != http.StatusOK || hits.Load() != 2 {
+	if rr := sendVia(viaProxy, "GET", "sso.test", "/protected", "10.1.2.3:4000", false, fromProxy); rr.Code != http.StatusOK || hits.Load() != 2 {
 		t.Fatalf("behind a trusted TLS-terminating proxy: %d, upstream hits %d; want 200", rr.Code, hits.Load())
 	}
 	// ...and only when it says so.
 	delete(fromProxy, "X-Forwarded-Proto")
-	if rr := send(viaProxy, "GET", "sso.test", "/protected", "10.1.2.3:4000", false, fromProxy); rr.Code != http.StatusPermanentRedirect {
+	if rr := sendVia(viaProxy, "GET", "sso.test", "/protected", "10.1.2.3:4000", false, fromProxy); rr.Code != http.StatusPermanentRedirect {
 		t.Fatalf("plain HTTP behind a trusted proxy: %d, want 308", rr.Code)
 	}
 }
