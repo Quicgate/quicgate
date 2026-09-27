@@ -162,7 +162,8 @@ func (f *vpnIdP) set(fn func(*vpnIdP)) {
 const portalHost = "vpn.test"
 
 type portalFixture struct {
-	https    bool // requests arrive over TLS
+	https    bool   // requests arrive over TLS
+	addr     string // the client's address; a fixed one when empty
 	e        *Engine
 	st       *store.Store
 	idp      *vpnIdP
@@ -217,7 +218,10 @@ func newPortalFixtureOn(t *testing.T, development bool, enrol ...store.VPNSubjec
 	return &portalFixture{e: e, st: st, idp: idp, provider: p.ID}
 }
 
-// do sends one request to the portal host, as a browser on that origin would.
+// do sends one request to the portal host, as a browser on that origin would:
+// an Origin on every request that is not a plain GET, a content type and a
+// body only when there is one (a nil body is a bodiless request, as the page
+// sends a DELETE).
 func (f *portalFixture) do(method, path, cookies string, body any, hdr map[string]string) *httptest.ResponseRecorder {
 	var rd *strings.Reader
 	if body != nil {
@@ -228,7 +232,10 @@ func (f *portalFixture) do(method, path, cookies string, body any, hdr map[strin
 	}
 	r := httptest.NewRequest(method, "http://"+portalHost+path, rd)
 	r.Host = portalHost
-	r.RemoteAddr = "203.0.113.9:50000"
+	r.RemoteAddr = f.addr
+	if r.RemoteAddr == "" {
+		r.RemoteAddr = "203.0.113.9:50000"
+	}
 	if cookies != "" {
 		r.Header.Set("Cookie", cookies)
 	}
@@ -237,9 +244,11 @@ func (f *portalFixture) do(method, path, cookies string, body any, hdr map[strin
 		r.TLS = &tls.ConnectionState{}
 		origin = "https://" + portalHost
 	}
+	if method != http.MethodGet && method != http.MethodHead {
+		r.Header.Set("Origin", origin)
+	}
 	if body != nil {
 		r.Header.Set("Content-Type", "application/json")
-		r.Header.Set("Origin", origin)
 	}
 	for k, v := range hdr {
 		if v == "" {
@@ -367,6 +376,13 @@ func TestPortalLoginAndEnrolment(t *testing.T) {
 	if strings.Contains(fmt.Sprint(f.me(t, cookie)), dev.PresharedKey) {
 		t.Fatal("the preshared key comes back after the enrolment")
 	}
+	// A device that never shook hands is not connected, whatever the endpoint
+	// knows about it.
+	if devs, _ := f.me(t, cookie)["devices"].([]any); len(devs) != 1 {
+		t.Fatalf("devices = %v, want the one just enrolled", devs)
+	} else if connected, present := devs[0].(map[string]any)["connected"]; !present || connected != false {
+		t.Fatalf("a device that never connected is shown as %v (present %v), want connected=false", connected, present)
+	}
 	live := f.liveDevices()
 	if len(live) != 1 || live[0].ID != dev.ID || live[0].Until.IsZero() || live[0].Owner != "ann@example.com" {
 		t.Fatalf("devices on the endpoint = %+v, want the new one with a deadline", live)
@@ -374,27 +390,49 @@ func TestPortalLoginAndEnrolment(t *testing.T) {
 	if rr := f.do(http.MethodPost, "/.qg/vpn/api/devices", cookie, map[string]string{"name": "clone", "publicKey": key}, nil); rr.Code != http.StatusBadRequest {
 		t.Fatalf("the same key twice: %d, want 400", rr.Code)
 	}
-	if rr := f.do(http.MethodPost, "/.qg/vpn/api/devices", cookie, map[string]string{"name": "laptop", "publicKey": randomWGKey(t)}, nil); rr.Code != http.StatusCreated {
+	rr = f.do(http.MethodPost, "/.qg/vpn/api/devices", cookie, map[string]string{"name": "laptop", "publicKey": randomWGKey(t)}, nil)
+	if rr.Code != http.StatusCreated {
 		t.Fatalf("second device: %d %s", rr.Code, rr.Body.String())
 	}
+	var laptop store.WGDevice
+	_ = json.Unmarshal(rr.Body.Bytes(), &laptop)
 	if rr := f.do(http.MethodPost, "/.qg/vpn/api/devices", cookie, map[string]string{"name": "third", "publicKey": randomWGKey(t)}, nil); rr.Code != http.StatusBadRequest {
 		t.Fatalf("a third device with a limit of two: %d, want 400", rr.Code)
 	}
 
-	// Someone else's device cannot be removed, whatever its id.
+	// Someone else's device cannot be removed, whatever its id. A removal is
+	// sent as the page sends it: a DELETE without a body, and so without a
+	// content type; the Origin tells it apart from a cross-site request.
 	other := store.WGDevice{Name: "bob's", Kind: "sso", PublicKey: randomWGKey(t), Enabled: true, Provider: f.provider, Sub: "u2", Email: "bob@example.com"}
 	_, network, _, _ := WGSettings(f.st)
 	if err := f.st.CreateWGDevice(&other, network, randomWGKey(t), 0); err != nil {
 		t.Fatal(err)
 	}
-	if rr := f.do(http.MethodDelete, fmt.Sprintf("/.qg/vpn/api/devices/%d", other.ID), cookie, map[string]string{}, nil); rr.Code != http.StatusNotFound {
+	if rr := f.do(http.MethodDelete, fmt.Sprintf("/.qg/vpn/api/devices/%d", other.ID), cookie, nil, nil); rr.Code != http.StatusNotFound {
 		t.Fatalf("removing another person's device: %d, want 404", rr.Code)
 	}
 	if d, _ := f.st.GetWGDevice(other.ID); d.RevokedAt != "" {
 		t.Fatal("another person's device was revoked")
 	}
-	if rr := f.do(http.MethodDelete, fmt.Sprintf("/.qg/vpn/api/devices/%d", dev.ID), cookie, map[string]string{}, nil); rr.Code != http.StatusNoContent {
-		t.Fatalf("removing my own device: %d", rr.Code)
+	mine := fmt.Sprintf("/.qg/vpn/api/devices/%d", dev.ID)
+	for name, hdr := range map[string]map[string]string{
+		"no Origin":           {"Origin": ""},
+		"another Origin":      {"Origin": "https://evil.example"},
+		"a form content type": {"Content-Type": "application/x-www-form-urlencoded"},
+	} {
+		if rr := f.do(http.MethodDelete, mine, cookie, nil, hdr); rr.Code != http.StatusForbidden {
+			t.Errorf("removal with %s: %d, want 403", name, rr.Code)
+		}
+	}
+	if d, _ := f.st.GetWGDevice(dev.ID); d.RevokedAt != "" {
+		t.Fatal("a removal that was refused revoked the device")
+	}
+	if rr := f.do(http.MethodDelete, mine, cookie, nil, nil); rr.Code != http.StatusNoContent {
+		t.Fatalf("removing my own device: %d %s", rr.Code, rr.Body.String())
+	}
+	// With an empty JSON body, as the page sends it since the fix, it works too.
+	if rr := f.do(http.MethodDelete, fmt.Sprintf("/.qg/vpn/api/devices/%d", laptop.ID), cookie, map[string]string{}, nil); rr.Code != http.StatusNoContent {
+		t.Fatalf("removing my other device with a JSON body: %d %s", rr.Code, rr.Body.String())
 	}
 	// A revoked device never comes back, not even with a new login.
 	if c2, _ := f.login(t); c2 == "" {
@@ -779,4 +817,47 @@ func (f *portalFixture) deviceCount(t *testing.T) int {
 		t.Fatal(err)
 	}
 	return len(all)
+}
+
+// VPN-12 (S22): what costs the most or makes the most is rate-limited per
+// client address: starting a login (an IdP discovery and a redirect each) and
+// enrolling a device. Over the limit nothing is done, and another address is
+// not affected.
+func TestPortalThrottlesLoginsAndEnrolments(t *testing.T) {
+	saved := portalLimitPerMinute
+	portalLimitPerMinute = 4
+	t.Cleanup(func() { portalLimitPerMinute = saved })
+	f := newPortalFixture(t)
+	cookie, cb := f.login(t) // 1: the login start
+	if cookie == "" {
+		t.Fatalf("login refused: %d %s", cb.Code, cb.Body.String())
+	}
+	enrol := func() *httptest.ResponseRecorder {
+		return f.do(http.MethodPost, "/.qg/vpn/api/devices", cookie, map[string]string{"name": "d", "publicKey": randomWGKey(t)}, nil)
+	}
+	for i := 2; i <= 3; i++ {
+		if rr := enrol(); rr.Code != http.StatusCreated {
+			t.Fatalf("enrolment %d: %d %s", i, rr.Code, rr.Body.String())
+		}
+	}
+	if rr := enrol(); rr.Code != http.StatusBadRequest { // 4: the device limit, two per person
+		t.Fatalf("a third device: %d, want 400", rr.Code)
+	}
+	rr := enrol() // 5: over the limit
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") == "" || !strings.Contains(rr.Header().Get("Content-Type"), "json") {
+		t.Fatalf("the fifth attempt from one address: %d, Retry-After %q, %s; want a JSON 429", rr.Code, rr.Header().Get("Retry-After"), rr.Body.String())
+	}
+	if n := f.deviceCount(t); n != 2 {
+		t.Fatalf("%d devices, want the two that were allowed", n)
+	}
+	// A login start shares the address's budget: nothing is started.
+	rr = f.do(http.MethodGet, "/.qg/vpn/login", "", nil, nil)
+	if rr.Code != http.StatusTooManyRequests || len(rr.Result().Cookies()) != 0 || rr.Header().Get("Location") != "" {
+		t.Fatalf("a login start over the limit: %d, cookies %v, to %q; want 429 and nothing else", rr.Code, rr.Result().Cookies(), rr.Header().Get("Location"))
+	}
+	// Another address is not affected.
+	f.addr = "198.51.100.7:40000"
+	if rr := f.do(http.MethodGet, "/.qg/vpn/login", "", nil, nil); rr.Code != http.StatusFound {
+		t.Fatalf("a login start from another address: %d, want 302", rr.Code)
+	}
 }

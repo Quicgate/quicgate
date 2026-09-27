@@ -19,6 +19,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+	"golang.org/x/time/rate"
 
 	"quicgate/internal/store"
 	"quicgate/internal/wg"
@@ -67,9 +68,38 @@ type portalState struct {
 	sessions map[string]portalSession
 	renewing sync.Map // session id -> struct{}: one renewal at a time (S44)
 	lastLive string   // who held a lease at the last tick, to notice expiry
+	// limit throttles, per client address, what costs the most or makes the
+	// most: starting a login (an IdP discovery and a redirect each) and
+	// enrolling a device (S22). It lives here, not in the handler, so a
+	// reload does not reset it.
+	limit *rateLimiter
 }
 
-func newPortalState() *portalState { return &portalState{sessions: map[string]portalSession{}} }
+// portalLimitPerMinute is how many logins one address may start, and how many
+// devices it may enrol, per minute. A variable so tests can lower it.
+var portalLimitPerMinute = 10
+
+func newPortalState() *portalState {
+	return &portalState{sessions: map[string]portalSession{},
+		limit: &rateLimiter{rps: rate.Limit(float64(portalLimitPerMinute) / 60), burst: portalLimitPerMinute, clients: map[string]*rateClient{}}}
+}
+
+// throttle admits one login start or enrolment from the client's address, or
+// answers 429 and reports false. Fails closed: over the limit nothing is done.
+func (p *portalState) throttle(w http.ResponseWriter, r *http.Request, asJSON bool) bool {
+	if p.limit.allow(r.RemoteAddr) {
+		return true
+	}
+	markBlocked(w, blockRateLimit)
+	w.Header().Set("Retry-After", "60")
+	const msg = "too many attempts from your address: try again in a minute"
+	if asJSON {
+		writePortalErr(w, http.StatusTooManyRequests, msg)
+	} else {
+		http.Error(w, msg, http.StatusTooManyRequests)
+	}
+	return false
+}
 
 func (p *portalState) create(s portalSession) string {
 	raw := make([]byte, 32)
@@ -199,6 +229,9 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 	}
 
 	mux.HandleFunc("GET /.qg/vpn/login", func(w http.ResponseWriter, r *http.Request) {
+		if !e.portal.throttle(w, r, false) {
+			return
+		}
 		p, ok := provider()
 		if !ok {
 			http.Error(w, "the portal's identity provider is not configured", http.StatusServiceUnavailable)
@@ -315,7 +348,10 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 	})
 
 	// The API. Every call needs the session; every call that changes something
-	// also needs an Origin that is exactly this portal, and JSON (S51).
+	// also needs an Origin that is exactly this portal, and JSON (S51). A
+	// DELETE without a body has no content type to check: the page sends it
+	// that way, and a form cannot send a DELETE at all, so the Origin alone
+	// tells it apart from a cross-site request.
 	api := func(change bool, next func(w http.ResponseWriter, r *http.Request, s portalSession)) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")
@@ -330,7 +366,9 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 				return
 			}
 			if change {
-				if r.Header.Get("Origin") != requestOrigin(r) || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+				ctype := r.Header.Get("Content-Type")
+				bodiless := r.Method == http.MethodDelete && r.ContentLength == 0 && ctype == ""
+				if r.Header.Get("Origin") != requestOrigin(r) || (!bodiless && !strings.HasPrefix(ctype, "application/json")) {
 					writePortalErr(w, http.StatusForbidden, "this request did not come from the portal")
 					return
 				}
@@ -343,6 +381,9 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 		writePortalJSON(w, http.StatusOK, e.portalView(s))
 	}))
 	mux.HandleFunc("POST /.qg/vpn/api/devices", api(true, func(w http.ResponseWriter, r *http.Request, s portalSession) {
+		if !e.portal.throttle(w, r, true) {
+			return
+		}
 		var in struct{ Name, PublicKey string }
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in); err != nil {
 			writePortalErr(w, http.StatusBadRequest, "invalid request")
@@ -573,8 +614,10 @@ func (e *Engine) portalView(s portalSession) map[string]any {
 			}
 			row := map[string]any{"id": d.ID, "name": d.Name, "address": d.Address, "createdAt": d.CreatedAt, "publicKey": d.PublicKey}
 			if st, ok := status[d.ID]; ok {
-				// Where and when a device was last seen makes a stolen one visible.
-				row["connected"], row["lastHandshake"], row["lastEndpoint"] = true, st.LastHandshake, st.Endpoint
+				// Where and when a device was last seen makes a stolen one
+				// visible. A device on the endpoint that never shook hands has
+				// not connected, whatever the endpoint knows about it.
+				row["connected"], row["lastHandshake"], row["lastEndpoint"] = !st.LastHandshake.IsZero(), st.LastHandshake, st.Endpoint
 			}
 			mine = append(mine, row)
 		}

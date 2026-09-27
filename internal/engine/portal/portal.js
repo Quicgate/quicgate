@@ -85,7 +85,9 @@ function render() {
     rm.textContent = 'Remove';
     rm.addEventListener('click', async () => {
       if (!confirm('Remove ' + d.name + '? Its configuration stops working at once and cannot be used again.')) return;
-      try { await api('DELETE', '/devices/' + d.id); await load(); } catch (err) { alert(err.message); }
+      // With a body, like every other change: the server checks the JSON
+      // content type of a change, and a bodiless request has none.
+      try { await api('DELETE', '/devices/' + d.id, {}); await load(); } catch (err) { alert(err.message); }
     });
     td.append(rm);
     body.append(tr);
