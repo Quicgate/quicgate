@@ -431,9 +431,9 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			if c.ban != nil && !viaVPN(r) {
-				c.ban.recordFailure(r.RemoteAddr, routeName(r.Host), fmt.Sprintf("CORS preflight from an address access list %q does not allow", c.name))
-			}
+			// A refused preflight never counts toward a ban: the browser sends
+			// it for whatever page names this host, and the page's author is
+			// not the visitor whose address would be banned.
 			markBlocked(w, blockAccessList)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
@@ -448,18 +448,22 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 			// The first 401 a client without credentials gets is a login prompt
 			// (git and Docker always ask that way, and so does a browser), not a
 			// refusal, as long as credentials could still admit it. It is not
-			// counted as blocked, and it does not count toward a ban: a client
-			// that then sends wrong credentials does, and so does an address the
-			// list refuses whatever it sends.
+			// counted as blocked, and it does not count toward a ban.
 			challenge := len(c.users) > 0 && r.Header.Get("Authorization") == "" && (ipOK || (c.satisfy == "any" && c.restricted))
 			if !challenge {
-				// A refusal inside the tunnel is logged with its peer and never
-				// bans: a tunnel address is not a stranger, and the remedy for
-				// a misbehaving device is to revoke it (S18).
-				if c.ban != nil && !viaVPN(r) {
+				markBlocked(w, blockAccessList)
+				// Only a wrong password counts toward a ban. A refusal by
+				// address alone says nothing about the client's intent: any
+				// web page can make a visitor's browser fetch an image from a
+				// host the visitor's address is not allowed on, and five such
+				// images banned the visitor, and everyone behind the same NAT,
+				// from every host for an hour. A refusal inside the tunnel is
+				// logged with its peer and never bans either: a tunnel address
+				// is not a stranger, and the remedy for a misbehaving device is
+				// to revoke it (S18).
+				if _, _, hasBasic := r.BasicAuth(); hasBasic && len(c.users) > 0 && !authOK && c.ban != nil && !viaVPN(r) {
 					c.ban.recordFailure(r.RemoteAddr, routeName(r.Host), c.refusalReason(r, ipOK, authOK))
 				}
-				markBlocked(w, blockAccessList)
 			}
 			if len(c.users) > 0 && !authOK {
 				w.Header().Set("WWW-Authenticate", `Basic realm="`+c.name+`"`)

@@ -3,10 +3,10 @@ package engine
 import (
 	"encoding/json"
 	"log"
-	"os"
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -291,7 +291,10 @@ func (b *banManager) liftExempt() {
 }
 
 // recordFailure notes one refused request for host, and why it was refused,
-// and bans the address once the threshold is reached within the window.
+// and bans the address once the threshold is reached within the window. What
+// counts is the caller's decision: an access list records a wrong password,
+// never a refusal by address alone or a refused CORS preflight, which any web
+// page can make a visitor's browser send (see compiledAccess.wrap).
 func (b *banManager) recordFailure(remoteAddr, host, reason string) {
 	cfg := b.config()
 	if !cfg.enabled {
