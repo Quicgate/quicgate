@@ -130,16 +130,17 @@ func (e *Engine) vpnIntSetting(key string, def int) int {
 
 func requestOrigin(r *http.Request) string {
 	scheme := "http"
-	if portalEncrypted(r) {
+	if connectionEncrypted(r) {
 		scheme = "https"
 	}
 	return scheme + "://" + r.Host
 }
 
-// portalEncrypted reports whether the browser's connection is encrypted: TLS
-// here, or TLS at a trusted proxy in front of quicgate that says so. The
-// header alone is not believed, because anybody can send it.
-func portalEncrypted(r *http.Request) bool {
+// connectionEncrypted reports whether the browser's connection is encrypted:
+// TLS here, or TLS at a trusted proxy in front of quicgate that says so. The
+// header alone is not believed, because anybody can send it. The portal and
+// the SSO gate both decide on it what they hand out and over which scheme.
+func connectionEncrypted(r *http.Request) bool {
 	return r.TLS != nil || (viaTrustedProxy(r) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"))
 }
 
@@ -193,7 +194,7 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 	setCookie := func(w http.ResponseWriter, r *http.Request, name, value string, maxAge int, sameSite http.SameSite) {
 		// Always Secure. The one exception is a development instance that was
 		// started without TLS altogether, where there is no HTTPS to send it on.
-		http.SetCookie(w, &http.Cookie{Name: name, Value: value, Path: "/", HttpOnly: true, Secure: portalEncrypted(r) || !e.cfg.DisableTLS,
+		http.SetCookie(w, &http.Cookie{Name: name, Value: value, Path: "/", HttpOnly: true, Secure: connectionEncrypted(r) || !e.cfg.DisableTLS,
 			SameSite: sameSite, MaxAge: maxAge}) // no Domain: host-only
 	}
 
@@ -203,14 +204,19 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 			http.Error(w, "the portal's identity provider is not configured", http.StatusServiceUnavailable)
 			return
 		}
-		disc, err := e.oidcDiscover(r, p)
+		tx := portalTx{State: randomToken(), Nonce: randomToken(), Verifier: oauth2.GenerateVerifier(), Host: requestHostname(r), Expiry: time.Now().Add(portalTxTTL).Unix()}
+		payload, _ := json.Marshal(tx)
+		signed, err := signer.sign(portalTxCookie, payload)
+		if err != nil {
+			http.Error(w, "the portal cannot start a login: the cookie signing key cannot be read (see the server log)", http.StatusServiceUnavailable)
+			return
+		}
+		disc, err := e.oidcDiscover(p)
 		if err != nil {
 			http.Error(w, "the identity provider cannot be reached", http.StatusBadGateway)
 			return
 		}
-		tx := portalTx{State: randomToken(), Nonce: randomToken(), Verifier: oauth2.GenerateVerifier(), Host: requestHostname(r), Expiry: time.Now().Add(portalTxTTL).Unix()}
-		payload, _ := json.Marshal(tx)
-		setCookie(w, r, portalTxCookie, signer.sign(portalTxCookie, payload), int(portalTxTTL.Seconds()), http.SameSiteLaxMode)
+		setCookie(w, r, portalTxCookie, signed, int(portalTxTTL.Seconds()), http.SameSiteLaxMode)
 		cfg := oauthConfig(r, p, disc)
 		// max_age asks the provider for an authentication no older than this.
 		// The callback checks auth_time itself: a redirect that an existing
@@ -245,7 +251,7 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 			fail(w, http.StatusServiceUnavailable, "The portal's identity provider is not configured.")
 			return
 		}
-		disc, err := e.oidcDiscover(r, p)
+		disc, err := e.oidcDiscover(p)
 		if err != nil {
 			fail(w, http.StatusBadGateway, "The identity provider cannot be reached.")
 			return
@@ -420,7 +426,7 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 		// path reads both and can change the page that makes the private key,
 		// so there is no portal over plain HTTP (QG-05). A development instance
 		// without TLS altogether is the one exception.
-		if !portalEncrypted(r) && !e.cfg.DisableTLS {
+		if !connectionEncrypted(r) && !e.cfg.DisableTLS {
 			if r.Method == http.MethodGet || r.Method == http.MethodHead {
 				http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusPermanentRedirect)
 				return
@@ -461,6 +467,9 @@ func claimsIdentity(claims map[string]any, groupsClaim string) identity {
 	id.sub, _ = claims["sub"].(string)
 	id.email, _ = claims["email"].(string)
 	if id.email == "" {
+		// A name to call the person, and nothing more: the portal decides who
+		// may have devices by subject and group (subjectMatchesOwner), never
+		// by this address, so an unverified user name here admits nobody.
 		id.email, _ = claims["preferred_username"].(string)
 	}
 	id.email = strings.ToLower(id.email)
@@ -701,8 +710,7 @@ func (e *Engine) renewLease(ctx context.Context, s store.VPNSession) {
 			claimsSource = h.Options.Portal.ClaimsSource
 		}
 	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
-	disc, err := e.oidcDiscover(req, p)
+	disc, err := e.oidcDiscover(p)
 	if err != nil {
 		transient("the identity provider cannot be reached")
 		return

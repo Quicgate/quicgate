@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +31,11 @@ type fakeIdP struct {
 	email  string
 	groups []string
 	nonce  string // captured from the token request? No: set by test from the auth redirect
+	// mutate, when set, edits the ID token's claims before they are signed:
+	// how a test takes a claim away or puts a doubtful one in.
+	mutate     func(claims map[string]any)
+	tokenCalls atomic.Int32 // how often the token endpoint was asked
+	down       atomic.Bool  // discovery answers 503 while set
 }
 
 func newFakeIdP(t *testing.T) *fakeIdP {
@@ -41,6 +47,10 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 	idp := &fakeIdP{key: key}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		if idp.down.Load() {
+			http.Error(w, "maintenance", http.StatusServiceUnavailable)
+			return
+		}
 		base := idp.srv.URL
 		json.NewEncoder(w).Encode(map[string]any{
 			"issuer":                                base,
@@ -59,6 +69,7 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 		}}})
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		idp.tokenCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "at", "token_type": "Bearer",
@@ -79,6 +90,9 @@ func (f *fakeIdP) signIDToken(t *testing.T) string {
 	}
 	if f.groups != nil {
 		claims["groups"] = f.groups
+	}
+	if f.mutate != nil {
+		f.mutate(claims)
 	}
 	hdr, _ := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT", "kid": "test"})
 	body, _ := json.Marshal(claims)
