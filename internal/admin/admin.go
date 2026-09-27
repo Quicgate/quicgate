@@ -5,19 +5,21 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"net/mail"
 	"net/url"
-	"runtime"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 
 	"quicgate/internal/docker"
@@ -27,29 +29,50 @@ import (
 
 const sessionTTL = 12 * time.Hour
 
-type session struct {
-	userID  int64
-	email   string
-	expires time.Time
-}
+// Request body limits. Every JSON body is read through http.MaxBytesReader:
+// without a bound a client could feed the decoder gigabytes (and hold the
+// connection open trickling them), on a process that also runs the data plane.
+const (
+	// maxLoginBody bounds bodies that carry credentials: an address, a
+	// password, a code.
+	maxLoginBody = 16 << 10
+	// maxJSONBody bounds configuration bodies: hosts, import documents,
+	// PEM certificates. /api/restore has its own, larger limit.
+	maxJSONBody = 4 << 20
+)
 
 // Server is the management API + embedded UI, served on its own port.
 type Server struct {
-	store    *store.Store
-	engine   *engine.Engine
-	docker   *docker.Provider // nil unless the Docker label provider is enabled
-	webFS    fs.FS
+	store  *store.Store
+	engine *engine.Engine
+	docker *docker.Provider // nil unless the Docker label provider is enabled
+	webFS  fs.FS
+	// logins counts failed logins per client address, accounts per account,
+	// so rotating addresses does not buy more attempts (throttle.go).
 	logins   *loginThrottle
-	dataDir  string
-	mu       sync.Mutex
-	sessions map[string]session
+	accounts *loginThrottle
+	// oidcStarts counts SSO sign-ins started per client address.
+	oidcStarts *loginThrottle
+	dataDir    string
+	mu         sync.Mutex
+	sessions   map[string]session
 	// oidcLogins holds in-flight admin OIDC logins by state, each usable once.
 	oidcLogins map[string]adminOIDCLogin
+	// clientIPCfg is the compiled trusted-proxy configuration of this
+	// listener (realip.go), replaced on every reload.
+	clientIPCfg atomic.Pointer[clientIPConfig]
+	// oidcDiscovery caches the admin identity provider's discovered
+	// configuration by issuer (oidc.go).
+	oidcMu        sync.Mutex
+	oidcDiscovery map[string]discoveredProvider
 }
 
 func New(st *store.Store, eng *engine.Engine, webFS fs.FS, dataDir string) *Server {
-	return &Server{store: st, engine: eng, webFS: webFS, dataDir: dataDir, sessions: map[string]session{},
-		oidcLogins: map[string]adminOIDCLogin{}, logins: newLoginThrottle()}
+	s := &Server{store: st, engine: eng, webFS: webFS, dataDir: dataDir, sessions: map[string]session{},
+		oidcLogins: map[string]adminOIDCLogin{}, logins: newLoginThrottle(), accounts: newLoginThrottle(),
+		oidcStarts: newThrottle(oidcStartMax), oidcDiscovery: map[string]discoveredProvider{}}
+	s.loadClientIP()
+	return s
 }
 
 // SetDocker attaches the Docker label provider so the API can report its status
@@ -80,14 +103,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/oidc/callback", s.handleOIDCCallback)
 	mux.HandleFunc("GET /api/auth-methods", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{
-			"oidc": s.store.GetSetting("oidc_enabled", "") == "1",
+			"oidc": s.oidcEnabled(),
 			"ldap": s.ldapConfigured(),
 		})
 	})
 	// Unauthenticated so update-checkers / uptime monitors can read it; the
-	// version is public on GitHub anyway and reveals nothing sensitive.
+	// version is public on GitHub anyway and reveals nothing sensitive. The Go
+	// runtime version is not part of it: it points at the toolchain's
+	// vulnerabilities to anyone who can reach the port.
 	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"version": s.engine.Version(), "go": runtime.Version()})
+		writeJSON(w, http.StatusOK, map[string]string{"version": s.engine.Version()})
 	})
 	mux.HandleFunc("POST /api/logout", s.auth(s.handleLogout))
 	mux.HandleFunc("GET /api/me", s.auth(s.handleMe))
@@ -173,8 +198,27 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		w.Write([]byte(s.engine.MetricsText()))
 	}))
-	mux.Handle("/", http.FileServerFS(s.webFS))
+	mux.Handle("/", s.staticFiles())
 	return s.securityHeaders(s.csrf(mux))
+}
+
+// staticFiles serves the embedded UI. A path that names a directory other
+// than the root answers 404: the file server would list it, and the layout of
+// the embedded tree (docs, fonts) is nobody's business before signing in.
+func (s *Server) staticFiles() http.Handler {
+	if s.webFS == nil {
+		return http.NotFoundHandler()
+	}
+	files := http.FileServerFS(s.webFS)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if name := strings.Trim(path.Clean("/"+r.URL.Path), "/"); name != "" {
+			if info, err := fs.Stat(s.webFS, name); err == nil && info.IsDir() {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		files.ServeHTTP(w, r)
+	})
 }
 
 func pathID(r *http.Request) (int64, error) {
@@ -267,8 +311,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	var body map[string]string
-	if err := decodeStrict(r, &body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &body); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	for k, v := range body {
@@ -294,6 +338,23 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "never-ban list: "+err.Error())
 			return
 		}
+	}
+	// A trusted-proxy entry that is not an address would be dropped on the
+	// way to the data plane, leaving the front proxy untrusted and every client
+	// with the proxy's address; a /0 would let anyone state any address.
+	if raw, ok := body["trusted_proxies"]; ok {
+		if _, err := parseTrustedProxies(raw); err != nil {
+			writeErr(w, http.StatusBadRequest, "trusted proxies: "+err.Error())
+			return
+		}
+	}
+	if h, ok := body["real_ip_header"]; ok {
+		h = strings.TrimSpace(h)
+		if h != "" && !validHeaderName(h) {
+			writeErr(w, http.StatusBadRequest, "real IP header: "+strconv.Quote(h)+" is not a header name like X-Forwarded-For")
+			return
+		}
+		body["real_ip_header"] = h
 	}
 	// The admin sign-in provider is a reference like any other: it must resolve.
 	if id, ok := body["admin_oidc_provider_id"]; ok && id != "" {
@@ -390,7 +451,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			"upnp":        info.UPnP,
 			"autoban":     s.store.GetSetting("ban_enabled", "") == "1",
 			"geoip":       s.engine.GeoIPStatus().Loaded,
-			"oidc":        s.store.GetSetting("oidc_enabled", "") == "1",
+			"oidc":        s.oidcEnabled(),
 			"ldap":        s.ldapConfigured(),
 			"forwardAuth": fwdAuth > 0,
 			"docker":      s.docker != nil,
@@ -468,8 +529,8 @@ func (s *Server) handleDockerAdopt(w http.ResponseWriter, r *http.Request) {
 		Endpoint string `json:"endpoint"`
 		Name     string `json:"name"`
 	}
-	if err := decodeStrict(r, &body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &body); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	host, streams, ok := s.docker.Adopt(body.Endpoint, body.Name)
@@ -512,8 +573,8 @@ func (s *Server) handleListAccessLists(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateAccessList(w http.ResponseWriter, r *http.Request) {
 	var a store.AccessList
-	if err := decodeStrict(r, &a); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &a); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if err := s.store.CreateAccessList(&a); err != nil {
@@ -534,8 +595,8 @@ func (s *Server) handleUpdateAccessList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var a store.AccessList
-	if err := decodeStrict(r, &a); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &a); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	a.ID = id
@@ -610,8 +671,8 @@ func (s *Server) handleListStreams(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateStream(w http.ResponseWriter, r *http.Request) {
 	var st store.Stream
-	if err := decodeStrict(r, &st); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &st); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if err := s.store.CreateStream(&st, s.engine.ReservedPorts()); err != nil {
@@ -632,8 +693,8 @@ func (s *Server) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var st store.Stream
-	if err := decodeStrict(r, &st); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &st); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	st.ID = id
@@ -687,8 +748,8 @@ func (s *Server) handleListPortForwards(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleCreatePortForward(w http.ResponseWriter, r *http.Request) {
 	var p store.PortForward
-	if err := decodeStrict(r, &p); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &p); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if err := s.store.CreatePortForward(&p); err != nil {
@@ -709,8 +770,8 @@ func (s *Server) handleUpdatePortForward(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var p store.PortForward
-	if err := decodeStrict(r, &p); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &p); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	p.ID = id
@@ -770,6 +831,12 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
+		// API answers carry settings, tokens, second-factor secrets and
+		// backups: nothing a browser cache or a proxy may keep a copy of.
+		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/metrics" {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Pragma", "no-cache")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -790,13 +857,18 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 	})
 }
 
+// sameOrigin reports whether a cookie-authenticated write comes from this
+// site. Browsers send Origin on every request that is not GET or HEAD, so a
+// request with neither Origin nor Referer did not come from a page in a
+// browser the usual way, and is refused rather than waved through. Scripts
+// use an API token, which the check does not apply to.
 func sameOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		origin = r.Header.Get("Referer")
 	}
 	if origin == "" {
-		return true
+		return false
 	}
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" {
@@ -865,27 +937,74 @@ func (s *Server) passwordChangeRequired(sess session, r *http.Request) bool {
 // are verified and before its session is created.
 var testHookLoginVerified func()
 
+// bcryptCompare is bcrypt.CompareHashAndPassword; a variable so a test can
+// count that every login path runs it.
+var bcryptCompare = bcrypt.CompareHashAndPassword
+
+// dummyHash is a real bcrypt hash, at the cost every stored hash has, of a
+// random password nobody knows. A login for an account that does not exist is
+// compared against it, so an unknown account costs the same as a wrong
+// password and the answer's timing does not tell which one it was. (A string
+// that is not a valid hash would not do: bcrypt refuses it before doing any
+// work.)
+const dummyHash = "$2a$10$xdkJ2A3AZdI8mnsuddX1OeiSoCJ0F6eq0gM2PHRE5HB8YpxZ4y7ca"
+
+// maxPasswordBytes is bcrypt's input limit: a longer password can neither be
+// stored nor be the one that is stored.
+const maxPasswordBytes = 72
+
+// errPasswordTooLong is the answer to a password over bcrypt's limit: refused
+// as a bad request, in so many words, rather than failing inside bcrypt.
+const errPasswordTooLong = "the password is longer than 72 bytes, which no account can have"
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	ip := requestIP(r)
+	start := time.Now()
+	ip := s.clientIP(r)
 	if !s.logins.allow(ip) {
 		writeErr(w, http.StatusTooManyRequests, "too many failed logins, try again later")
 		return
 	}
 	var body struct{ Email, Password, Code string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json")
+	if err := decodeJSON(w, r, &body, maxLoginBody, false); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
+	if len(body.Password) > maxPasswordBytes {
+		writeErr(w, http.StatusBadRequest, errPasswordTooLong)
+		return
+	}
+	account := accountKey(body.Email)
+	if !s.accounts.allow(account) {
+		writeErr(w, http.StatusTooManyRequests, "too many failed logins for this account, try again later")
+		return
+	}
+	// fail counts the attempt against the address and the account, and
+	// answers at the deadline: whatever was checked, and however long it took,
+	// every refusal takes the same time from the start of the request.
+	fail := func(msg string) {
+		s.logins.fail(ip)
+		s.accounts.fail(account)
+		time.Sleep(time.Until(start.Add(loginFailDelay)))
+		writeErr(w, http.StatusUnauthorized, msg)
+	}
 	u, err := s.store.GetUserByEmail(body.Email)
-	localOK := err == nil && bcrypt.CompareHashAndPassword([]byte(u.Hash), []byte(body.Password)) == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("admin: login of %q: %v", account, err)
+	}
+	hash := dummyHash
+	if err == nil {
+		hash = u.Hash
+	}
+	// One bcrypt compare on every path, against the account's hash or the
+	// stand-in, so a known and an unknown account cost the same.
+	matched := bcryptCompare([]byte(hash), []byte(body.Password)) == nil
+	localOK := err == nil && matched
 	if !localOK {
 		// Additive LDAP fallback; local admin always still works.
 		// Binding proves the directory knows the password; being allowed to
 		// administer the proxy is a separate decision.
 		if !s.ldapAuth(body.Email, body.Password) || !s.ldapIdentityApproved(body.Email) {
-			s.logins.fail(ip)
-			time.Sleep(400 * time.Millisecond) // flat cost for wrong email and wrong password alike
-			writeErr(w, http.StatusUnauthorized, "invalid credentials")
+			fail("invalid credentials")
 			return
 		}
 		if u.Email == "" {
@@ -898,21 +1017,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"totpRequired": true})
 			return
 		}
-		if !totp.Validate(body.Code, u.TOTPSecret) {
-			// Counted like a wrong password: six digits are guessable fast.
-			s.logins.fail(ip)
-			writeErr(w, http.StatusUnauthorized, "invalid authentication code")
+		if !s.verifyTOTP(u.ID, u.TOTPLast, u.TOTPSecret, body.Code) {
+			// Counted and delayed like a wrong password: six digits are
+			// guessable fast, and a code is good once.
+			fail("invalid authentication code")
 			return
 		}
 	}
 	if testHookLoginVerified != nil {
 		testHookLoginVerified()
 	}
-	start := s.startSession
+	startSession := s.startSession
 	if localOK {
-		start = s.startSessionIfUnchanged(u)
+		startSession = s.startSessionIfUnchanged(u)
 	}
-	if err := start(w, r, u.ID, u.Email); errors.Is(err, errCredentialsChanged) {
+	if err := startSession(w, r, u.ID, u.Email); errors.Is(err, errCredentialsChanged) {
 		writeErr(w, http.StatusUnauthorized, "the account's credentials changed while signing in, sign in again")
 		return
 	} else if err != nil {
@@ -920,6 +1039,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logins.succeed(ip)
+	s.accounts.succeed(account)
 	writeJSON(w, http.StatusOK, map[string]any{"email": u.Email, "mustChange": u.MustChange, "version": s.engine.Version()})
 }
 
@@ -935,6 +1055,15 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	sess := r.Context().Value(sessionKey).(session)
+	if sess.isToken() {
+		// An API token is a principal without an account: no address, no
+		// password to change, no second factor. Say so instead of looking
+		// for a row that cannot exist.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"email": "", "token": true, "mustChange": false, "totpEnabled": false, "version": s.engine.Version(),
+		})
+		return
+	}
 	u, err := s.store.GetUserByEmail(sess.email)
 	if err != nil {
 		// An allow-listed OIDC/LDAP identity has no local row; the directory
@@ -956,21 +1085,27 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	sess := r.Context().Value(sessionKey).(session)
 	var body struct{ Current, New string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json")
+	if err := decodeJSON(w, r, &body, maxLoginBody, false); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if len(body.New) < 8 {
 		writeErr(w, http.StatusBadRequest, "new password must be at least 8 characters")
 		return
 	}
-	u, err := s.store.GetUserByEmail(sess.email)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+	if len(body.New) > maxPasswordBytes {
+		writeErr(w, http.StatusBadRequest, "new password must be at most 72 bytes")
 		return
 	}
-	if bcrypt.CompareHashAndPassword([]byte(u.Hash), []byte(body.Current)) != nil {
-		writeErr(w, http.StatusUnauthorized, "current password is incorrect")
+	// The current password is checked through the same gate as every other
+	// change to the account's own protection: counted per account, so a
+	// stolen session cannot guess it at leisure.
+	u, status, msg := s.reauthenticate(sess, body.Current)
+	if status == http.StatusUnauthorized {
+		msg = "current password is incorrect"
+	}
+	if status != 0 {
+		writeErr(w, status, msg)
 		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(body.New), bcrypt.DefaultCost)
@@ -1013,8 +1148,8 @@ func accountEmail(raw string) (string, bool) {
 func (s *Server) handleEmail(w http.ResponseWriter, r *http.Request) {
 	sess := r.Context().Value(sessionKey).(session)
 	var body struct{ Email, Password string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json")
+	if err := decodeJSON(w, r, &body, maxLoginBody, false); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	email, ok := accountEmail(body.Email)
@@ -1058,8 +1193,8 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
 	var h store.Host
-	if err := decodeStrict(r, &h); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &h); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if err := s.store.CreateHost(&h); err != nil {
@@ -1080,8 +1215,8 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var h store.Host
-	if err := decodeStrict(r, &h); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &h); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	h.ID = id
@@ -1143,8 +1278,8 @@ func (s *Server) handleListCustomCerts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateCustomCert(w http.ResponseWriter, r *http.Request) {
 	var c store.CustomCert
-	if err := decodeStrict(r, &c); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &c); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if err := s.store.CreateCustomCert(&c); err != nil {
@@ -1165,8 +1300,8 @@ func (s *Server) handleUpdateCustomCert(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var c store.CustomCert
-	if err := decodeStrict(r, &c); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &c); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if err := s.store.UpdateCustomCertPEM(id, &c); err != nil {
@@ -1209,6 +1344,9 @@ func (s *Server) handleDeleteCustomCert(w http.ResponseWriter, r *http.Request) 
 // fails to apply must be loud: a silent failure leaves the engine serving a
 // stale config until the next reload, which reads as "needs a restart".
 func (s *Server) reload(ctx context.Context) error {
+	// This listener's own view of the trusted proxies follows the stored
+	// settings whatever the engine makes of the rest.
+	s.loadClientIP()
 	err := s.engine.Reload(ctx)
 	if err != nil {
 		log.Printf("admin: reload failed, retrying once: %v", err)
@@ -1220,16 +1358,50 @@ func (s *Server) reload(ctx context.Context) error {
 	return err
 }
 
-// decodeStrict rejects unknown fields so a typo'd or removed option can never
-// be silently dropped, which is the whole contract of structured options.
-func decodeStrict(r *http.Request, v any) error {
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
+// decodeStrict reads a configuration body of at most maxJSONBody bytes and
+// rejects unknown fields so a typo'd or removed option can never be silently
+// dropped, which is the whole contract of structured options.
+func decodeStrict(w http.ResponseWriter, r *http.Request, v any) error {
+	return decodeJSON(w, r, v, maxJSONBody, true)
+}
+
+// decodeJSON decodes one JSON body of at most limit bytes into v. The limit
+// is enforced by http.MaxBytesReader, which also makes the server close the
+// connection instead of reading the rest of an oversized body. With strict,
+// unknown fields are an error.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any, limit int64, strict bool) error {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
+	if strict {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(v); err != nil {
-		if strings.Contains(err.Error(), "unknown field") {
+		var tooBig *http.MaxBytesError
+		switch {
+		case errors.As(err, &tooBig):
+			return err
+		case errors.Is(err, io.EOF):
+			return errEmptyBody
+		case strict && strings.Contains(err.Error(), "unknown field"):
 			return errors.New("unsupported option: " + err.Error())
+		case strict:
+			return err
 		}
-		return err
+		return errors.New("invalid json")
 	}
 	return nil
+}
+
+// errEmptyBody is decodeJSON's answer to a request without a body; the one
+// handler that accepts that (2FA disable) checks for it.
+var errEmptyBody = errors.New("request body is empty")
+
+// writeBodyErr answers a request whose body could not be decoded: 413 when it
+// was over its size limit, 400 with the decoder's reason otherwise.
+func writeBodyErr(w http.ResponseWriter, err error) {
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		writeErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body is larger than the %d byte limit", tooBig.Limit))
+		return
+	}
+	writeErr(w, http.StatusBadRequest, err.Error())
 }

@@ -144,8 +144,14 @@ func TestBreakGlassAPI(t *testing.T) {
 	if err := s.store.SetTOTPSecret(u.ID, otp.Secret()); err != nil {
 		t.Fatal(err)
 	}
+	// A code is good once: the clock the server checks codes against is under
+	// the test's control, and moves on one step for every device it makes.
+	base := time.Now()
+	step := 0
+	totpNow = func() time.Time { return base.Add(time.Duration(step) * totpPeriod * time.Second) }
+	t.Cleanup(func() { totpNow = time.Now })
 	code := func() string {
-		c, err := totp.GenerateCode(otp.Secret(), time.Now())
+		c, err := totp.GenerateCode(otp.Secret(), totpNow())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -181,7 +187,8 @@ func TestBreakGlassAPI(t *testing.T) {
 		t.Fatalf("a refused request left %d devices behind", len(devices))
 	}
 
-	rr := call(t, s, http.MethodPost, "/api/wg/breakglass", sess, body(code()))
+	used := code()
+	rr := call(t, s, http.MethodPost, "/api/wg/breakglass", sess, body(used))
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
 	}
@@ -189,10 +196,16 @@ func TestBreakGlassAPI(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &first); err != nil || first.Kind != "breakglass" || first.ExpiresAt == "" || len(first.Routes) != 1 || first.PresharedKey == "" {
 		t.Fatalf("created = %s", rr.Body.String())
 	}
+	// The code that made the first device is spent.
+	if rr := call(t, s, http.MethodPost, "/api/wg/breakglass", sess, body(used)); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("the same code again: %d %s, want 401", rr.Code, rr.Body.String())
+	}
+	step++
 	never := mutate(func(b map[string]any) { delete(b, "expiresAt"); b["neverExpires"] = true })
 	if rr := call(t, s, http.MethodPost, "/api/wg/breakglass", sess, never); rr.Code != http.StatusCreated {
 		t.Fatalf("never expires, said explicitly: %d %s", rr.Code, rr.Body.String())
 	}
+	step++
 	if rr := call(t, s, http.MethodPost, "/api/wg/breakglass", sess, body(code())); rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "two break-glass") {
 		t.Fatalf("a third: %d %s, want 400", rr.Code, rr.Body.String())
 	}

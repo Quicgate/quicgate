@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,6 +75,9 @@ func call(t *testing.T, s *Server, method, path, sess string, body any) *httptes
 	req := httptest.NewRequest(method, path, rd)
 	if sess != "" {
 		req.AddCookie(&http.Cookie{Name: "qg_session", Value: sess})
+		// A browser sends Origin with every request that is not GET or HEAD;
+		// a cookie-authenticated write without it is refused.
+		req.Header.Set("Origin", "http://"+req.Host)
 	}
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
@@ -151,35 +155,53 @@ func TestTOTPChangeRequiresPassword(t *testing.T) {
 	}
 }
 
-// Q11: turning 2FA on also needs the password.
+// setup2FA runs the setup step for a session and returns the secret it bound
+// to the session (the one enable confirms).
+func setup2FA(t *testing.T, s *Server, sess string) string {
+	t.Helper()
+	rr := call(t, s, http.MethodPost, "/api/2fa/setup", sess, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("2FA setup: %d %s", rr.Code, rr.Body.String())
+	}
+	var out struct{ Secret string }
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil || out.Secret == "" {
+		t.Fatalf("2FA setup answer: %s", rr.Body.String())
+	}
+	return out.Secret
+}
+
+// Q11: turning 2FA on also needs the password. The secret is the one the setup
+// step bound to the session, not one the client sends.
 func TestTOTPEnableRequiresPassword(t *testing.T) {
 	s := newTestServer(t)
 	mustUser(t, s, "admin@example.com", "password-123")
 	sess := login(t, s, "admin@example.com", "password-123")
-	key, err := totp.Generate(totp.GenerateOpts{Issuer: "quicgate", AccountName: "admin@example.com"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	code, _ := totp.GenerateCode(key.Secret(), time.Now())
-	if got := call(t, s, http.MethodPost, "/api/2fa/enable", sess, map[string]string{"Secret": key.Secret(), "Code": code}).Code; got == http.StatusOK {
+	secret := setup2FA(t, s, sess)
+	code, _ := totp.GenerateCode(secret, time.Now())
+	if got := call(t, s, http.MethodPost, "/api/2fa/enable", sess, map[string]string{"Code": code}).Code; got == http.StatusOK {
 		t.Fatal("2FA was enabled without the password")
 	}
 	if u, _ := s.store.GetUserByEmail("admin@example.com"); u.TOTPSecret != "" {
 		t.Fatal("a 2FA secret was stored without re-authentication")
 	}
-	if got := call(t, s, http.MethodPost, "/api/2fa/enable", sess, map[string]string{"Secret": key.Secret(), "Code": code, "Password": "password-123"}).Code; got != http.StatusOK {
+	if got := call(t, s, http.MethodPost, "/api/2fa/enable", sess, map[string]string{"Code": code, "Password": "password-123"}).Code; got != http.StatusOK {
 		t.Fatalf("2FA enable with the password: got %d, want 200", got)
+	}
+	if u, _ := s.store.GetUserByEmail("admin@example.com"); u.TOTPSecret != secret {
+		t.Fatal("the stored secret is not the one setup showed")
 	}
 }
 
 // ---- Q12: admin OIDC login binds the transaction ----
 
 type adminIdP struct {
-	srv       *httptest.Server
-	key       *rsa.PrivateKey
-	email     string
-	nonce     string // what the next id_token will carry
-	challenge string // the S256 code_challenge of the login being finished
+	srv         *httptest.Server
+	key         *rsa.PrivateKey
+	email       string
+	nonce       string // what the next id_token will carry
+	challenge   string // the S256 code_challenge of the login being finished
+	tokenError  string // when set, the token endpoint fails with this body
+	discoveries atomic.Int32
 }
 
 func newAdminIdP(t *testing.T) *adminIdP {
@@ -191,6 +213,7 @@ func newAdminIdP(t *testing.T) *adminIdP {
 	idp := &adminIdP{key: key}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		idp.discoveries.Add(1)
 		base := idp.srv.URL
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"issuer": base, "authorization_endpoint": base + "/auth", "token_endpoint": base + "/token",
@@ -206,6 +229,10 @@ func newAdminIdP(t *testing.T) *adminIdP {
 		}}})
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		if idp.tokenError != "" {
+			http.Error(w, idp.tokenError, http.StatusBadRequest)
+			return
+		}
 		// A real IdP refuses the code unless the verifier matches the challenge
 		// sent with the authorization request; so does this one.
 		vsum := sha256.Sum256([]byte(r.FormValue("code_verifier")))

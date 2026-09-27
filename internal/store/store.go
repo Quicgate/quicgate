@@ -290,6 +290,10 @@ type User struct {
 	Hash       string
 	MustChange bool
 	TOTPSecret string // empty = 2FA disabled
+	// TOTPLast is the time step (RFC 6238 counter) of the last code this
+	// account signed in with. A code is accepted only for a later step, so a
+	// code seen on the wire cannot be replayed within its validity window.
+	TOTPLast int64
 }
 
 var domainRe = regexp.MustCompile(`^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?$|^localhost$`)
@@ -797,6 +801,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 		"ALTER TABLE users ADD COLUMN totp_secret TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE streams ADD COLUMN extra TEXT NOT NULL DEFAULT '{}'",
 		"ALTER TABLE hosts ADD COLUMN locations TEXT NOT NULL DEFAULT '[]'",
+		"ALTER TABLE users ADD COLUMN totp_last INTEGER NOT NULL DEFAULT 0",
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
@@ -1005,8 +1010,8 @@ func (s *Store) GetUserByEmail(email string) (User, error) {
 	var u User
 	var mc int
 	var totp string
-	err := s.db.QueryRow("SELECT id, email, hash, must_change, totp_secret FROM users WHERE email=?", strings.ToLower(email)).
-		Scan(&u.ID, &u.Email, &u.Hash, &mc, &totp)
+	err := s.db.QueryRow("SELECT id, email, hash, must_change, totp_secret, totp_last FROM users WHERE email=?", strings.ToLower(email)).
+		Scan(&u.ID, &u.Email, &u.Hash, &mc, &totp, &u.TOTPLast)
 	if err != nil {
 		return User{}, err
 	}
@@ -1015,6 +1020,19 @@ func (s *Store) GetUserByEmail(email string) (User, error) {
 		return User{}, fmt.Errorf("two-factor secret of %s: %w", u.Email, err)
 	}
 	return u, nil
+}
+
+// UseTOTPCounter records that the account signed in with the code of time step
+// counter. It reports false, and records nothing, when the account has already
+// used that step or a later one: the check and the write are one statement, so
+// two logins presenting the same code at the same moment cannot both pass.
+func (s *Store) UseTOTPCounter(id, counter int64) (bool, error) {
+	res, err := s.db.Exec("UPDATE users SET totp_last=? WHERE id=? AND totp_last<?", counter, id, counter)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // SetTOTPSecret enables 2FA (secret set) or disables it (empty).
