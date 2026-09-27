@@ -42,6 +42,7 @@ func TestRestoreRejectsDecompressionBomb(t *testing.T) {
 	s.sessions[tok] = session{userID: 1, email: "admin@example.com", expires: time.Now().Add(time.Hour)}
 	req := httptest.NewRequest(http.MethodPost, "/api/restore", bytes.NewReader(buf.Bytes()))
 	req.AddCookie(&http.Cookie{Name: "qg_session", Value: tok})
+	req.Header.Set("Origin", "http://"+req.Host)
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
 
@@ -71,6 +72,7 @@ func TestRestoreRejectsNonRegularMembers(t *testing.T) {
 	s.sessions[tok] = session{userID: 1, email: "admin@example.com", expires: time.Now().Add(time.Hour)}
 	req := httptest.NewRequest(http.MethodPost, "/api/restore", bytes.NewReader(buf.Bytes()))
 	req.AddCookie(&http.Cookie{Name: "qg_session", Value: tok})
+	req.Header.Set("Origin", "http://"+req.Host)
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
 

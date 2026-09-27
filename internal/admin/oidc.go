@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,18 +17,26 @@ import (
 
 // OIDC is an additive admin login option: password login always keeps
 // working, so a misconfigured IdP can never lock the admin out. Enabled and
-// configured entirely through settings.
+// configured entirely through settings: the switch plus inline issuer, client
+// and redirect URL, or simply a provider selected from the Identity providers
+// list, with the redirect URL derived from the request when none is set.
 
 const (
 	// adminOIDCLoginTTL is how long a started sign-in may take at the IdP.
 	adminOIDCLoginTTL = 5 * time.Minute
-	// adminOIDCMaxPending bounds in-flight sign-ins held in memory; the oldest
-	// is dropped when it is reached (that user simply starts again).
-	adminOIDCMaxPending = 1024
 	// oidcHTTPTimeout bounds every request to the IdP: discovery, the token
 	// exchange and the key set.
 	oidcHTTPTimeout = 15 * time.Second
+	// oidcDiscoveryTTL is how long a discovered provider configuration is
+	// reused before it is fetched again.
+	oidcDiscoveryTTL = time.Hour
 )
+
+// adminOIDCMaxPending bounds in-flight sign-ins held in memory. At the cap a
+// new sign-in is refused, never a live one dropped: whoever is in the middle
+// of signing in must be able to finish. A variable so tests can use a small
+// table.
+var adminOIDCMaxPending = 1024
 
 // adminOIDCLogin is one in-flight admin sign-in. It is created by the login
 // redirect and consumed by the first callback that presents its state, so a
@@ -37,6 +46,12 @@ const (
 type adminOIDCLogin struct {
 	nonce    string
 	verifier string
+	expires  time.Time
+}
+
+// discoveredProvider is a cached result of OIDC discovery for one issuer.
+type discoveredProvider struct {
+	provider *oidc.Provider
 	expires  time.Time
 }
 
@@ -58,8 +73,38 @@ func (s *Server) adminOIDCProvider(id string) (store.OIDCProvider, bool, error) 
 	return store.OIDCProvider{}, false, nil
 }
 
-func (s *Server) oidcConfig(ctx context.Context) (*oidc.Provider, oauth2.Config, bool, error) {
-	if s.store.GetSetting("oidc_enabled", "") != "1" {
+// oidcEnabled reports whether admin sign-in through an identity provider is
+// on: the switch, or a provider selected from the list. Selecting one is the
+// whole configuration; it would be a surprise for the login to answer "not
+// configured" after that.
+func (s *Server) oidcEnabled() bool {
+	return s.store.GetSetting("oidc_enabled", "") == "1" || s.store.GetSetting("admin_oidc_provider_id", "") != ""
+}
+
+// discover returns the issuer's discovered configuration, fetched at most
+// once per oidcDiscoveryTTL: discovery is a request to the IdP, and the login
+// endpoint that needs it is unauthenticated. The provider fetches the key set
+// later, on the callback's verify, with the context it was made with, so it
+// gets one that outlives the request that made it.
+func (s *Server) discover(issuer string) (*oidc.Provider, error) {
+	s.oidcMu.Lock()
+	d, ok := s.oidcDiscovery[issuer]
+	s.oidcMu.Unlock()
+	if ok && time.Now().Before(d.expires) {
+		return d.provider, nil
+	}
+	p, err := oidc.NewProvider(oidcClientContext(context.Background()), issuer)
+	if err != nil {
+		return nil, err
+	}
+	s.oidcMu.Lock()
+	s.oidcDiscovery[issuer] = discoveredProvider{provider: p, expires: time.Now().Add(oidcDiscoveryTTL)}
+	s.oidcMu.Unlock()
+	return p, nil
+}
+
+func (s *Server) oidcConfig(r *http.Request) (*oidc.Provider, oauth2.Config, bool, error) {
+	if !s.oidcEnabled() {
 		return nil, oauth2.Config{}, false, nil
 	}
 	issuer := s.store.GetSetting("oidc_issuer", "")
@@ -87,10 +132,17 @@ func (s *Server) oidcConfig(ctx context.Context) (*oidc.Provider, oauth2.Config,
 		}
 	}
 	redirect := s.store.GetSetting("oidc_redirect_url", "")
+	if redirect == "" && r.Host != "" {
+		// Not set: this listener's own callback, at the name and scheme the
+		// browser used. The IdP checks it against what was registered there,
+		// so a wrong guess fails loudly at the IdP; the explicit setting
+		// remains for deployments where the guess is wrong.
+		redirect = s.requestScheme(r) + "://" + r.Host + "/api/oidc/callback"
+	}
 	if issuer == "" || clientID == "" || redirect == "" {
 		return nil, oauth2.Config{}, false, nil
 	}
-	provider, err := oidc.NewProvider(ctx, issuer)
+	provider, err := s.discover(issuer)
 	if err != nil {
 		return nil, oauth2.Config{}, false, err
 	}
@@ -104,11 +156,23 @@ func (s *Server) oidcConfig(ctx context.Context) (*oidc.Provider, oauth2.Config,
 	return provider, cfg, true, nil
 }
 
-// handleOIDCLogin starts the auth-code flow with PKCE and a nonce.
+// handleOIDCLogin starts the auth-code flow with PKCE and a nonce. It is
+// unauthenticated, so what it costs is bounded: starts are counted per client
+// address, discovery is cached, and a full table of pending sign-ins refuses
+// the new one rather than dropping someone else's.
 func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
-	_, cfg, ok, err := s.oidcConfig(oidcClientContext(r.Context()))
+	ip := s.clientIP(r)
+	if !s.oidcStarts.allow(ip) {
+		writeErr(w, http.StatusTooManyRequests, "too many sign-in attempts, try again later")
+		return
+	}
+	s.oidcStarts.fail(ip)
+	_, cfg, ok, err := s.oidcConfig(r)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "OIDC provider error: "+err.Error())
+		// The IdP's answer, or the misconfiguration, is for the operator's log,
+		// not for whoever hit the unauthenticated endpoint.
+		log.Printf("admin: oidc login: %v", err)
+		writeErr(w, http.StatusBadGateway, "the identity provider is not available right now; details are in the server log")
 		return
 	}
 	if !ok {
@@ -128,18 +192,15 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	login := adminOIDCLogin{nonce: nonce, verifier: oauth2.GenerateVerifier(), expires: time.Now().Add(adminOIDCLoginTTL)}
 	s.mu.Lock()
 	now := time.Now()
-	oldestKey, oldest := "", time.Time{}
 	for k, l := range s.oidcLogins {
 		if now.After(l.expires) {
 			delete(s.oidcLogins, k)
-			continue
-		}
-		if oldestKey == "" || l.expires.Before(oldest) {
-			oldestKey, oldest = k, l.expires
 		}
 	}
-	if len(s.oidcLogins) >= adminOIDCMaxPending && oldestKey != "" {
-		delete(s.oidcLogins, oldestKey)
+	if len(s.oidcLogins) >= adminOIDCMaxPending {
+		s.mu.Unlock()
+		writeErr(w, http.StatusServiceUnavailable, "too many sign-ins are in progress; try again in a few minutes")
+		return
 	}
 	s.oidcLogins[state] = login
 	s.mu.Unlock()
@@ -170,14 +231,19 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := oidcClientContext(r.Context())
-	provider, cfg, ok, err := s.oidcConfig(ctx)
+	provider, cfg, ok, err := s.oidcConfig(r)
 	if err != nil || !ok {
+		if err != nil {
+			log.Printf("admin: oidc callback: %v", err)
+		}
 		writeErr(w, http.StatusBadGateway, "OIDC not available")
 		return
 	}
 	oauth2Token, err := cfg.Exchange(ctx, r.URL.Query().Get("code"), oauth2.VerifierOption(login.verifier))
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "token exchange failed: "+err.Error())
+		// The error carries the IdP's response body; that is for the log.
+		log.Printf("admin: oidc token exchange failed: %v", err)
+		writeErr(w, http.StatusBadRequest, "the identity provider did not accept the sign-in; details are in the server log")
 		return
 	}
 	rawID, ok := oauth2Token.Extra("id_token").(string)

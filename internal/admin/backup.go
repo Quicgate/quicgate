@@ -17,6 +17,11 @@ import (
 
 const maxRestoreBytes = 200 << 20
 
+// restoreReadTimeout is how long a restore upload may take. The admin server's
+// ReadTimeout is sized for JSON bodies; an archive of up to maxRestoreBytes
+// over a slow link needs longer, and this handler alone gets it.
+const restoreReadTimeout = 15 * time.Minute
+
 // maxRestoreExpandedBytes caps what an upload may expand to. The compressed
 // limit above does not bound this: gzip happily turns a few megabytes of zeroes
 // into hundreds of gigabytes, which would fill the data volume before any of
@@ -122,6 +127,12 @@ func addFileToTar(tw *tar.Writer, path, name string) error {
 // the ones that apply) and the engine reloads, which also picks up the
 // restored SSO signing key.
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
+	// Not every ResponseWriter can set deadlines (a test recorder cannot);
+	// that is not a failure of the restore.
+	if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(restoreReadTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	tmp, err := os.MkdirTemp(s.dataDir, ".restore-*")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())

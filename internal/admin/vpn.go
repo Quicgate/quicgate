@@ -2,15 +2,12 @@ package admin
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/pquerna/otp/totp"
 
 	"quicgate/internal/engine"
 	"quicgate/internal/store"
@@ -100,8 +97,8 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request, d *store.W
 
 func (s *Server) handleCreateWGDevice(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Name, PublicKey string }
-	if err := decodeStrict(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &in); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if !s.wgReady(w) {
@@ -119,8 +116,8 @@ func (s *Server) handleEnableWGDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct{ Enabled bool }
-	if err := decodeStrict(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &in); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if err := s.store.SetWGDeviceEnabled(id, in.Enabled); errors.Is(err, sql.ErrNoRows) {
@@ -169,29 +166,24 @@ func (s *Server) handleCreateBreakGlass(w http.ResponseWriter, r *http.Request) 
 		Routes                                     []store.VPNRoute
 		NeverExpires                               bool
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json")
+	if err := decodeJSON(w, r, &in, maxJSONBody, false); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if !s.wgReady(w) {
 		return
 	}
-	u, status, msg := s.reauthenticate(sess, in.Password)
-	if status != 0 {
-		writeErr(w, status, msg)
-		return
-	}
-	if u.TOTPSecret == "" {
-		writeErr(w, http.StatusBadRequest, "a break-glass device needs two-factor authentication on this account: switch it on first")
-		return
-	}
-	if !totp.Validate(in.Code, u.TOTPSecret) {
-		writeErr(w, http.StatusUnauthorized, "the two-factor code does not match")
-		return
-	}
+	// What can be checked without the second factor is checked first: a code
+	// is good once, and a mistake in the form should not use it up.
 	if len(in.Routes) == 0 {
 		writeErr(w, http.StatusBadRequest, "a break-glass device needs the routes it may reach")
 		return
+	}
+	for i := range in.Routes {
+		if err := in.Routes[i].Validate(); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	expires := ""
 	if !in.NeverExpires {
@@ -217,6 +209,22 @@ func (s *Server) handleCreateBreakGlass(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "there are two break-glass devices already: revoke one first")
 		return
 	}
+	u, status, msg := s.reauthenticate(sess, in.Password)
+	if status != 0 {
+		writeErr(w, status, msg)
+		return
+	}
+	if u.TOTPSecret == "" {
+		writeErr(w, http.StatusBadRequest, "a break-glass device needs two-factor authentication on this account: switch it on first")
+		return
+	}
+	if !s.verifyTOTP(u.ID, u.TOTPLast, u.TOTPSecret, in.Code) {
+		// A stolen session with the password is one guess of six digits away
+		// from a LAN device: counted like a failed login.
+		s.accounts.fail(accountKey(u.Email))
+		writeErr(w, http.StatusUnauthorized, "the two-factor code does not match")
+		return
+	}
 	s.createDevice(w, r, &store.WGDevice{Name: in.Name, Kind: "breakglass", PublicKey: in.PublicKey, Routes: in.Routes, ExpiresAt: expires})
 }
 
@@ -231,8 +239,8 @@ func (s *Server) handleListVPNPolicies(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSaveVPNPolicy(w http.ResponseWriter, r *http.Request) {
 	var p store.VPNPolicy
-	if err := decodeStrict(r, &p); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &p); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	p.ID = 0
@@ -322,7 +330,7 @@ func (s *Server) handleBlockVPNOwner(w http.ResponseWriter, r *http.Request) {
 		Provider   int64
 		Sub, Email string
 	}
-	if err := decodeStrict(r, &in); err != nil || in.Provider <= 0 || in.Sub == "" {
+	if err := decodeStrict(w, r, &in); err != nil || in.Provider <= 0 || in.Sub == "" {
 		writeErr(w, http.StatusBadRequest, "give the identity provider and the person's subject id")
 		return
 	}
@@ -342,8 +350,8 @@ func (s *Server) handleUnblockVPNOwner(w http.ResponseWriter, r *http.Request) {
 		Provider int64
 		Sub      string
 	}
-	if err := decodeStrict(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &in); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if err := s.store.UnblockVPNOwner(in.Provider, in.Sub); err != nil {
@@ -361,8 +369,8 @@ func (s *Server) handleExplainRoute(w http.ResponseWriter, r *http.Request) {
 		Routes      []store.VPNRoute
 		Proto, Dest string
 	}
-	if err := decodeStrict(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &in); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	for i := range in.Routes {
@@ -449,8 +457,8 @@ func (s *Server) checkVPNSettings(body map[string]string) error {
 func (s *Server) handleResetWGServerKey(w http.ResponseWriter, r *http.Request) {
 	sess := r.Context().Value(sessionKey).(session)
 	var in struct{ Password string }
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json")
+	if err := decodeJSON(w, r, &in, maxLoginBody, false); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if _, status, msg := s.reauthenticate(sess, in.Password); status != 0 {

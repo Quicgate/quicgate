@@ -13,7 +13,32 @@ import (
 // Admin sessions live in memory. Anything that changes who may administer the
 // proxy (a password change, a restore, an explicit sign-out of every session)
 // revokes the affected sessions at once rather than letting them run out their
-// 12 hours.
+// 12 hours. Expired sessions are swept whenever one is created, and one
+// account holds at most maxSessionsPerAccount live sessions: a script that
+// signs in for every call cannot grow the table without bound.
+
+// maxSessionsPerAccount is how many live sessions one account may hold; the
+// oldest ends when another one starts.
+const maxSessionsPerAccount = 32
+
+// totpSetupTTL is how long a second-factor secret shown by /api/2fa/setup may
+// be confirmed with /api/2fa/enable.
+const totpSetupTTL = 15 * time.Minute
+
+type session struct {
+	userID  int64
+	email   string
+	expires time.Time
+	// totpSetup is the second-factor secret this session was shown by
+	// /api/2fa/setup, which /api/2fa/enable confirms; it is good until
+	// totpSetupUntil. Kept here, not taken from the client, so the secret that
+	// ends up on the account is the one quicgate made.
+	totpSetup      string
+	totpSetupUntil time.Time
+}
+
+// isToken reports whether the principal is an API token rather than a person.
+func (sess session) isToken() bool { return sess.email == "api-token" && sess.userID == 0 }
 
 // newSessionID returns a fresh random session id.
 func newSessionID() (string, error) {
@@ -24,6 +49,34 @@ func newSessionID() (string, error) {
 	return hex.EncodeToString(tok), nil
 }
 
+// storeSessionLocked adds sess under id. On the way it drops every expired
+// session, and when the account is at its cap of live sessions the oldest ones
+// end to make room. Caller holds s.mu.
+func (s *Server) storeSessionLocked(id string, sess session) {
+	now := time.Now()
+	same := sameIdentity(sess)
+	live := 0
+	for k, v := range s.sessions {
+		if now.After(v.expires) {
+			delete(s.sessions, k)
+			continue
+		}
+		if same(v) {
+			live++
+		}
+	}
+	for ; live >= maxSessionsPerAccount; live-- {
+		oldestID, oldest := "", time.Time{}
+		for k, v := range s.sessions {
+			if same(v) && (oldestID == "" || v.expires.Before(oldest)) {
+				oldestID, oldest = k, v.expires
+			}
+		}
+		delete(s.sessions, oldestID)
+	}
+	s.sessions[id] = sess
+}
+
 // startSession stores a session for the identity and sets its cookie.
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID int64, email string) error {
 	id, err := newSessionID()
@@ -31,7 +84,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID int
 		return err
 	}
 	s.mu.Lock()
-	s.sessions[id] = session{userID: userID, email: email, expires: time.Now().Add(sessionTTL)}
+	s.storeSessionLocked(id, session{userID: userID, email: email, expires: time.Now().Add(sessionTTL)})
 	s.mu.Unlock()
 	setSessionCookie(w, r, id)
 	return nil
@@ -66,7 +119,7 @@ func (s *Server) startSessionIfUnchanged(u store.User) func(http.ResponseWriter,
 			s.mu.Unlock()
 			return errCredentialsChanged
 		}
-		s.sessions[id] = session{userID: userID, email: email, expires: time.Now().Add(sessionTTL)}
+		s.storeSessionLocked(id, session{userID: userID, email: email, expires: time.Now().Add(sessionTTL)})
 		s.mu.Unlock()
 		setSessionCookie(w, r, id)
 		return nil

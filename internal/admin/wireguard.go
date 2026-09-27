@@ -192,8 +192,8 @@ func (s *Server) handleListWGSites(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateWGSite(w http.ResponseWriter, r *http.Request) {
 	var in store.WGSite
-	if err := decodeStrict(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &in); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	in.ID, in.Address, in.PresharedKey = 0, "", ""
@@ -243,8 +243,8 @@ func (s *Server) handleUpdateWGSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in store.WGSite
-	if err := decodeStrict(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &in); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	in.ID, in.Address = id, cur.Address

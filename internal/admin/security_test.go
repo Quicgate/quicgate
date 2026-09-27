@@ -130,6 +130,7 @@ func TestSecretSettingsAreMaskedAndPreserved(t *testing.T) {
 	put := httptest.NewRequest(http.MethodPut, "/api/settings",
 		strings.NewReader(`{"acme_email":"a@b.c","oidc_client_secret":"`+secretMask+`"}`))
 	put.Header.Set("Content-Type", "application/json")
+	put.Header.Set("Origin", "http://"+put.Host)
 	put.AddCookie(&http.Cookie{Name: "qg_session", Value: sess})
 	s.Handler().ServeHTTP(rr, put)
 	if rr.Code != http.StatusOK {
@@ -140,41 +141,48 @@ func TestSecretSettingsAreMaskedAndPreserved(t *testing.T) {
 	}
 }
 
-// A locked-out address is refused before any password or code is checked.
+// A locked-out address is refused before any password or code is checked, and
+// so is a locked-out account, from whatever address: rotating addresses does
+// not buy more guesses at one account.
 func TestLoginThrottleLocksOutAfterRepeatedFailures(t *testing.T) {
 	s := newTestServer(t)
 	hash, _ := bcrypt.GenerateFromPassword([]byte("correct-horse"), bcrypt.DefaultCost)
 	if err := s.store.CreateUser("admin@example.com", string(hash), false); err != nil {
 		t.Fatal(err)
 	}
-	attempt := func(pw string) int {
+	mustUser(t, s, "other@example.com", "another-horse")
+	attempt := func(addr, email, pw string) int {
 		rr := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodPost, "/api/login",
-			strings.NewReader(`{"email":"admin@example.com","password":"`+pw+`"}`))
-		r.RemoteAddr = "203.0.113.9:5000"
+			strings.NewReader(`{"email":"`+email+`","password":"`+pw+`"}`))
+		r.RemoteAddr = addr + ":5000"
 		s.Handler().ServeHTTP(rr, r)
 		return rr.Code
 	}
 	for i := 0; i < loginMaxFails; i++ {
-		if code := attempt("wrong"); code != http.StatusUnauthorized {
+		if code := attempt("203.0.113.9", "admin@example.com", "wrong"); code != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: got %d, want 401", i+1, code)
 		}
 	}
-	if code := attempt("wrong"); code != http.StatusTooManyRequests {
+	if code := attempt("203.0.113.9", "admin@example.com", "wrong"); code != http.StatusTooManyRequests {
 		t.Fatalf("after lockout: got %d, want 429", code)
 	}
 	// Even the correct password is refused while locked out.
-	if code := attempt("correct-horse"); code != http.StatusTooManyRequests {
+	if code := attempt("203.0.113.9", "admin@example.com", "correct-horse"); code != http.StatusTooManyRequests {
 		t.Fatalf("correct password while locked out: got %d, want 429", code)
 	}
-	// A different address is unaffected.
-	rr := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/login",
-		strings.NewReader(`{"email":"admin@example.com","password":"correct-horse"}`))
-	r.RemoteAddr = "198.51.100.7:5000"
-	s.Handler().ServeHTTP(rr, r)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("other address: got %d, want 200: %s", rr.Code, rr.Body.String())
+	// The address is locked: another account from it is refused too.
+	if code := attempt("203.0.113.9", "other@example.com", "another-horse"); code != http.StatusTooManyRequests {
+		t.Fatalf("another account from the locked address: got %d, want 429", code)
+	}
+	// The account is locked as well: the correct password from a fresh
+	// address is refused, however the address is spelled.
+	if code := attempt("198.51.100.7", "Admin@Example.com", "correct-horse"); code != http.StatusTooManyRequests {
+		t.Fatalf("locked account from another address: got %d, want 429", code)
+	}
+	// Another account from that fresh address is unaffected.
+	if code := attempt("198.51.100.7", "other@example.com", "another-horse"); code != http.StatusOK {
+		t.Fatalf("other account from another address: got %d, want 200", code)
 	}
 }
 

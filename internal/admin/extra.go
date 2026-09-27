@@ -4,15 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pquerna/otp/totp"
-	"golang.org/x/crypto/bcrypt"
 
 	"quicgate/internal/engine"
 	"quicgate/internal/store"
@@ -34,8 +35,8 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	var body struct{ Name string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json")
+	if err := decodeJSON(w, r, &body, maxLoginBody, false); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	tok, err := s.store.CreateAPIToken(body.Name)
@@ -61,36 +62,103 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 
 // ---- 2FA (TOTP) ----
 
+// handle2FASetup makes a fresh secret and shows it (as text and as an otpauth
+// URI for the QR code). The secret is kept on the caller's session for
+// totpSetupTTL: enable confirms that one, never a secret the client sends, so
+// the seed that protects the account is one quicgate generated.
 func (s *Server) handle2FASetup(w http.ResponseWriter, r *http.Request) {
 	sess := r.Context().Value(sessionKey).(session)
+	c, err := r.Cookie("qg_session")
+	if err != nil || sess.isToken() {
+		writeErr(w, http.StatusBadRequest, "two-factor setup needs a signed-in browser session, not an API token")
+		return
+	}
+	if _, err := s.store.GetUserByEmail(sess.email); err != nil {
+		writeErr(w, http.StatusBadRequest, "this account has no local password to protect with a second factor")
+		return
+	}
 	key, err := totp.Generate(totp.GenerateOpts{Issuer: "quicgate", AccountName: sess.email})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Return the secret + otpauth URI; not persisted until verified in enable.
+	s.mu.Lock()
+	cur, ok := s.sessions[c.Value]
+	if ok {
+		cur.totpSetup, cur.totpSetupUntil = key.Secret(), time.Now().Add(totpSetupTTL)
+		s.sessions[c.Value] = cur
+	}
+	s.mu.Unlock()
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "session expired")
+		return
+	}
+	// Not persisted on the account until enable verifies a code for it.
 	writeJSON(w, http.StatusOK, map[string]string{"secret": key.Secret(), "uri": key.URL()})
 }
 
+// pendingTOTPSetup returns the secret the caller's session was shown by setup,
+// or "" when there is none or it has expired.
+func (s *Server) pendingTOTPSetup(r *http.Request) string {
+	c, err := r.Cookie("qg_session")
+	if err != nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.sessions[c.Value]
+	if !ok || cur.totpSetup == "" || time.Now().After(cur.totpSetupUntil) {
+		return ""
+	}
+	return cur.totpSetup
+}
+
+// clearTOTPSetup forgets the caller's pending setup secret.
+func (s *Server) clearTOTPSetup(r *http.Request) {
+	c, err := r.Cookie("qg_session")
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	if cur, ok := s.sessions[c.Value]; ok {
+		cur.totpSetup, cur.totpSetupUntil = "", time.Time{}
+		s.sessions[c.Value] = cur
+	}
+	s.mu.Unlock()
+}
+
 // reauthenticate checks the account password again for a change to the
-// account's own protection (second factor), so a borrowed or stolen session
-// alone cannot switch it off or replace it.
+// account's own protection (second factor, address, break-glass devices), so a
+// borrowed or stolen session alone cannot make it. Failures count against the
+// account like failed logins do, and a locked-out account is refused before
+// the password is looked at.
 func (s *Server) reauthenticate(sess session, password string) (store.User, int, string) {
 	u, err := s.store.GetUserByEmail(sess.email)
 	if err != nil {
 		return u, http.StatusBadRequest, "this account has no local password to confirm"
 	}
-	if password == "" || bcrypt.CompareHashAndPassword([]byte(u.Hash), []byte(password)) != nil {
+	if len(password) > maxPasswordBytes {
+		return u, http.StatusBadRequest, errPasswordTooLong
+	}
+	account := accountKey(u.Email)
+	if !s.accounts.allow(account) {
+		return u, http.StatusTooManyRequests, "too many failed attempts for this account, try again later"
+	}
+	if password == "" || bcryptCompare([]byte(u.Hash), []byte(password)) != nil {
+		s.accounts.fail(account)
 		return u, http.StatusUnauthorized, "confirm the change with your current password"
 	}
+	s.accounts.succeed(account)
 	return u, 0, ""
 }
 
 func (s *Server) handle2FAEnable(w http.ResponseWriter, r *http.Request) {
 	sess := r.Context().Value(sessionKey).(session)
-	var body struct{ Secret, Code, Password string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json")
+	// A secret in the body is not read: the one to confirm is the one setup
+	// bound to this session.
+	var body struct{ Code, Password string }
+	if err := decodeJSON(w, r, &body, maxLoginBody, false); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	u, status, msg := s.reauthenticate(sess, body.Password)
@@ -98,22 +166,28 @@ func (s *Server) handle2FAEnable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, status, msg)
 		return
 	}
-	if !totp.Validate(body.Code, body.Secret) {
+	secret := s.pendingTOTPSetup(r)
+	if secret == "" {
+		writeErr(w, http.StatusBadRequest, "start with the setup step; the secret it shows is good for 15 minutes")
+		return
+	}
+	if !s.verifyTOTP(u.ID, u.TOTPLast, secret, body.Code) {
 		writeErr(w, http.StatusBadRequest, "code does not match; check your authenticator")
 		return
 	}
-	if err := s.store.SetTOTPSecret(u.ID, body.Secret); err != nil {
+	if err := s.store.SetTOTPSecret(u.ID, secret); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.clearTOTPSetup(r)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "enabled"})
 }
 
 func (s *Server) handle2FADisable(w http.ResponseWriter, r *http.Request) {
 	sess := r.Context().Value(sessionKey).(session)
 	var body struct{ Password string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
-		writeErr(w, http.StatusBadRequest, "invalid json")
+	if err := decodeJSON(w, r, &body, maxLoginBody, false); err != nil && !errors.Is(err, errEmptyBody) {
+		writeBodyErr(w, err)
 		return
 	}
 	u, status, msg := s.reauthenticate(sess, body.Password)
@@ -248,8 +322,8 @@ func (s *Server) handleSelfSignedCert(w http.ResponseWriter, r *http.Request) {
 		Domains []string `json:"domains"`
 		Days    int      `json:"days"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json")
+	if err := decodeJSON(w, r, &body, maxJSONBody, false); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	c, err := s.store.GenerateSelfSigned(body.Name, body.Domains, body.Days)
@@ -266,8 +340,8 @@ func (s *Server) handleSelfSignedCert(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCertFromFile(w http.ResponseWriter, r *http.Request) {
 	var body struct{ Name, CertPath, KeyPath string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json")
+	if err := decodeJSON(w, r, &body, maxJSONBody, false); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	c, err := s.store.ImportCertFromFile(body.Name, body.CertPath, body.KeyPath)
@@ -292,8 +366,12 @@ func (s *Server) handleCertFromFile(w http.ResponseWriter, r *http.Request) {
 // level, as before, and adds what was updated.
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	var doc store.ImportDoc
-	if err := decodeStrict(r, &doc); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid document: "+err.Error())
+	if err := decodeStrict(w, r, &doc); err != nil {
+		var tooBig *http.MaxBytesError
+		if !errors.As(err, &tooBig) {
+			err = errors.New("invalid document: " + err.Error())
+		}
+		writeBodyErr(w, err)
 		return
 	}
 	res, err := s.store.Import(doc, s.engine.ReservedPorts())

@@ -34,8 +34,8 @@ func (s *Server) handleListOIDCProviders(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleCreateOIDCProvider(w http.ResponseWriter, r *http.Request) {
 	var p store.OIDCProvider
-	if err := decodeStrict(r, &p); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &p); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	if err := s.store.CreateOIDCProvider(&p); err != nil {
@@ -56,8 +56,8 @@ func (s *Server) handleUpdateOIDCProvider(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var p store.OIDCProvider
-	if err := decodeStrict(r, &p); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if err := decodeStrict(w, r, &p); err != nil {
+		writeBodyErr(w, err)
 		return
 	}
 	p.ID = id
