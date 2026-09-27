@@ -738,8 +738,12 @@ func (e *Engine) buildRoute(h store.Host, acl *compiledAccess, acls map[int64]*c
 		newBalancer(e.health, append([]store.Upstream{h.Upstream}, h.Upstreams...)), compileRewrite(o.PathRewrite))
 
 	// Custom locations: route matching path prefixes to their own upstreams.
+	// A location is a path decision, so the same ambiguous paths that a path
+	// rule refuses (empty segments, backslashes, `;`, double encoding) are
+	// refused here: the upstream chosen by a text compare must be the one the
+	// path means everywhere.
 	if len(h.Locations) > 0 {
-		handler = e.locationDispatcher(h, handler, transport, flush)
+		handler = rejectAmbiguousPaths(e.locationDispatcher(h, handler, transport, flush))
 	}
 
 	// Response cache sits inside gzip so it stores uncompressed bodies and each
@@ -1028,7 +1032,7 @@ func (e *Engine) locationDispatcher(h store.Host, def http.Handler, transport ht
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		best := -1
 		for i, l := range locs {
-			if strings.HasPrefix(r.URL.Path, l.prefix) && (best < 0 || len(l.prefix) > len(locs[best].prefix)) {
+			if pathWithin(r.URL.Path, l.prefix) && (best < 0 || len(l.prefix) > len(locs[best].prefix)) {
 				best = i
 			}
 		}
