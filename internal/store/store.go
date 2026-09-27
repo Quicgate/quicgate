@@ -6,8 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
+	"net"
+	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -148,20 +154,20 @@ type Options struct {
 	PathRewrite     *PathRewrite `json:"pathRewrite,omitempty"`
 
 	// Security group
-	BlockIndexing bool         `json:"blockIndexing"` // send X-Robots-Tag: noindex, nofollow
+	BlockIndexing bool `json:"blockIndexing"` // send X-Robots-Tag: noindex, nofollow
 	// VPNOnly serves the host inside the WireGuard tunnel only. To everyone
 	// else it does not exist: the public listeners answer as for an unknown
 	// host and offer no certificate for its names.
 	VPNOnly bool `json:"vpnOnly,omitempty"`
 	// Portal configures a host of type vpn-portal.
-	Portal *PortalOptions `json:"portal,omitempty"`
-	BlockExploits bool         `json:"blockExploits"` // filter common attack patterns
-	BlockBadBots  bool         `json:"blockBadBots"`  // block known scraper/bot user-agents
-	RateLimit     *RateLimit   `json:"rateLimit,omitempty"`
-	ForwardAuth   *ForwardAuth `json:"forwardAuth,omitempty"`
-	OIDC          *OIDCAuth    `json:"oidc,omitempty"`       // built-in OpenID Connect SSO
-	AuthRules     []AuthRule   `json:"authRules,omitempty"`  // path-scoped overrides of the gates above
-	ClientCert    *ClientCert  `json:"clientCert,omitempty"` // mTLS
+	Portal        *PortalOptions `json:"portal,omitempty"`
+	BlockExploits bool           `json:"blockExploits"` // filter common attack patterns
+	BlockBadBots  bool           `json:"blockBadBots"`  // block known scraper/bot user-agents
+	RateLimit     *RateLimit     `json:"rateLimit,omitempty"`
+	ForwardAuth   *ForwardAuth   `json:"forwardAuth,omitempty"`
+	OIDC          *OIDCAuth      `json:"oidc,omitempty"`       // built-in OpenID Connect SSO
+	AuthRules     []AuthRule     `json:"authRules,omitempty"`  // path-scoped overrides of the gates above
+	ClientCert    *ClientCert    `json:"clientCert,omitempty"` // mTLS
 
 	// Response group (continued)
 	BadGatewayHTML string `json:"badGatewayHtml,omitempty"` // custom upstream-down page
@@ -288,6 +294,58 @@ type User struct {
 
 var domainRe = regexp.MustCompile(`^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?$|^localhost$`)
 
+// domainTooLong applies the DNS size limits the regex does not: a label is at
+// most 63 characters and a name 253 in all.
+func domainTooLong(d string) bool {
+	name := strings.TrimPrefix(d, "*.")
+	if len(name) > 253 {
+		return true
+	}
+	for _, label := range strings.Split(name, ".") {
+		if len(label) > 63 {
+			return true
+		}
+	}
+	return false
+}
+
+// validHostName accepts what an upstream, a redirect or a forward target may
+// be reached at: an IP address, or a DNS hostname of letters, digits, hyphens
+// and underscores (Docker service names carry them), each label at most 63
+// characters and 253 in all. No scheme, no port, no path, no spaces: those
+// belong in other fields, and a stray one would be dialled as-is.
+func validHostName(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	if net.ParseIP(s) != nil {
+		return true
+	}
+	for _, label := range strings.Split(strings.TrimSuffix(s, "."), ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			switch {
+			case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// validHostOptionalPort accepts a hostname or IP address, alone or with a port
+// ("new.example.com:8443", "[fd00::1]:443").
+func validHostOptionalPort(s string) bool {
+	if host, port, err := net.SplitHostPort(s); err == nil {
+		n, err := strconv.Atoi(port)
+		return err == nil && n >= 1 && n <= 65535 && validHostName(host)
+	}
+	return validHostName(s)
+}
+
 // Validate checks a host before it is persisted; every rule here backs a
 // server-side rejection so the UI can never save a broken config.
 func (h *Host) Validate() error {
@@ -306,6 +364,9 @@ func (h *Host) Validate() error {
 		if !domainRe.MatchString(d) {
 			return fmt.Errorf("invalid domain %q", d)
 		}
+		if domainTooLong(d) {
+			return fmt.Errorf("domain %q is too long: labels are at most 63 characters, a name 253", d)
+		}
 	}
 	switch h.Type {
 	case "proxy":
@@ -317,6 +378,9 @@ func (h *Host) Validate() error {
 			}
 			if strings.TrimSpace(u.Host) == "" {
 				return errors.New("upstream host is required")
+			}
+			if !validHostName(u.Host) {
+				return fmt.Errorf("upstream host %q must be an IP address or a hostname (no scheme, port or path)", u.Host)
 			}
 			if u.Port < 1 || u.Port > 65535 {
 				return fmt.Errorf("upstream port %d out of range", u.Port)
@@ -364,9 +428,16 @@ func (h *Host) Validate() error {
 		h.Redirect = nil
 		h.Upstream = Upstream{}
 		h.Upstreams = nil
-		if strings.TrimSpace(h.StaticRoot) == "" {
+		h.StaticRoot = strings.TrimSpace(h.StaticRoot)
+		if h.StaticRoot == "" {
 			return errors.New("static host needs a root directory")
 		}
+		// A relative root would be served relative to wherever the process
+		// happens to run; the configuration must name the directory itself.
+		if !filepath.IsAbs(h.StaticRoot) {
+			return fmt.Errorf("static root %q must be an absolute path", h.StaticRoot)
+		}
+		h.StaticRoot = filepath.Clean(h.StaticRoot)
 	case "redirect":
 		h.Upstream = Upstream{}
 		if h.Redirect == nil {
@@ -386,8 +457,12 @@ func (h *Host) Validate() error {
 		default:
 			return fmt.Errorf("redirect scheme must be auto, http or https, got %q", h.Redirect.TargetScheme)
 		}
-		if strings.TrimSpace(h.Redirect.TargetHost) == "" {
+		h.Redirect.TargetHost = strings.TrimSpace(h.Redirect.TargetHost)
+		if h.Redirect.TargetHost == "" {
 			return errors.New("redirect target host is required")
+		}
+		if !validHostOptionalPort(h.Redirect.TargetHost) {
+			return fmt.Errorf("redirect target host %q must be a hostname or IP address, with an optional port (the scheme is a separate setting)", h.Redirect.TargetHost)
 		}
 	case "dead":
 		h.Upstream = Upstream{}
@@ -439,15 +514,56 @@ func validateRewrite(pr *PathRewrite) error {
 	return nil
 }
 
+// protocolHeaders are the headers a rule may not touch: they carry the
+// connection and the message framing between the client, the proxy and the
+// upstream. Setting Content-Length or Transfer-Encoding by hand desynchronises
+// the stream, Connection/Upgrade/Keep-Alive/TE/Trailer are hop-by-hop, and Host
+// has its own settings (preserveHost, hostOverride).
+var protocolHeaders = map[string]bool{
+	"host": true, "content-length": true, "transfer-encoding": true, "connection": true,
+	"upgrade": true, "keep-alive": true, "te": true, "trailer": true,
+}
+
+// validHeaderToken reports whether s is a header field name: an RFC 7230 token.
+func validHeaderToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", c):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (o *Options) validate() error {
 	for _, rules := range [][]HeaderRule{o.RequestHeaders, o.ResponseHeaders} {
-		for _, r := range rules {
+		for i := range rules {
+			r := &rules[i]
 			if r.Op != "set" && r.Op != "add" && r.Op != "remove" {
 				return fmt.Errorf("header rule op must be set, add or remove, got %q", r.Op)
 			}
-			if strings.TrimSpace(r.Name) == "" {
+			r.Name = strings.TrimSpace(r.Name)
+			if r.Name == "" {
 				return errors.New("header rule name is required")
 			}
+			if !validHeaderToken(r.Name) {
+				return fmt.Errorf("header rule name %q is not a valid header name", r.Name)
+			}
+			if protocolHeaders[strings.ToLower(r.Name)] {
+				return fmt.Errorf("header %s carries the connection or the message framing and cannot be changed by a rule", r.Name)
+			}
+		}
+	}
+	if fa := o.ForwardAuth; fa != nil && strings.TrimSpace(fa.URL) != "" {
+		fa.URL = strings.TrimSpace(fa.URL)
+		u, err := url.Parse(fa.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("forwardAuth.url %q must be an http:// or https:// URL", fa.URL)
 		}
 	}
 	switch o.MinTLSVersion {
@@ -472,6 +588,9 @@ func (o *Options) validate() error {
 	if o.HSTS.Enabled && o.HSTS.MaxAge <= 0 {
 		o.HSTS.MaxAge = 15552000 // 180 days, NPM's default
 	}
+	if o.HSTS.MaxAge > 2*365*24*3600 {
+		return fmt.Errorf("hsts.maxAge %d is more than two years (63072000 seconds), which is what preload lists ask for at most", o.HSTS.MaxAge)
+	}
 	if o.OIDC != nil {
 		if err := o.OIDC.validate(); err != nil {
 			return err
@@ -480,13 +599,25 @@ func (o *Options) validate() error {
 	if err := o.validateAuthRules(); err != nil {
 		return err
 	}
-	for name, v := range map[string]int{
-		"dialTimeoutSec": o.DialTimeoutSec, "responseHeaderTimeoutSec": o.ResponseHeaderTimeoutSec,
-		"idleTimeoutSec": o.IdleTimeoutSec, "maxIdleConnsPerHost": o.MaxIdleConnsPerHost,
-		"maxBodyMb": o.MaxBodyMB, "cacheSec": o.CacheSec,
+	// Bounds on the numeric options: none may be negative, and the ones a
+	// stray zero or a pasted value could blow up have a ceiling (an hour of
+	// waiting on an upstream, a month of cache, 10 GiB of request body).
+	for _, b := range []struct {
+		name   string
+		v, max int
+	}{
+		{"dialTimeoutSec", o.DialTimeoutSec, 3600},
+		{"responseHeaderTimeoutSec", o.ResponseHeaderTimeoutSec, 3600},
+		{"idleTimeoutSec", o.IdleTimeoutSec, 3600},
+		{"maxIdleConnsPerHost", o.MaxIdleConnsPerHost, 0},
+		{"maxBodyMb", o.MaxBodyMB, 10240},
+		{"cacheSec", o.CacheSec, 30 * 24 * 3600},
 	} {
-		if v < 0 {
-			return fmt.Errorf("%s cannot be negative", name)
+		if b.v < 0 {
+			return fmt.Errorf("%s cannot be negative", b.name)
+		}
+		if b.max > 0 && b.v > b.max {
+			return fmt.Errorf("%s is at most %d, got %d", b.name, b.max, b.v)
 		}
 	}
 	return nil
@@ -573,7 +704,22 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	s.initSeal(filepath.Dir(path))
+	tightenMode(path)
 	return s, nil
+}
+
+// tightenMode makes the database file, and its write-ahead log and shared
+// memory when they exist, readable by the owner alone. SQLite creates them
+// with the process umask, 0644 as a rule, and they hold the password hashes,
+// the sealed secrets and the whole configuration. A failure is logged rather
+// than fatal: a filesystem without modes (some network mounts) must not keep
+// quicgate from starting.
+func tightenMode(path string) {
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(p, 0o600); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("store: cannot set the mode of %s to 0600: %v", p, err)
+		}
+	}
 }
 
 func (s *Store) migrate() error {
