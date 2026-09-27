@@ -472,6 +472,7 @@ func (e *Engine) wgDevices(now time.Time, lanAccess bool) ([]wg.Device, map[int6
 	}
 	policies, _ := e.store.ListVPNPolicies()
 	enrol := e.portalEnrolment()
+	_, network, _, _ := WGSettings(e.store)
 	owners := map[int64]vpnOwner{}
 	var out []wg.Device
 	for _, d := range stored {
@@ -480,6 +481,13 @@ func (e *Engine) wgDevices(now time.Time, lanAccess bool) ([]wg.Device, map[int6
 		}
 		addr, err := netip.ParseAddr(d.Address)
 		if err != nil {
+			continue
+		}
+		// A device keeps the address it was given. Should the tunnel network
+		// have moved from under it, it is left out rather than configured with
+		// an AllowedIPs outside the tunnel (L-34).
+		if network.IsValid() && !network.Contains(addr) {
+			log.Printf("wireguard: device %q is left out: its address %s is outside the tunnel network %s", d.Name, addr, network)
 			continue
 		}
 		dev := wg.Device{ID: d.ID, Name: d.Name, Owner: d.Email, PublicKey: d.PublicKey, PresharedKey: d.PresharedKey, Address: addr}

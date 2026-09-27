@@ -191,6 +191,8 @@ type instance struct {
 	// owned remembers every prefix a peer has owned in this instance, also
 	// after the peer lost it, so it is never handed to another peer here.
 	owned map[netip.Prefix]string
+	// udp queues the forwarder's UDP admissions for this instance's workers.
+	udp *udpAdmitter
 }
 
 // Listeners is what quicgate serves inside the tunnel, on its own address.
@@ -227,6 +229,16 @@ type Manager struct {
 	// record is the flow log. An allowed flow whose record cannot be taken is
 	// refused (S31).
 	record func(FlowRecord) bool
+	// pending counts, per peer, the forwarded flows between admission and
+	// relay (forward.go, maxPendingPerPeer).
+	pending map[string]int
+	// The deny cache and the deny-record rate windows of the forwarder have
+	// their own lock: the cache is consulted on the tunnel's receive path,
+	// which must never wait for mu.
+	denyMu     sync.Mutex
+	denied     map[flowKey]time.Time
+	denyWin    map[string]denyWindow
+	suppressed atomic.Uint64
 	// expiry fires at the next moment a device's authorization ends, and
 	// closes what that device still has open (QG-02).
 	expiry *time.Timer
@@ -235,7 +247,8 @@ type Manager struct {
 // New returns a Manager with nothing running. Apply starts it.
 func New() *Manager {
 	return &Manager{peers: map[string]peer{}, flows: map[string]map[*tracked]struct{}{}, logf: log.Printf,
-		resolved: map[string]string{}, warnings: map[string]string{}, lookup: resolveEndpoint, lastSeen: map[string]string{}}
+		resolved: map[string]string{}, warnings: map[string]string{}, lookup: resolveEndpoint, lastSeen: map[string]string{},
+		pending: map[string]int{}, denied: map[flowKey]time.Time{}, denyWin: map[string]denyWindow{}}
 }
 
 // SetListeners says what to serve inside the tunnel. Call it before Apply.
@@ -311,6 +324,38 @@ func resolveEndpoint(ctx context.Context, endpoint string) (string, error) {
 		ip = ips[0]
 	}
 	return netip.AddrPortFrom(ip.Unmap(), uint16(p)).String(), nil
+}
+
+// lookupResult is what one endpoint name resolved to, or why it did not.
+type lookupResult struct {
+	addr string
+	err  error
+}
+
+// resolveAll looks up the endpoint of every peer that has one, all at once
+// and without the manager's lock: a resolver that answers slowly delays the
+// reload or the re-resolution it belongs to, not the tunnel's traffic, the
+// dials of the public proxy through sites, or the status page (L-36). Each
+// lookup is bounded by resolveTimeout on its own.
+func (m *Manager) resolveAll(ctx context.Context, peers []peer) map[string]lookupResult {
+	out := map[string]lookupResult{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, p := range peers {
+		if p.endpoint == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(p peer) {
+			defer wg.Done()
+			addr, err := m.lookup(ctx, p.endpoint)
+			mu.Lock()
+			out[p.key] = lookupResult{addr: addr, err: err}
+			mu.Unlock()
+		}(p)
+	}
+	wg.Wait()
+	return out
 }
 
 // peerIPC renders one peer as wireguard-go configuration. AllowedIPs are
@@ -416,8 +461,13 @@ func (m *Manager) Apply(ctx context.Context, cfg Config) error {
 	if !cfg.Address.Is4() || cfg.ListenPort <= 0 || cfg.ListenPort > 65535 {
 		return errors.New("the endpoint needs an IPv4 tunnel address and a UDP port")
 	}
+	// Names are resolved before the lock is taken, so that nothing the
+	// endpoint does waits for a resolver.
+	resolved := m.resolveAll(ctx, wanted(cfg))
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// What was refused may be allowed now.
+	m.forgetDenials()
 
 	if m.inst != nil {
 		reset, why := m.inst.needsReset(cfg)
@@ -440,9 +490,9 @@ func (m *Manager) Apply(ctx context.Context, cfg Config) error {
 			return err
 		}
 	}
-	if err := m.syncPeersLocked(ctx, cfg, false); err != nil {
+	if err := m.syncPeersLocked(cfg, false, resolved); err != nil {
 		m.logf("wireguard: applying the peers failed (%v), writing the whole configuration", err)
-		if err := m.syncPeersLocked(ctx, cfg, true); err != nil {
+		if err := m.syncPeersLocked(cfg, true, resolved); err != nil {
 			m.stopLocked()
 			return fmt.Errorf("wireguard: configuration could not be applied, the endpoint is down: %w", err)
 		}
@@ -514,8 +564,9 @@ func (m *Manager) startListenersLocked() {
 }
 
 // syncPeersLocked removes peers that are gone, closing what they have first
-// (S41 order), then writes every wanted peer.
-func (m *Manager) syncPeersLocked(ctx context.Context, cfg Config, replaceAll bool) error {
+// (S41 order), then writes every wanted peer. resolved holds what the peers'
+// endpoint names resolved to, looked up before the lock was taken.
+func (m *Manager) syncPeersLocked(cfg Config, replaceAll bool, resolved map[string]lookupResult) error {
 	want := map[string]peer{}
 	for _, p := range wanted(cfg) {
 		want[p.key] = p
@@ -552,14 +603,14 @@ func (m *Manager) syncPeersLocked(ctx context.Context, cfg Config, replaceAll bo
 		_, known := m.peers[p.key]
 		switch {
 		case p.endpoint != "":
-			ep, err := m.lookup(ctx, p.endpoint)
+			res := resolved[p.key]
 			switch {
-			case err != nil:
-				m.warnings[p.key] = err.Error()
-				m.logf("wireguard: %s %q: %v (configured without an endpoint for now)", kindOf(p), p.name, err)
-			case ep != m.resolved[p.key] || replaceAll || !known:
-				endpoint = ep
-				m.resolved[p.key] = ep
+			case res.err != nil:
+				m.warnings[p.key] = res.err.Error()
+				m.logf("wireguard: %s %q: %v (configured without an endpoint for now)", kindOf(p), p.name, res.err)
+			case res.addr != m.resolved[p.key] || replaceAll || !known:
+				endpoint = res.addr
+				m.resolved[p.key] = res.addr
 			}
 		case !known || replaceAll:
 			// A peer that calls in: start from where it was last heard, so it
@@ -735,34 +786,51 @@ func (m *Manager) Resets() uint64 {
 // points elsewhere, as a dynamic-DNS name does when the address behind it
 // changes. WireGuard itself never resolves a name twice.
 func (m *Manager) Reresolve(ctx context.Context) {
+	// The lookups happen without the lock; what they are for is checked
+	// again once it is taken, because a reload may have come in between.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.inst == nil {
+	inst := m.inst
+	var targets []peer
+	for _, p := range m.peers {
+		if p.endpoint != "" {
+			targets = append(targets, p)
+		}
+	}
+	m.mu.Unlock()
+	if inst == nil || len(targets) == 0 {
 		return
 	}
-	for key, p := range m.peers {
-		if p.endpoint == "" {
+	resolved := m.resolveAll(ctx, targets)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.inst != inst {
+		return // reset meanwhile: the new instance was configured with fresh lookups
+	}
+	for _, p := range targets {
+		key := p.key
+		if cur, ok := m.peers[key]; !ok || cur.endpoint != p.endpoint || cur.publicKey != p.publicKey {
 			continue
 		}
-		ep, err := m.lookup(ctx, p.endpoint)
-		if err != nil {
-			m.warnings[key] = err.Error()
+		res := resolved[key]
+		if res.err != nil {
+			m.warnings[key] = res.err.Error()
 			continue
 		}
 		delete(m.warnings, key)
-		if ep == m.resolved[key] {
+		if res.addr == m.resolved[key] {
 			continue
 		}
 		pub, err := keyHex(p.publicKey)
 		if err != nil {
 			continue
 		}
-		if err := m.inst.dev.IpcSet(fmt.Sprintf("public_key=%s\nupdate_only=true\nendpoint=%s\n", pub, ep)); err != nil {
-			m.logf("wireguard: %s %q: moving the endpoint to %s: %v", kindOf(p), p.name, ep, err)
+		if err := m.inst.dev.IpcSet(fmt.Sprintf("public_key=%s\nupdate_only=true\nendpoint=%s\n", pub, res.addr)); err != nil {
+			m.logf("wireguard: %s %q: moving the endpoint to %s: %v", kindOf(p), p.name, res.addr, err)
 			continue
 		}
-		m.logf("wireguard: %s %q now at %s", kindOf(p), p.name, ep)
-		m.resolved[key] = ep
+		m.logf("wireguard: %s %q now at %s", kindOf(p), p.name, res.addr)
+		m.resolved[key] = res.addr
 	}
 }
 

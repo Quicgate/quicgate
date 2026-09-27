@@ -203,6 +203,19 @@ func (l *flowLog) record(r FlowRecord) bool {
 	return true
 }
 
+// count reports how many records match.
+func (l *flowLog) count(match func(FlowRecord) bool) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, r := range l.records {
+		if match(r) {
+			n++
+		}
+	}
+	return n
+}
+
 func (l *flowLog) verdicts(dst string) []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
