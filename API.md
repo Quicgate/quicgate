@@ -33,6 +33,7 @@ The admin port itself should stay network-gated (e.g. behind Pangolin/an IP allo
 | POST | `/api/logout` | Clears the session. |
 | GET | `/api/me` | Current user: `{email, mustChange, totpEnabled}`. |
 | POST | `/api/password` | `{current, new}` (new ≥ 8 chars). Signs out every other session of the account and issues the caller a fresh session cookie. |
+| POST | `/api/email` | `{email, password}`: changes the address the account signs in with, confirmed with the current password. Stored in lowercase; `409` when another account uses it. Signs out every other session of the account and issues the caller a fresh session cookie. Returns `{email}`. |
 | POST | `/api/sessions/revoke` | Signs out every admin session except the caller's (an API-token caller has none, so all). Returns `{revoked}`. |
 | POST | `/api/sso/revoke-sessions` | Replaces the signing key of the built-in SSO cookies, signing every user out of every SSO-protected host. |
 | GET | `/api/auth-methods` | `{oidc, ldap}` booleans — which SSO options are enabled (public). |

@@ -68,7 +68,7 @@ columns mean:
 | Feature | Tested locally | Qualified live | Notes |
 |---|---|---|---|
 | Admin UI and API, CSRF and CSP | yes | yes | |
-| Single admin account, 2FA (TOTP) | yes | account only | 2FA changes require the current password. |
+| Single admin account, 2FA (TOTP) | yes | account only | Sign-in email and 2FA changes require the current password. |
 | Admin login through OIDC or LDAP | yes, synthetic IdP | no | PKCE, nonce and one-use sign-in for OIDC; LDAP requires `ldaps://`. Neither asks for the local TOTP code: require MFA at the IdP or directory. |
 | Session revocation (password change, sign out others, SSO key rotation) | yes | no | |
 | API tokens | yes | yes | Full administrator credentials: no scopes, no expiry. |

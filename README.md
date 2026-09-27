@@ -84,8 +84,8 @@ services:
 docker compose up -d
 ```
 
-Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (you are made to change it
-right away), add your first proxy host, and watch the certificate arrive.
+Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (you are made to change the
+password right away, and can give the account your own address under Account & security), add your first proxy host, and watch the certificate arrive.
 
 > [!WARNING]
 > Never expose port 81 to the internet. Put the admin UI behind quicgate itself with an access

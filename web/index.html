@@ -493,12 +493,27 @@
       </div>
       <div class="settings">
         <nav class="setnav" id="account-nav" aria-label="Account sections">
-          <button type="button" class="setnav__item is-active" data-section="security">Password &amp; 2FA</button>
+          <button type="button" class="setnav__item is-active" data-section="security">Sign-in &amp; 2FA</button>
           <button type="button" class="setnav__item" data-section="sessions">Sessions</button>
           <button type="button" class="setnav__item" data-section="tokens">API tokens</button>
         </nav>
         <div class="setbody">
           <section class="setsec" data-section="security">
+            <div class="panel">
+              <div class="panel__head"><h2>Sign-in email</h2><p>The address you sign in with. Changing it signs out every other session of this account.</p></div>
+              <form id="profile-email-form">
+                <div class="frow">
+                  <div class="frow__label"><label for="pe-email">Email</label><p>When admin sign-in through an identity provider is on, a verified login there with this address signs in as you.</p></div>
+                  <div class="frow__control"><input type="email" id="pe-email" class="mono" autocomplete="email" maxlength="254" required></div>
+                </div>
+                <div class="frow">
+                  <div class="frow__label"><label for="pe-password">Current password</label><p>Needed to change the address.</p></div>
+                  <div class="frow__control"><input type="password" id="pe-password" autocomplete="current-password" required></div>
+                </div>
+                <div class="panel__foot"><span id="pe-error" class="panel__status" hidden></span><button type="submit" class="btn btn--primary">Update email</button></div>
+              </form>
+            </div>
+
             <div class="panel">
               <div class="panel__head"><h2>Password</h2><p>Changing it signs out every other session of this account.</p></div>
               <form id="profile-pw-form">
@@ -864,7 +879,7 @@
 
         <h3>Security &amp; ops</h3>
         <details><summary>Is it safe to expose the admin UI?</summary>
-          <p><b>No.</b> Never expose the admin port (81) to the internet. Put it behind quicgate itself with an access list, a VPN, or a firewall rule: treat it like any other private service. Change the default <code>admin@example.com</code>/<code>changeme</code> on first run and enable 2FA (account menu &rarr; Account &amp; security).</p></details>
+          <p><b>No.</b> Never expose the admin port (81) to the internet. Put it behind quicgate itself with an access list, a VPN, or a firewall rule: treat it like any other private service. Change the default <code>admin@example.com</code>/<code>changeme</code> on first run (the address under Sign-in email, the password right below it) and enable 2FA (account menu &rarr; Account &amp; security).</p></details>
         <details><summary>How do I script quicgate / use the API?</summary>
           <p>Create a bearer token under <b>your account menu → API tokens</b> and send <code>Authorization: Bearer &lt;token&gt;</code>. Everything the UI does is a REST call: see the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>. <code>POST /api/import</code> does idempotent bulk config-as-code.</p></details>
         <details><summary>SSO in front of a host?</summary>

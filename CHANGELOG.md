@@ -4,6 +4,25 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.17.5] - 2026-09-27
+
+### Added
+- **The sign-in email can be changed.** Until now the first account kept the address
+  `admin@example.com` for good: only its password could be changed (issue #20). Account & security
+  has a Sign-in email panel now, and the API has `POST /api/email`. The change needs the current
+  password, like a change to the second factor, because the address is also what admin sign-in
+  through an identity provider matches on. It is stored in lowercase, an address another account
+  uses is refused, and every other session of the account is signed out. Two-factor authentication
+  stays as it was.
+
+### Changed
+- Dependency updates: `modernc.org/sqlite` 1.59.0 and a newer `golang:1.27.1-alpine` build image.
+
+### Fixed
+- A test of 1.17.2's "leaving the public side ends open connections" failed now and then under
+  load: it checked the connection once, right after the reload, while the connection is closed a
+  moment later from another goroutine. It now waits up to three seconds for the connection to end.
+
 ## [1.17.4] - 2026-09-19
 
 ### Fixed

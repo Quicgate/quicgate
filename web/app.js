@@ -285,14 +285,20 @@ async function boot() {
   }
 }
 
-function afterLogin(me) {
+// showAccountEmail puts the signed-in address everywhere the page shows it.
+function showAccountEmail(email) {
   // Password managers match a password field to the account through a
   // username field in the same form.
-  document.querySelectorAll('.pm-user').forEach((el) => { el.value = me.email; });
-  $('me-email').textContent = me.email;
-  $('me-email-full').textContent = me.email;
-  $('account-sub').textContent = me.email;
-  $('me-avatar').textContent = initials(me.email);
+  document.querySelectorAll('.pm-user').forEach((el) => { el.value = email; });
+  $('me-email').textContent = email;
+  $('me-email-full').textContent = email;
+  $('account-sub').textContent = email;
+  $('me-avatar').textContent = initials(email);
+  $('pe-email').value = email;
+}
+
+function afterLogin(me) {
+  showAccountEmail(me.email);
   if (me.version) $('qg-version').textContent = 'quicgate ' + (/^v|^dev/.test(me.version) ? me.version : 'v' + me.version);
   if (me.mustChange) {
     show('view-password');
@@ -2120,6 +2126,19 @@ function loadProfile() {
   refreshTokens();
   refresh2FA();
 }
+
+$('profile-email-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  setError('pe-error', null);
+  try {
+    const out = await api('POST', '/api/email', { email: $('pe-email').value.trim(), password: $('pe-password').value });
+    $('pe-password').value = '';
+    showAccountEmail(out.email);
+    flashStatus($('pe-error'), 'Email updated: sign in with ' + out.email + ' from now on', false);
+  } catch (err) {
+    flashStatus($('pe-error'), err.message, true);
+  }
+});
 
 $('profile-pw-form').addEventListener('submit', async (e) => {
   e.preventDefault();

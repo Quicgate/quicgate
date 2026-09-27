@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -75,6 +76,31 @@ func echoes(c net.Conn, br *bufio.Reader) bool {
 	return err == nil && line == "ping\n"
 }
 
+// endsWithin reports whether an upgraded connection stops carrying data
+// within d. Ending one is not synchronous with the reload: cancelling the
+// request's context makes the reverse proxy close the upstream side from a
+// goroutine of its own, so a round trip made at once may still get through.
+// A connection that only stops answering (a timeout) has not ended.
+func endsWithin(c net.Conn, br *bufio.Reader, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	_ = c.SetDeadline(deadline)
+	for time.Now().Before(deadline) {
+		if _, err := c.Write([]byte("ping\n")); err != nil {
+			return !isTimeout(err)
+		}
+		if _, err := br.ReadString('\n'); err != nil {
+			return !isTimeout(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
 // Making a host VPN only takes it away from whoever is connected from outside
 // right now, not only from whoever comes next (QG-03). A WebSocket or a stream
 // that was open would otherwise go on for as long as the client liked. Other
@@ -130,10 +156,10 @@ func TestLeavingThePublicSideEndsOpenPublicConnections(t *testing.T) {
 	}
 	reload(t, e)
 
-	if echoes(ws, wsr) {
+	if !endsWithin(ws, wsr, 3*time.Second) {
 		t.Error("the upgraded public connection to a host that is now VPN only still carries data")
 	}
-	if echoes(gone, goner) {
+	if !endsWithin(gone, goner, 3*time.Second) {
 		t.Error("the upgraded public connection to a deleted host still carries data")
 	}
 	ended := make(chan error, 1)

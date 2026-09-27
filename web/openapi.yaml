@@ -179,6 +179,17 @@ paths:
       requestBody:
         content: { application/json: { schema: { type: object, properties: { current: {type: string}, new: {type: string} } } } }
       responses: { "200": { description: ok } }
+  /api/email:
+    post:
+      summary: Change the sign-in email of the signed-in account
+      description: Needs the current password. Ends every session of the account and sets a fresh session cookie for the caller.
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { email: {type: string}, password: {type: string} } } } }
+      responses:
+        "200": { description: "{email}: the address as stored (lowercase)" }
+        "400": { description: "not one plain address, or the caller has no local password (API token, directory or identity-provider login)", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "401": { description: "current password missing or wrong", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "409": { description: "another account already signs in with this address", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   /api/2fa/setup:
     post: { summary: Begin 2FA setup, responses: { "200": { description: "{secret, uri}" } } }
   /api/2fa/enable:

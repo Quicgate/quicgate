@@ -889,6 +889,37 @@ func (s *Store) SetPassword(id int64, hash string) error {
 	return err
 }
 
+// ErrEmailTaken reports that another account already signs in with the address.
+var ErrEmailTaken = errors.New("another account already signs in with this email")
+
+// SetUserEmail changes the address an account signs in with. The second
+// factor is sealed to the row id, not the address, so it stays readable.
+func (s *Store) SetUserEmail(id int64, email string) error {
+	email = strings.ToLower(email)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var other int64
+	switch err := tx.QueryRow("SELECT id FROM users WHERE email=?", email).Scan(&other); {
+	case err == nil && other != id:
+		return ErrEmailTaken
+	case err == nil:
+		return nil // already this account's address
+	case !errors.Is(err, sql.ErrNoRows):
+		return err
+	}
+	res, err := tx.Exec("UPDATE users SET email=? WHERE id=?", email, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
+}
+
 // GetSetting returns a stored setting or def if unset.
 func (s *Store) GetSetting(key, def string) string {
 	var v string

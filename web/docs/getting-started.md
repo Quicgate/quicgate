@@ -21,7 +21,7 @@ services:
 docker compose up -d
 ```
 
-Open `http://<host>:81` and sign in with `admin@example.com` / `changeme` — a password change is forced on first login.
+Open `http://<host>:81` and sign in with `admin@example.com` / `changeme` — a password change is forced on first login. To sign in with your own address instead of `admin@example.com`, change it under your account menu → Account & security → Sign-in email.
 
 **Do not expose port 81 to the internet.** Proxy the admin UI through quicgate itself behind an access list, a VPN, or a firewall rule, like any other private service. Enable 2FA under your account menu → Account & security.
 

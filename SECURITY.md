@@ -33,7 +33,8 @@ mind before reporting:
   behind quicgate itself with an access list, a VPN, or a firewall rule. Treat a
   publicly reachable admin port as a misconfiguration, not a vulnerability.
 - **Change the default `admin@example.com` / `changeme` credentials** on first
-  run (the app forces this) and enable 2FA.
+  run (the app forces the password change; set your own sign-in address under
+  Account & security) and enable 2FA.
 - quicgate ships hardened TLS defaults (AEAD-only cipher suites, configurable
   minimum version, HSTS) but the operator chooses what to expose.
 

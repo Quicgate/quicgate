@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"runtime"
 	"strconv"
@@ -91,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/logout", s.auth(s.handleLogout))
 	mux.HandleFunc("GET /api/me", s.auth(s.handleMe))
 	mux.HandleFunc("POST /api/password", s.auth(s.handlePassword))
+	mux.HandleFunc("POST /api/email", s.auth(s.handleEmail))
 	mux.HandleFunc("POST /api/sessions/revoke", s.auth(s.handleRevokeSessions))
 	mux.HandleFunc("POST /api/sso/revoke-sessions", s.auth(s.handleRevokeSSOSessions))
 	mux.HandleFunc("GET /api/hosts", s.auth(s.handleListHosts))
@@ -988,6 +990,58 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// accountEmail normalises an address an account may sign in with, and refuses
+// anything that is not one plain address or that could pass for the marker of
+// a directory, identity provider or API token session.
+func accountEmail(raw string) (string, bool) {
+	e := strings.ToLower(strings.TrimSpace(raw))
+	if e == "" || len(e) > 254 || isExternalIdentity(e) {
+		return "", false
+	}
+	a, err := mail.ParseAddress(e)
+	if err != nil || a.Name != "" || a.Address != e {
+		return "", false
+	}
+	return e, true
+}
+
+// handleEmail changes the address the signed-in account signs in with. It
+// takes the current password, like a change to the second factor: the address
+// is also what admin sign-in through an identity provider matches on.
+func (s *Server) handleEmail(w http.ResponseWriter, r *http.Request) {
+	sess := r.Context().Value(sessionKey).(session)
+	var body struct{ Email, Password string }
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	email, ok := accountEmail(body.Email)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "enter one email address, like you@example.org")
+		return
+	}
+	u, status, msg := s.reauthenticate(sess, body.Password)
+	if status != 0 {
+		writeErr(w, status, msg)
+		return
+	}
+	if err := s.store.SetUserEmail(u.ID, email); errors.Is(err, store.ErrEmailTaken) {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Sessions carry the address they signed in with: end every session of
+	// this account and give the caller a fresh one under the new address.
+	s.revokeSessions(sameIdentity(sess), "")
+	if err := s.startSession(w, r, u.ID, email); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"email": email})
 }
 
 func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
