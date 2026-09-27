@@ -23,6 +23,7 @@ import (
 	"github.com/caddyserver/certmagic"
 	"github.com/libdns/transip"
 	"github.com/mholt/acmez/v3"
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
 	"quicgate/internal/store"
@@ -133,12 +134,14 @@ func (t *routingTable) lookup(hostport string) *route {
 
 // Engine owns the routing table and all data-plane listeners.
 type Engine struct {
-	cfg     Config
-	store   *store.Store
-	table   atomic.Pointer[routingTable]
-	magic   *certmagic.Config
-	acme    *certmagic.ACMEIssuer
-	h3      *http3.Server
+	cfg   Config
+	store *store.Store
+	table atomic.Pointer[routingTable]
+	magic *certmagic.Config
+	acme  *certmagic.ACMEIssuer
+	// h3 is the HTTP/3 server, nil when HTTP/3 is off. Run publishes it before
+	// the TLS listener serves a request, and requests read it from here.
+	h3      atomic.Pointer[http3.Server]
 	streams *StreamManager
 	upnp    *UPnPManager
 
@@ -1132,6 +1135,7 @@ func (e *Engine) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Strict-Transport-Security", v)
 	}
+	h3 := e.h3.Load()
 	switch {
 	case o.HTTP3 != nil && !*o.HTTP3:
 		// Host opted out of HTTP/3. Actively clear any Alt-Svc the browser
@@ -1139,9 +1143,9 @@ func (e *Engine) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		// falls back to h2 for this host, while other hosts keep h3. Needed
 		// for backends whose web clients misbehave over h3 (e.g. Vaultwarden).
 		w.Header().Set("Alt-Svc", "clear")
-	case e.h3 != nil && r.ProtoMajor < 3 && !viaVPN(r):
+	case h3 != nil && r.ProtoMajor < 3 && !viaVPN(r):
 		// Advertise h3 so browsers upgrade to HTTP/3 on the next request.
-		_ = e.h3.SetQUICHeaders(w.Header())
+		_ = h3.SetQUICHeaders(w.Header())
 	}
 	rt.proxy.ServeHTTP(w, r)
 }
@@ -1386,6 +1390,16 @@ func (e *Engine) Run(ctx context.Context) error {
 		tlsCfg := e.tlsConfig()
 		httpsHandler := e.wrapRealIP(e.ban.wrap(e.accessLog.wrap(e.serveHTTPS)))
 		httpsSrv = newPublicServer(e.cfg.HTTPSAddr, httpsHandler, tlsCfg)
+		// HTTP/3 is opt-out: when disabled there is no h3 server, which also
+		// stops Alt-Svc advertisement (serveHTTPS checks for one), so browsers
+		// never upgrade and existing ones fall back to h2. The server is
+		// published before the TLS listener serves a request, which may
+		// already advertise it.
+		var h3 *http3.Server
+		if !e.cfg.DisableH3 {
+			h3 = e.newHTTP3Server(httpsHandler, tlsCfg)
+			e.h3.Store(h3)
+		}
 		go func() {
 			ln, err := e.listenCounted(e.cfg.HTTPSAddr)
 			if err == nil {
@@ -1393,13 +1407,8 @@ func (e *Engine) Run(ctx context.Context) error {
 			}
 			errCh <- fmt.Errorf("https listener: %w", err)
 		}()
-
-		// HTTP/3 is opt-out: when disabled we never create e.h3, which also
-		// stops Alt-Svc advertisement (serveHTTPS checks e.h3 != nil), so
-		// browsers never upgrade and existing ones fall back to h2.
-		if !e.cfg.DisableH3 {
-			e.h3 = e.newHTTP3Server(httpsHandler, tlsCfg)
-			go func() { errCh <- fmt.Errorf("http3 listener: %w", e.h3.ListenAndServe()) }()
+		if h3 != nil {
+			go func() { errCh <- fmt.Errorf("http3 listener: %w", h3.ListenAndServe()) }()
 			log.Printf("engine: https + http/3 listening on %s (tcp+udp)", e.cfg.HTTPSAddr)
 		} else {
 			log.Printf("engine: https listening on %s (tcp); http/3 disabled", e.cfg.HTTPSAddr)
@@ -1417,8 +1426,8 @@ func (e *Engine) Run(ctx context.Context) error {
 		if httpsSrv != nil {
 			_ = httpsSrv.Shutdown(shutdownCtx)
 		}
-		if e.h3 != nil {
-			_ = e.h3.Close()
+		if h3 := e.h3.Load(); h3 != nil {
+			_ = h3.Close()
 		}
 		e.streams.StopAll()
 		e.wg.Close()
@@ -1454,9 +1463,13 @@ func (e *Engine) listenCounted(addr string) (net.Listener, error) {
 // statistics.
 func (e *Engine) newHTTP3Server(handler http.Handler, tlsCfg *tls.Config) *http3.Server {
 	return &http3.Server{
-		Addr:        e.cfg.HTTPSAddr,
-		Handler:     handler,
-		TLSConfig:   http3.ConfigureTLSConfig(tlsCfg),
+		Addr:      e.cfg.HTTPSAddr,
+		Handler:   handler,
+		TLSConfig: http3.ConfigureTLSConfig(tlsCfg),
+		// No 0-RTT: early data can be replayed by whoever captured it, and
+		// nothing behind quicgate is written to tolerate a replayed request.
+		// quic-go allows it unless told otherwise.
+		QUICConfig:  &quic.Config{Allow0RTT: false},
 		ConnContext: e.traffic.quicConnContext("udp:" + strconv.Itoa(portOf(e.cfg.HTTPSAddr))),
 	}
 }
@@ -1562,6 +1575,12 @@ func (e *Engine) ReservedPorts() []int {
 	// The WireGuard port is UDP; a stream may not take it on either protocol,
 	// which costs nothing and keeps the rule simple.
 	if p := e.wgPort(); p > 0 {
+		out = append(out, p)
+	}
+	// The admin listener's port, last so that the HTTP and HTTPS ports keep
+	// their places: a stream there would race the admin server for the port
+	// at startup, and whichever lost would fail.
+	if p := portOf(e.cfg.AdminAddr); p > 0 {
 		out = append(out, p)
 	}
 	return out
