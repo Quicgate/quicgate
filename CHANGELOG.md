@@ -23,6 +23,23 @@ SECURITY.md). Every change below carries a regression test that fails without it
   or locations are unaffected. Prefix rules and locations match whole segments: `/api` covers
   `/api` and `/api/...`, no longer `/api-internal`; a rule ending in `/` is a plain prefix as before.
 - **HTTP/3 refuses 0-RTT early data**, which a network attacker could replay.
+- **The declarative import refuses to drop a host's VPN-only restriction**, to downgrade its
+  client-certificate mode from *require*, to turn its certificate mode into *none*, to drop
+  force-SSL or to drop a minimum TLS version of 1.3: a document that omits the field left a private
+  host public. Include the field, or change the host in the UI or API.
+- **Manual hosts win over Docker labels in every case.** A container could take an exact name
+  under a manual wildcard host (`api.example.com` under `*.example.com`) or any name of a manual
+  host that was switched off, and have a certificate issued for it. Both are refused now.
+- **A Docker label key quicgate does not know leaves the container unrouted.** A typo in the key
+  (`quicgate.access_list`) used to publish the container without the access list it asked for; the
+  Docker page now names the key and the one it probably meant.
+- **Remote Docker endpoints can use TLS with a client certificate** (`caFile`, `certFile`,
+  `keyFile`, Docker's `--tlsverify` model). A `tcp://` endpoint without them is plaintext and trusts
+  whoever answers on that port; the guide says so now.
+- **VPN refresh tokens are part of the seal inventory**: key rotation re-seals them and `-unseal`
+  writes them back; before they stayed under the old key.
+- The database file and its `-wal`/`-shm` companions are made owner-only (0600) at start, whatever
+  the data directory's permissions.
 
 ### Changed
 - **Auto-ban counts wrong basic-auth passwords only.** A refusal by address, a missing credential,
@@ -48,6 +65,20 @@ SECURITY.md). Every change below carries a regression test that fails without it
   listing, and dot-prefixed names (`.env`, `.git`) are not served, except under `/.well-known/`.
 - Access-log records cut the host to 253 bytes, the path to 2 KiB and the user agent to 512 bytes.
 - A stream cannot take the admin port; it is reserved like 80 and 443, as the guide already said.
+- **Validation is complete on every host and stream field.** Domain labels are limited to 63 and
+  names to 253 characters; upstream, forward and redirect hosts must be an IP or hostname; a static
+  root must be an absolute path; a forward-auth URL must be http(s); header rules cannot touch
+  `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `Keep-Alive`, `TE` or
+  `Trailer`; timeouts are capped at an hour, `cacheSec` at 30 days, `maxBodyMb` at 10240,
+  `hsts.maxAge` at two years, self-signed certificates at 3650 days; a single-port stream needs a
+  forward port. Existing rows are not rewritten, but a row outside these bounds is refused on its
+  next save.
+- **`docker_endpoints` is validated strictly.** An unknown field, a `connect` that is not a socket
+  path, `tcp://host:port` or `https://host:port`, or an `address` that is not an IP or hostname
+  refuses the whole list; the refusal is logged and no Docker host is watched until it is fixed
+  (before, an invalid list fell back to the local socket silently).
+- Certificate import from a file path requires a regular file of at most 512 KiB (symlinks are
+  followed, so certbot's `live/` paths work); a FIFO or device is refused without being opened.
 - The build context leaves out `.git`, brand assets and root Markdown (`.dockerignore`); CI runs
   gofmt and staticcheck, only the build job may publish and sign, and the image carries an SBOM.
 
@@ -70,6 +101,17 @@ SECURITY.md). Every change below carries a regression test that fails without it
   connect marks it down, so the following requests go to the other members instead of every other
   one answering 502 for up to fifteen seconds; the health check brings it back when it answers.
 - **The force-SSL redirect keeps a non-standard HTTPS port.**
+- **`quicgate.streams` entries with `/udp` work.** Only TCP publications were read, so the
+  documented `53/udp` example warned "not published"; `/both` now needs the same host port for
+  both protocols and is refused with a warning naming both otherwise. A label stream whose listen
+  port a manual stream, quicgate itself or another container already uses is shown as skipped in
+  the container's status instead of only in the log.
+- **Docker routes follow manual hosts without a container event.** Creating or deleting a manual
+  host left the Docker status stale, and a label route displaced by a manual host did not return
+  after the manual host was deleted; routes are re-aggregated every 30 seconds as well.
+- **A damaged stored secret no longer stops the sealing migration.** One value that does not open
+  is left as it is and named in the secret status (`warnings`), and everything else is sealed;
+  before, the whole migration was skipped while the status said "sealed".
 - The sticky-session cookie is `Secure` when the client's connection is encrypted; a forward-auth
   refusal is relayed without the auth server's hop-by-hop headers; the default-site setting is
   compiled at reload, so a request for an unknown host no longer reads the database; a UPnP
