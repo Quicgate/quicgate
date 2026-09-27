@@ -331,3 +331,71 @@ func TestSNIPassthroughRoutesNamesCaseInsensitively(t *testing.T) {
 		t.Fatalf("passthrough connection: %v", err)
 	}
 }
+
+// The idle timeout is about the connection, not one direction: a download
+// that keeps flowing while the client says nothing for longer than the idle
+// period (a video, a large file) is not cut off. Only silence both ways is.
+func TestTCPStreamOneWayTrafficIsNotIdle(t *testing.T) {
+	old := tcpIdleTimeout
+	tcpIdleTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { tcpIdleTimeout = old })
+
+	// A backend that sends a byte every 50 ms for 1.5 s. It also watches its
+	// read side: the client never sends anything, so the only thing it can see
+	// there is quicgate ending the client's direction (a FIN), which many
+	// servers take as "the client is done" and hang up on.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	const total = 30
+	sending := make(chan struct{})
+	endedEarly := make(chan bool, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		go func() {
+			_, err := c.Read(make([]byte, 1))
+			select {
+			case <-sending:
+				endedEarly <- false // the backend was done first
+			default:
+				endedEarly <- err != nil
+			}
+		}()
+		defer close(sending)
+		for i := 0; i < total; i++ {
+			if _, err := c.Write([]byte{'x'}); err != nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	e, _ := newTestEngine(t)
+	port := freeTCPPort(t)
+	runStreams(t, e, store.Stream{ListenPort: port, Protocol: "tcp", ForwardHost: "127.0.0.1",
+		ForwardPort: ln.Addr().(*net.TCPAddr).Port, Enabled: true})
+
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := io.ReadAll(io.LimitReader(conn, total))
+	if len(got) != total {
+		t.Fatalf("the download was cut off after %d of %d bytes (%v): one silent direction ended the connection", len(got), total, err)
+	}
+	select {
+	case early := <-endedEarly:
+		if early {
+			t.Fatal("the backend saw the client's direction end while it was still sending: a silent direction was closed on its own")
+		}
+	default:
+	}
+}

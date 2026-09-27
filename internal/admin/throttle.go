@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -9,12 +10,23 @@ import (
 // Failed-login throttling for the admin API. The flat delay on a wrong
 // password costs an attacker nothing in parallel, and the second factor is
 // only six digits: without a cap, someone holding the password can walk the
-// whole TOTP space. Failures are counted twice over: per client address, and
-// per account (the lowercased e-mail), so that rotating through addresses (an
-// IPv6 /64 is a lot of them) does not buy more attempts. Either counter
-// crossing the threshold locks its key out. The re-authentication endpoints
-// (password change, e-mail change, second factor, break-glass devices, the
-// WireGuard key reset) feed the account counter too.
+// whole TOTP space. Three counters, each locking its own key out at the
+// threshold:
+//
+//   - per client network (throttleKey: the address, or its /64 for IPv6, so
+//     rotating through one network's addresses does not buy more attempts):
+//     every failed login;
+//   - per account, the second factor: wrong codes after a correct password,
+//     at login and for break-glass devices. It covers the six digits from
+//     every address, and only someone who has the password can trip it;
+//   - per account, re-authentication: failed password confirmations by a
+//     signed-in session (password, e-mail, second factor, break-glass devices,
+//     the WireGuard key reset), so a stolen session cannot guess at leisure.
+//
+// Wrong passwords at the login are deliberately not counted per account: that
+// counter would refuse the right password too, so anyone who can reach the
+// login and knows the address (admin@example.com to begin with) could keep the
+// administrator out for good. Password guesses are bounded per network.
 
 const (
 	loginMaxFails   = 10
@@ -148,4 +160,23 @@ func (t *loginThrottle) succeed(key string) {
 // the same account however it is spelled.
 func accountKey(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// throttleKey is the per-network throttle key of a client address: the
+// address itself for IPv4, its /64 for IPv6. One IPv6 subscriber holds a whole
+// /64 and can pick a fresh address for every attempt.
+func throttleKey(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	a = a.Unmap()
+	if a.Is4() {
+		return a.String()
+	}
+	p, err := a.WithZone("").Prefix(64)
+	if err != nil {
+		return ip
+	}
+	return p.String()
 }

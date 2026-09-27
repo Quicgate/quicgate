@@ -1,6 +1,9 @@
 package admin
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -8,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 
 	"quicgate/internal/engine"
@@ -141,9 +145,11 @@ func TestSecretSettingsAreMaskedAndPreserved(t *testing.T) {
 	}
 }
 
-// A locked-out address is refused before any password or code is checked, and
-// so is a locked-out account, from whatever address: rotating addresses does
-// not buy more guesses at one account.
+// A locked-out address is refused before any password or code is checked,
+// every account from it; an IPv6 client is one network (its /64), so rotating
+// through its addresses does not buy more guesses. Wrong passwords do not lock
+// the account itself: the right password from another network still works,
+// or anyone who knows the address could keep the administrator out.
 func TestLoginThrottleLocksOutAfterRepeatedFailures(t *testing.T) {
 	s := newTestServer(t)
 	hash, _ := bcrypt.GenerateFromPassword([]byte("correct-horse"), bcrypt.DefaultCost)
@@ -175,14 +181,75 @@ func TestLoginThrottleLocksOutAfterRepeatedFailures(t *testing.T) {
 	if code := attempt("203.0.113.9", "other@example.com", "another-horse"); code != http.StatusTooManyRequests {
 		t.Fatalf("another account from the locked address: got %d, want 429", code)
 	}
-	// The account is locked as well: the correct password from a fresh
-	// address is refused, however the address is spelled.
-	if code := attempt("198.51.100.7", "Admin@Example.com", "correct-horse"); code != http.StatusTooManyRequests {
-		t.Fatalf("locked account from another address: got %d, want 429", code)
+	// The account is not locked by wrong passwords: its owner, elsewhere,
+	// signs in with the right one, however the address is spelled.
+	if code := attempt("198.51.100.7", "Admin@Example.com", "correct-horse"); code != http.StatusOK {
+		t.Fatalf("the owner from another address after a stranger's wrong passwords: got %d, want 200", code)
 	}
-	// Another account from that fresh address is unaffected.
-	if code := attempt("198.51.100.7", "other@example.com", "another-horse"); code != http.StatusOK {
-		t.Fatalf("other account from another address: got %d, want 200", code)
+
+	// Rotating through one IPv6 /64 is one client.
+	for i := 0; i < loginMaxFails; i++ {
+		if code := attempt(fmt.Sprintf("[2001:db8:1:2::%x]", i+1), "admin@example.com", "wrong"); code != http.StatusUnauthorized {
+			t.Fatalf("IPv6 attempt %d: got %d, want 401", i+1, code)
+		}
+	}
+	if code := attempt("[2001:db8:1:2:ffff::9]", "admin@example.com", "correct-horse"); code != http.StatusTooManyRequests {
+		t.Fatalf("a fresh address in the locked /64: got %d, want 429", code)
+	}
+	if code := attempt("[2001:db8:1:3::1]", "admin@example.com", "correct-horse"); code != http.StatusOK {
+		t.Fatalf("another /64: got %d, want 200", code)
+	}
+}
+
+// Wrong second-factor codes lock the account's code step from every address:
+// six digits are guessable fast, and whoever gets this far has the password.
+// The lock is the account's alone, and the password step still answers.
+func TestWrongCodesLockTheAccountsSecondFactor(t *testing.T) {
+	s := newTestServer(t)
+	mustUser(t, s, "admin@example.com", "correct-horse")
+	mustUser(t, s, "other@example.com", "another-horse")
+	key, err := totp.Generate(totp.GenerateOpts{Issuer: "quicgate", AccountName: "admin@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.store.GetUserByEmail("admin@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.SetTOTPSecret(u.ID, key.Secret()); err != nil {
+		t.Fatal(err)
+	}
+	attempt := func(addr, email, pw, code string) int {
+		body, _ := json.Marshal(map[string]string{"email": email, "password": pw, "code": code})
+		rr := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(body))
+		r.RemoteAddr = addr + ":5000"
+		s.Handler().ServeHTTP(rr, r)
+		return rr.Code
+	}
+	// A stranger's wrong passwords, from many addresses, do not touch the
+	// code step: the owner still signs in with password and code.
+	for i := 0; i < loginMaxFails; i++ {
+		if code := attempt(fmt.Sprintf("192.0.2.%d", i+1), "admin@example.com", "wrong", "000000"); code != http.StatusUnauthorized {
+			t.Fatalf("stranger's wrong password %d: got %d, want 401", i+1, code)
+		}
+	}
+	first, _ := totp.GenerateCode(key.Secret(), time.Now().Add(-30*time.Second))
+	if code := attempt("198.51.100.8", "admin@example.com", "correct-horse", first); code != http.StatusOK {
+		t.Fatalf("the owner after a stranger's wrong passwords: got %d, want 200", code)
+	}
+	// One guess per address, from as many addresses as it takes.
+	for i := 0; i < loginMaxFails; i++ {
+		if code := attempt(fmt.Sprintf("203.0.113.%d", i+1), "admin@example.com", "correct-horse", "000000"); code != http.StatusUnauthorized {
+			t.Fatalf("wrong code %d: got %d, want 401", i+1, code)
+		}
+	}
+	good, _ := totp.GenerateCode(key.Secret(), time.Now())
+	if code := attempt("198.51.100.7", "admin@example.com", "correct-horse", good); code != http.StatusTooManyRequests {
+		t.Fatalf("the right code from a fresh address after ten wrong ones: got %d, want 429", code)
+	}
+	if code := attempt("198.51.100.7", "other@example.com", "another-horse", ""); code != http.StatusOK {
+		t.Fatalf("another account: got %d, want 200", code)
 	}
 }
 

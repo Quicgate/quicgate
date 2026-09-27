@@ -141,14 +141,14 @@ func (s *Server) reauthenticate(sess session, password string) (store.User, int,
 		return u, http.StatusBadRequest, errPasswordTooLong
 	}
 	account := accountKey(u.Email)
-	if !s.accounts.allow(account) {
+	if !s.reauth.allow(account) {
 		return u, http.StatusTooManyRequests, "too many failed attempts for this account, try again later"
 	}
 	if password == "" || bcryptCompare([]byte(u.Hash), []byte(password)) != nil {
-		s.accounts.fail(account)
+		s.reauth.fail(account)
 		return u, http.StatusUnauthorized, "confirm the change with your current password"
 	}
-	s.accounts.succeed(account)
+	s.reauth.succeed(account)
 	return u, 0, ""
 }
 

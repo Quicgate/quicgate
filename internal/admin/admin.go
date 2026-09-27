@@ -47,10 +47,12 @@ type Server struct {
 	engine *engine.Engine
 	docker *docker.Provider // nil unless the Docker label provider is enabled
 	webFS  fs.FS
-	// logins counts failed logins per client address, accounts per account,
-	// so rotating addresses does not buy more attempts (throttle.go).
-	logins   *loginThrottle
-	accounts *loginThrottle
+	// logins counts failed logins per client network, codes wrong second-
+	// factor codes per account, reauth failed password confirmations per
+	// account (throttle.go).
+	logins *loginThrottle
+	codes  *loginThrottle
+	reauth *loginThrottle
 	// oidcStarts counts SSO sign-ins started per client address.
 	oidcStarts *loginThrottle
 	dataDir    string
@@ -69,7 +71,7 @@ type Server struct {
 
 func New(st *store.Store, eng *engine.Engine, webFS fs.FS, dataDir string) *Server {
 	s := &Server{store: st, engine: eng, webFS: webFS, dataDir: dataDir, sessions: map[string]session{},
-		oidcLogins: map[string]adminOIDCLogin{}, logins: newLoginThrottle(), accounts: newLoginThrottle(),
+		oidcLogins: map[string]adminOIDCLogin{}, logins: newLoginThrottle(), codes: newLoginThrottle(), reauth: newLoginThrottle(),
 		oidcStarts: newThrottle(oidcStartMax), oidcDiscovery: map[string]discoveredProvider{}}
 	s.loadClientIP()
 	return s
@@ -959,7 +961,7 @@ const errPasswordTooLong = "the password is longer than 72 bytes, which no accou
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	ip := s.clientIP(r)
+	ip := throttleKey(s.clientIP(r))
 	if !s.logins.allow(ip) {
 		writeErr(w, http.StatusTooManyRequests, "too many failed logins, try again later")
 		return
@@ -974,16 +976,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	account := accountKey(body.Email)
-	if !s.accounts.allow(account) {
-		writeErr(w, http.StatusTooManyRequests, "too many failed logins for this account, try again later")
-		return
-	}
-	// fail counts the attempt against the address and the account, and
-	// answers at the deadline: whatever was checked, and however long it took,
-	// every refusal takes the same time from the start of the request.
-	fail := func(msg string) {
+	// fail counts the attempt against the client's network, and a wrong code
+	// against the account's second factor too, and answers at the deadline:
+	// whatever was checked, and however long it took, every refusal takes the
+	// same time from the start of the request. A wrong password is not counted
+	// per account (see throttle.go): that would let anyone lock the
+	// administrator out.
+	fail := func(msg string, wrongCode bool) {
 		s.logins.fail(ip)
-		s.accounts.fail(account)
+		if wrongCode {
+			s.codes.fail(account)
+		}
 		time.Sleep(time.Until(start.Add(loginFailDelay)))
 		writeErr(w, http.StatusUnauthorized, msg)
 	}
@@ -1004,7 +1007,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// Binding proves the directory knows the password; being allowed to
 		// administer the proxy is a separate decision.
 		if !s.ldapAuth(body.Email, body.Password) || !s.ldapIdentityApproved(body.Email) {
-			fail("invalid credentials")
+			fail("invalid credentials", false)
 			return
 		}
 		if u.Email == "" {
@@ -1017,10 +1020,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"totpRequired": true})
 			return
 		}
+		// The code step of the account locks after repeated wrong codes, from
+		// whatever address: six digits are guessable fast. Only someone who
+		// knows the password gets this far.
+		if !s.codes.allow(account) {
+			time.Sleep(time.Until(start.Add(loginFailDelay)))
+			writeErr(w, http.StatusTooManyRequests, "too many wrong codes for this account, try again later")
+			return
+		}
 		if !s.verifyTOTP(u.ID, u.TOTPLast, u.TOTPSecret, body.Code) {
-			// Counted and delayed like a wrong password: six digits are
-			// guessable fast, and a code is good once.
-			fail("invalid authentication code")
+			// Counted and delayed like a wrong password, and against the
+			// account; a code is good once.
+			fail("invalid authentication code", true)
 			return
 		}
 	}
@@ -1039,7 +1050,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logins.succeed(ip)
-	s.accounts.succeed(account)
+	s.codes.succeed(account)
 	writeJSON(w, http.StatusOK, map[string]any{"email": u.Email, "mustChange": u.MustChange, "version": s.engine.Version()})
 }
 

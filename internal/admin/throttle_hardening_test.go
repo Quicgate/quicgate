@@ -139,9 +139,10 @@ func TestLoginFailuresCostTheSameForKnownAndUnknownAccounts(t *testing.T) {
 }
 
 // Failed re-authentications (the password confirmation for a change to the
-// account's own protection) count against the account like failed logins
-// (L-2): a stolen session cannot guess the password at leisure, and the
-// lockout covers signing in as well.
+// account's own protection) lock those confirmations for the account (L-2): a
+// stolen session cannot guess the password at leisure. They do not lock
+// signing in: the owner, elsewhere, is not kept out by whoever holds the
+// session.
 func TestReauthenticationFailuresLockTheAccount(t *testing.T) {
 	s := newTestServer(t)
 	mustUser(t, s, "admin@example.com", "password-123")
@@ -163,8 +164,8 @@ func TestReauthenticationFailuresLockTheAccount(t *testing.T) {
 	if rr := call(t, s, http.MethodPost, "/api/wg/server-key/reset", sess, map[string]string{"password": "password-123"}); rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("key reset while locked: %d %s, want 429", rr.Code, rr.Body.String())
 	}
-	if code := loginCode(t, s, "admin@example.com", "password-123"); code != http.StatusTooManyRequests {
-		t.Fatalf("login while the account is locked: %d, want 429", code)
+	if code := loginCode(t, s, "admin@example.com", "password-123"); code != http.StatusOK {
+		t.Fatalf("the owner's login while the confirmations are locked: %d, want 200", code)
 	}
 }
 

@@ -4,10 +4,12 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -720,47 +722,52 @@ func handleTCP(key string, raw net.Conn, spec *streamSpec, open *connTracker, ac
 		}
 	}
 
-	// From here on the connection lives as long as it carries traffic: a read
-	// on either side moves the deadline of both sides, and a connection with
-	// nothing to say for the idle timeout ends together with its backend.
-	idle := &spliceDeadline{conns: []net.Conn{clientConn, backend}, idle: spec.tcp.idleTimeout}
-	idle.touch()
+	// From here on the connection lives as long as it carries traffic in
+	// either direction; one with nothing to say for the idle timeout, both
+	// ways, ends together with its backend.
+	var quiet idlePair
 	go func() {
-		copyTouching(backend, upstreamReader, idle.touch)
+		quiet.copy(0, backend, upstreamReader, clientConn, spec.tcp.idleTimeout)
 		if tc, ok := backend.(*net.TCPConn); ok {
 			tc.CloseWrite()
 		}
 	}()
-	copyTouching(clientConn, backend, idle.touch)
+	quiet.copy(1, clientConn, backend, backend, spec.tcp.idleTimeout)
 }
 
-// spliceDeadline is the shared idle deadline of a spliced connection pair.
-type spliceDeadline struct {
-	conns []net.Conn
-	idle  time.Duration
+// idlePair is the idle state of the two directions of a spliced connection.
+//
+// Each direction copies with io.Copy on the connections themselves, so a plain
+// TCP to TCP stream keeps the kernel's zero-copy path (splice on Linux), and
+// renews one read deadline per idle period rather than touching deadlines on
+// every read. A direction whose period passed without a byte marks itself
+// quiet; the pair ends when a direction finds both quiet. A download with a
+// silent client therefore runs as long as it likes, and a connection with
+// nothing in either direction ends between one and two idle periods later.
+//
+// Only read deadlines are used. A read that times out loses nothing and can
+// simply be retried; a write that times out may have sent part of a buffer,
+// and the stream could not be resumed without corrupting it.
+type idlePair struct {
+	quiet [2]atomic.Bool
 }
 
-// touch moves the deadline of every side to one idle period from now.
-func (s *spliceDeadline) touch() {
-	d := time.Now().Add(s.idle)
-	for _, c := range s.conns {
-		_ = c.SetDeadline(d)
-	}
-}
-
-// copyTouching copies src to dst until either side fails, calling touch
-// after every read so a splice that carries traffic keeps its deadline moving.
-func copyTouching(dst io.Writer, src io.Reader, touch func()) {
-	buf := make([]byte, 32<<10)
+// copy moves src to dst for direction dir (0 or 1) until src ends, a copy
+// fails, or both directions have been quiet for a whole period. srcConn is the
+// connection src reads from, whose read deadline measures the period.
+func (p *idlePair) copy(dir int, dst io.Writer, src io.Reader, srcConn net.Conn, idle time.Duration) {
 	for {
-		n, err := src.Read(buf)
-		if n > 0 {
-			touch()
-			if _, werr := dst.Write(buf[:n]); werr != nil {
-				return
-			}
+		_ = srcConn.SetReadDeadline(time.Now().Add(idle))
+		n, err := io.Copy(dst, src)
+		if err == nil || !errors.Is(err, os.ErrDeadlineExceeded) {
+			return // the source ended, or a copy failed
 		}
-		if err != nil {
+		if n > 0 {
+			p.quiet[dir].Store(false)
+			continue
+		}
+		p.quiet[dir].Store(true)
+		if p.quiet[1-dir].Load() {
 			return
 		}
 	}

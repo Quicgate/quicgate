@@ -161,7 +161,7 @@ func (s *Server) oidcConfig(r *http.Request) (*oidc.Provider, oauth2.Config, boo
 // address, discovery is cached, and a full table of pending sign-ins refuses
 // the new one rather than dropping someone else's.
 func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
-	ip := s.clientIP(r)
+	ip := throttleKey(s.clientIP(r))
 	if !s.oidcStarts.allow(ip) {
 		writeErr(w, http.StatusTooManyRequests, "too many sign-in attempts, try again later")
 		return

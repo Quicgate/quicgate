@@ -29,10 +29,14 @@ SECURITY.md). Every change below carries a regression test that fails without it
   on credential endpoints and 4 MiB on configuration endpoints (413 above that), and the admin
   server has a 30-second read timeout (the restore upload gets fifteen minutes) and a 120-second
   idle timeout.
-- **Failed admin logins are counted per account as well as per address.** Ten failures in fifteen
-  minutes lock the account from any address; rotating source addresses no longer buys unlimited
-  attempts, a wrong second-factor code costs the same delay as a wrong password, failed password
-  confirmations count too, a locked entry is never evicted when the table is full, and an unknown
+- **Failed admin logins are counted per network, and wrong codes per account.** Ten failures in
+  fifteen minutes lock the client out; an IPv6 client is counted per /64, so rotating through one
+  network's addresses no longer buys unlimited attempts. Ten wrong second-factor codes lock the
+  account's code step from any address (only someone with the password gets that far), and ten
+  failed password confirmations by a signed-in session lock those confirmations. Wrong passwords
+  are not counted per account on purpose: that lockout would refuse the right password too, so
+  anyone who can reach the login could keep the administrator out. A wrong code costs the same
+  delay as a wrong password, a locked entry is never evicted when the table is full, and an unknown
   account costs the same comparison as a known one (the response time no longer says which
   addresses are accounts).
 - **A TOTP code is accepted once.** The time step of the last accepted code is remembered per
@@ -88,19 +92,25 @@ SECURITY.md). Every change below carries a regression test that fails without it
   the data directory's permissions.
 
 ### Changed
-- **Auto-ban counts wrong basic-auth passwords only.** A refusal by address, a missing credential,
-  a token of another scheme and a refused CORS preflight are refused as before but no longer
-  counted: any web page could make a visitor's browser send five requests to an address-listed
-  host and get the visitor, and everyone behind the same NAT, banned from every host for an hour.
-  An IPv6 client refused by a `0.0.0.0/0` rule is likewise no longer banned. Expect fewer bans of
-  scanners on address-only hosts.
+- **Auto-ban no longer counts what a visitor's browser was made to send.** Any web page could make
+  a visitor's browser send five requests to an address-listed host (image tags will do) and get the
+  visitor, and everyone behind the same NAT, banned from every host for an hour. A request the
+  browser marks as sent for another site's page (`Sec-Fetch-Site: cross-site` or `same-site`), a
+  refused CORS preflight, a missing credential and a token of another scheme are refused as before
+  but not counted. Wrong basic-auth passwords and refusals by address of everything else (scanners,
+  direct visits) still count, so auto-ban keeps banning the scanners that walk every host. An IPv6
+  client refused by a list that opens to every IPv4 address (`0.0.0.0/0`) and to no IPv6 one is not
+  banned either: add `::/0` next to `0.0.0.0/0` to let IPv6 visitors in.
 - **The response cache is bounded to 64 MiB per host** (entries up to 2 MiB as before) and evicts
   the least recently used response; before, 512 entries of up to 2 MiB each could be filled with
   cache-busting query strings.
 - **TCP streams have an idle timeout and a per-client cap.** A connection that carries nothing in
-  either direction for ten minutes is closed with its backend connection, and one client address
-  may hold at most 256 connections per listener (the listener's total stays 4096). Behind a trusted
-  PROXY-protocol peer the cap counts the real client.
+  either direction for ten minutes is closed with its backend connection (within ten more
+  minutes; traffic one way keeps it open, so a download with a silent client runs as long as it
+  likes), and one client address may hold at most 256 connections per listener (the listener's
+  total stays 4096). Behind a trusted PROXY-protocol peer the cap counts the real client. The copy
+  itself is unchanged: plain TCP streams keep the kernel's zero-copy path, and the idle timeout
+  costs one deadline per ten minutes, not one per read.
 - **SNI routes match DNS names.** Case and a trailing dot no longer matter, a ClientHello split
   over several TLS records is read whole, a connection that does not start with a ClientHello is
   closed, and a connection sent to the default target for want of a matching name is logged.

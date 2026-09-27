@@ -57,6 +57,12 @@ type compiledAccess struct {
 	// is left out of l4Warnings: a stream cannot take credentials, so there
 	// the deny rules hold.
 	credentialsOverrideDeny string
+	// allowsAllIPv4 and allowsAllIPv6: the list has an allow rule for every
+	// address of that family (0.0.0.0/0, ::/0). A list that opens to every
+	// IPv4 client and not to IPv6 ones refuses IPv6 visitors by an oversight of
+	// its author, not because of anything they did, so those refusals do not
+	// count toward a ban.
+	allowsAllIPv4, allowsAllIPv6 bool
 	// vpnMatch decides whether a VPN subject names a peer. Nil (tests, lists
 	// compiled outside an engine) matches nobody.
 	vpnMatch func(store.VPNSubject, wg.Peer) bool
@@ -195,6 +201,14 @@ func compileAccess(a store.AccessList, geo *geoDB, ban *banManager, dns *dnsCach
 			c.rules = append(c.rules, compiledRule{allow: allow, country: r.Country, methods: methods})
 			if !geo.loaded() {
 				c.warnings = append(c.warnings, fmt.Sprintf("access list %q: country rules need the GeoIP database, which is not loaded; allow-country rules match nobody and deny-country rules deny everyone who reaches them", a.Name))
+			}
+		}
+	}
+	for _, r := range c.rules {
+		if r.allow && r.net != nil {
+			if ones, bits := r.net.Mask.Size(); ones == 0 {
+				c.allowsAllIPv4 = c.allowsAllIPv4 || bits == 32
+				c.allowsAllIPv6 = c.allowsAllIPv6 || bits == 128
 			}
 		}
 	}
@@ -440,6 +454,60 @@ func (c *compiledAccess) refusalReason(r *http.Request, ipOK, authOK bool) strin
 	}
 }
 
+// countsTowardBan decides whether a refusal (not a login prompt) counts toward
+// auto-ban. A wrong password always does. A refusal by address does too (it is
+// what bans the scanners that walk every host), except where the refused
+// client did nothing to earn it:
+//   - the browser says it sent the request for a page of another site
+//     (Fetch Metadata: Sec-Fetch-Site cross-site or same-site). Any web page
+//     can make a visitor's browser fetch an image from a host the visitor's
+//     address is not allowed on, and five such images would ban the visitor,
+//     and everyone behind the same NAT, from every host for an hour. Browsers
+//     set the header themselves and a page cannot change it; a scanner that
+//     sends it to dodge bans is still refused, only not banned.
+//   - an IPv6 client on a list that opens to every IPv4 address and to no IPv6
+//     one: the gap is in the list, not in the client's behaviour.
+//
+// A missing credential or one of another scheme (a Bearer token for the
+// backend) on an address the list allows says nothing either, and is not
+// counted.
+func (c *compiledAccess) countsTowardBan(r *http.Request, ipOK, authOK bool) bool {
+	if _, _, hasBasic := r.BasicAuth(); hasBasic && len(c.users) > 0 && !authOK {
+		return true
+	}
+	if ipOK {
+		return false
+	}
+	if crossSiteFetch(r) {
+		return false
+	}
+	if c.allowsAllIPv4 && !c.allowsAllIPv6 && clientIsIPv6(r) {
+		return false
+	}
+	return true
+}
+
+// crossSiteFetch reports whether the browser marks the request as made on
+// behalf of a page of another site.
+func crossSiteFetch(r *http.Request) bool {
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))) {
+	case "cross-site", "same-site":
+		return true
+	}
+	return false
+}
+
+// clientIsIPv6 reports whether the request's client address is an IPv6 one
+// (an IPv4-mapped address counts as IPv4).
+func clientIsIPv6(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() == nil
+}
+
 // wrap gates next behind the access list, mirroring NPM's satisfy semantics.
 func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -474,16 +542,10 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 			challenge := len(c.users) > 0 && r.Header.Get("Authorization") == "" && (ipOK || (c.satisfy == "any" && c.restricted))
 			if !challenge {
 				markBlocked(w, blockAccessList)
-				// Only a wrong password counts toward a ban. A refusal by
-				// address alone says nothing about the client's intent: any
-				// web page can make a visitor's browser fetch an image from a
-				// host the visitor's address is not allowed on, and five such
-				// images banned the visitor, and everyone behind the same NAT,
-				// from every host for an hour. A refusal inside the tunnel is
-				// logged with its peer and never bans either: a tunnel address
-				// is not a stranger, and the remedy for a misbehaving device is
-				// to revoke it (S18).
-				if _, _, hasBasic := r.BasicAuth(); hasBasic && len(c.users) > 0 && !authOK && c.ban != nil && !viaVPN(r) {
+				// A refusal inside the tunnel is logged with its peer and never
+				// bans: a tunnel address is not a stranger, and the remedy for
+				// a misbehaving device is to revoke it (S18).
+				if c.ban != nil && !viaVPN(r) && c.countsTowardBan(r, ipOK, authOK) {
 					c.ban.recordFailure(r.RemoteAddr, routeName(r.Host), c.refusalReason(r, ipOK, authOK))
 				}
 			}

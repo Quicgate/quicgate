@@ -221,7 +221,7 @@ func (s *Server) handleCreateBreakGlass(w http.ResponseWriter, r *http.Request) 
 	if !s.verifyTOTP(u.ID, u.TOTPLast, u.TOTPSecret, in.Code) {
 		// A stolen session with the password is one guess of six digits away
 		// from a LAN device: counted like a failed login.
-		s.accounts.fail(accountKey(u.Email))
+		s.codes.fail(accountKey(u.Email))
 		writeErr(w, http.StatusUnauthorized, "the two-factor code does not match")
 		return
 	}
