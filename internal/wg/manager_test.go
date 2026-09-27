@@ -259,6 +259,50 @@ func TestRefusalsNeverFallBack(t *testing.T) {
 	}
 }
 
+// dialEventually waits for a site's tunnel to come up and then dials through
+// it. Two userspace peers on a loaded machine (the race detector, the other
+// packages' tests running alongside) can cross their handshake initiations:
+// each takes the other's for an invalid response and only retries five
+// seconds later, so a single dial's deadline can fall entirely inside that
+// gap. Dialing repeatedly does not help, because each dial makes quicgate
+// initiate again and can keep the collision going. So this waits for the
+// handshake to complete first, driven by the remote's keepalive alone (the
+// fixture's sites send none of their own), and only then dials, over the
+// session that is by then established. It mirrors how 1.17.5 made a sibling
+// flake robust: wait generously for the state the test needs, then make the
+// timed assertions.
+func (f *fixture) dialEventually(t testing.TB, siteID int64, addr string) net.Conn {
+	t.Helper()
+	up := func() bool {
+		for _, st := range f.m.Status() {
+			if st.ID == siteID {
+				return st.Up
+			}
+		}
+		return false
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	for !up() {
+		if time.Now().After(deadline) {
+			t.Fatalf("site %d did not come up within 60 s: %+v", siteID, f.m.Status())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	var lastErr error
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		c, err := f.m.DialContext(ctx, siteID, "tcp", addr)
+		cancel()
+		if err == nil {
+			return c
+		}
+		lastErr = err
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("no connection through site %d within 60 s: %v; status %+v", siteID, lastErr, f.m.Status())
+	return nil
+}
+
 // Removing or disabling a site ends the connections through it (S42).
 func TestRemovingASiteClosesItsConnections(t *testing.T) {
 	f := newFixture(t)
@@ -269,10 +313,7 @@ func TestRemovingASiteClosesItsConnections(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	c, err := f.m.DialContext(ctx, 1, "tcp", "192.168.50.10:7")
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := f.dialEventually(t, 1, "192.168.50.10:7")
 	echo(t, c, "before")
 
 	f.cfg.Sites[0].Enabled = false
@@ -284,7 +325,7 @@ func TestRemovingASiteClosesItsConnections(t *testing.T) {
 	// upstream request until then. The read must fail at once.
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	began := time.Now()
-	_, err = c.Read(make([]byte, 5))
+	_, err := c.Read(make([]byte, 5))
 	if err == nil || errors.Is(err, os.ErrDeadlineExceeded) || time.Since(began) > time.Second {
 		t.Fatalf("after its site was disabled the connection was not closed: read gave %v after %v", err, time.Since(began).Round(time.Millisecond))
 	}
