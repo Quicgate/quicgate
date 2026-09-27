@@ -13,6 +13,13 @@ All notable changes to quicgate are documented here. The format follows
   browser's history: Back and Forward move between them, and opening the page you are on adds
   nothing.
 
+### Changed
+- **Release images build in a minute or two instead of eleven.** The arm64 image was compiled
+  under QEMU emulation; the Dockerfile now cross-compiles on the builder's own platform (the final
+  image is `FROM scratch` and runs nothing at build time), so both architectures are native
+  compiles. The image contents are the same.
+- CI pins staticcheck (v0.8.1) instead of installing whatever is latest.
+
 ## [1.18.0] - 2026-09-27
 
 Fixes from the September 2026 security, technology and functional scan (the record is in

@@ -28,7 +28,7 @@ jobs:
         run: |
           want="$(awk '/^toolchain /{print $2}' go.mod)"
           got="$(go env GOVERSION)"
-          image="go$(sed -nE 's/^FROM golang:([0-9.]+)-alpine.*/\1/p' Dockerfile)"
+          image="go$(sed -nE 's/^FROM (--platform=[^ ]+ )?golang:([0-9.]+)-alpine.*/\2/p' Dockerfile)"
           echo "go.mod toolchain: $want, runner: $got, build image: $image"
           test -n "$want" && test "$got" = "$want" && test "$image" = "$want"
       # CONTRIBUTING.md asks for gofmt-clean code; enforce it.
@@ -37,9 +37,11 @@ jobs:
           out="$(gofmt -l .)"
           if [ -n "$out" ]; then echo "not gofmt-clean:"; echo "$out"; exit 1; fi
       - run: go vet ./...
+      # Pinned, so a new release of the checker cannot turn an unrelated push
+      # red, and CI runs a known tool rather than whatever is latest.
       - name: staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
           staticcheck ./...
       - run: go test -race ./...
 
@@ -75,7 +77,8 @@ jobs:
         id: version
         run: echo "value=$(git describe --tags --always --dirty)" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v4
+      # No QEMU: the Dockerfile cross-compiles and its final stage runs
+      # nothing, so every platform is built natively on this runner.
       - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
