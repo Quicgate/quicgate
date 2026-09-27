@@ -1,64 +1,118 @@
 // Package docker turns container labels into quicgate hosts. It watches the
-// Docker Engine API over the local socket and, for every container carrying
-// quicgate.* labels, derives an in-memory proxy host that the engine merges
-// into its routing table alongside the database-backed hosts.
+// Docker Engine API over the local socket, or over the network with TLS and a
+// client certificate, and, for every container carrying quicgate.* labels,
+// derives an in-memory proxy host that the engine merges into its routing
+// table alongside the database-backed hosts.
 //
 // The client here is deliberately tiny: it speaks just enough of the Engine
-// API (list, inspect, event stream) over the unix socket to drive the
-// provider, using only the standard library. quicgate stays a single small
-// binary instead of pulling in the full Docker SDK and its dependency tree.
-// Every call is read-only; the provider never creates, starts, or stops a
-// container.
+// API (list, inspect, event stream) to drive the provider, using only the
+// standard library. quicgate stays a single small binary instead of pulling in
+// the full Docker SDK and its dependency tree. Every call is read-only; the
+// provider never creates, starts, or stops a container.
 package docker
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
 
 // Client is a read-only Docker Engine API client. It speaks to either a local
-// unix socket or a remote TCP endpoint (typically a read-only socket proxy),
-// so quicgate can watch several Docker hosts.
+// unix socket or a remote endpoint (a read-only socket proxy, or a daemon with
+// TLS and client certificates), so quicgate can watch several Docker hosts.
 type Client struct {
 	http *http.Client
 	base string // request base URL; the transport handles the actual dialing
 }
 
-// NewClient returns a client for a connection string:
+// NewClient returns a client for an endpoint's connection:
 //   - a bare path or unix:///path  -> local unix socket
-//   - tcp://host:port              -> remote TCP (e.g. a read-only socket proxy)
-//   - http://host:port             -> remote, explicit scheme
+//   - tcp://host:port              -> remote, plaintext; TLS when the endpoint
+//     names certificate files (Docker's --tlsverify)
+//   - http://host:port             -> remote, plaintext
+//   - https://host:port            -> remote, TLS (system roots unless caFile)
 //
 // No client-level timeout is set because the event stream is long-lived; list
 // and inspect apply their own per-call deadlines.
-func NewClient(connect string) *Client {
-	base, transport := transportFor(connect)
-	return &Client{base: base, http: &http.Client{Transport: transport}}
+func NewClient(ep Endpoint) (*Client, error) {
+	base, transport, err := transportFor(ep)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{base: base, http: &http.Client{Transport: transport}}, nil
 }
 
-// transportFor turns a connection string into a request base URL and a matching
-// transport (a unix dialer for sockets, the default dialer for TCP/HTTP).
-func transportFor(connect string) (string, *http.Transport) {
-	switch {
-	case strings.HasPrefix(connect, "tcp://"):
-		return "http://" + strings.TrimPrefix(connect, "tcp://"), &http.Transport{}
-	case strings.HasPrefix(connect, "http://") || strings.HasPrefix(connect, "https://"):
-		return strings.TrimRight(connect, "/"), &http.Transport{}
-	default:
-		sock := strings.TrimPrefix(connect, "unix://")
+// transportFor turns an endpoint into a request base URL and a matching
+// transport: a unix dialer for sockets, the default dialer for TCP, and for
+// TLS a configuration that verifies the daemon against caFile and presents
+// certFile/keyFile. An endpoint that fails Validate is refused here too, so a
+// client is never built for a connection string of another shape.
+func transportFor(ep Endpoint) (string, *http.Transport, error) {
+	if err := ep.Validate(); err != nil {
+		return "", nil, err
+	}
+	connect := strings.TrimSpace(ep.Connect)
+	scheme, hostport, hasScheme := strings.Cut(connect, "://")
+	if !hasScheme || scheme == "unix" {
+		sock := connect
+		if hasScheme {
+			sock = hostport
+		}
 		return "http://docker", &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", sock)
 			},
-		}
+		}, nil
 	}
+	useTLS := scheme == "https" || (scheme == "tcp" && ep.tls())
+	if !useTLS {
+		return "http://" + hostport, &http.Transport{}, nil
+	}
+	cfg, err := tlsConfigFor(ep)
+	if err != nil {
+		return "", nil, err
+	}
+	return "https://" + hostport, &http.Transport{TLSClientConfig: cfg}, nil
+}
+
+// tlsConfigFor builds the client TLS configuration from the endpoint's files:
+// the daemon must present a certificate chaining to caFile (the system roots
+// when none is given), and certFile/keyFile is the client certificate the
+// daemon's --tlsverify demands. Verification is never switched off.
+func tlsConfigFor(ep Endpoint) (*tls.Config, error) {
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if ep.CAFile != "" {
+		pemBytes, err := os.ReadFile(ep.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("caFile: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemBytes) {
+			return nil, fmt.Errorf("caFile %s holds no CA certificate", ep.CAFile)
+		}
+		cfg.RootCAs = pool
+	}
+	if ep.CertFile != "" {
+		cert, err := tls.LoadX509KeyPair(ep.CertFile, ep.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("certFile/keyFile: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+	if cfg.RootCAs == nil && len(cfg.Certificates) == 0 && ep.tls() {
+		return nil, errors.New("TLS asked for but no usable file given")
+	}
+	return cfg, nil
 }
 
 func (c *Client) get(ctx context.Context, path, query string) (*http.Response, error) {

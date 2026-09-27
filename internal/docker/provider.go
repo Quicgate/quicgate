@@ -2,21 +2,16 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"quicgate/internal/store"
 )
-
-// Endpoint is one Docker daemon quicgate watches.
-type Endpoint struct {
-	Name    string `json:"name"`    // display name, unique
-	Connect string `json:"connect"` // unix socket path, or tcp://host:port (e.g. a read-only socket proxy)
-	Address string `json:"address"` // where this host's published ports are reachable from quicgate
-}
 
 // Options configures the provider.
 type Options struct {
@@ -27,11 +22,26 @@ type Options struct {
 
 // Hooks wires the provider to the rest of quicgate.
 type Hooks struct {
-	Apply           func([]store.Host, []store.Stream) // hand the derived routes to the engine
-	ResolveACL      func(string) (int64, bool)         // access-list name -> id
-	ExistingDomains func() map[string]bool             // database-claimed domains (manual wins)
-	Setting         func(key, def string) string       // live settings lookup (default-domain)
+	Apply      func([]store.Host, []store.Stream) // hand the derived routes to the engine
+	ResolveACL func(string) (int64, bool)         // access-list name -> id
+	// ExistingDomains lists the domains the database's hosts are configured
+	// with, enabled or not and wildcards as "*.example.com": a manual host
+	// wins every name conflict with a container, and a name stays taken while
+	// its host is switched off.
+	ExistingDomains func() map[string]bool
+	// UsedPorts lists the listen ports a container's stream may not take: the
+	// database streams' ports and the ports quicgate itself listens on. The
+	// engine drops such a stream anyway; knowing it here lets the container's
+	// status say so instead of claiming the stream is routed.
+	UsedPorts func() map[int]bool
+	Setting   func(key, def string) string // live settings lookup (default-domain)
 }
+
+// reaggregateEvery is how often the routes are aggregated again without a
+// container event. The other side of a name conflict is the database: a
+// manual host that is created takes its name from a container, one that is
+// deleted gives it back, and neither raises a Docker event.
+const reaggregateEvery = 30 * time.Second
 
 // ContainerStatus is one container's integration result, surfaced in the UI so
 // the reason a container is (not) routed is always visible.
@@ -102,16 +112,21 @@ type Provider struct {
 	apply           func([]store.Host, []store.Stream)
 	resolveACL      func(string) (int64, bool)
 	existingDomains func() map[string]bool
+	usedPorts       func() map[int]bool
 	setting         func(key, def string) string
+	reaggregate     time.Duration // period of the timer-driven aggregation (reaggregateEvery unless a test shortens it)
 
-	aggMu sync.Mutex // serializes aggregation across endpoint goroutines
+	aggMu   sync.Mutex // serializes aggregation across endpoint goroutines
+	lastSig string     // the applied set, so an unchanged aggregation does not reload the engine
 
 	mu        sync.Mutex
 	status    Status
 	adoptable map[string]adopted // keyed by endpoint\x00container
 }
 
-// NewProvider builds a provider from static options and the wiring hooks.
+// NewProvider builds a provider from static options and the wiring hooks. An
+// endpoint whose client cannot be built (a certificate file that does not
+// open) is kept, shown with its error, and retried by its watch loop.
 func NewProvider(opts Options, h Hooks) *Provider {
 	if opts.LabelPrefix == "" {
 		opts.LabelPrefix = "quicgate"
@@ -121,17 +136,21 @@ func NewProvider(opts Options, h Hooks) *Provider {
 		apply:           h.Apply,
 		resolveACL:      h.ResolveACL,
 		existingDomains: h.ExistingDomains,
+		usedPorts:       h.UsedPorts,
 		setting:         h.Setting,
+		reaggregate:     reaggregateEvery,
 		adoptable:       map[string]adopted{},
 	}
 	labelKey := opts.LabelPrefix + ".enable"
 	for _, ep := range opts.Endpoints {
-		p.eps = append(p.eps, &epState{
-			cfg:      ep,
-			cli:      NewClient(ep.Connect),
-			labelKey: labelKey,
-			trigger:  make(chan struct{}, 1),
-		})
+		st := &epState{cfg: ep, labelKey: labelKey, trigger: make(chan struct{}, 1)}
+		cli, err := NewClient(ep)
+		if err != nil {
+			st.errMsg = err.Error()
+			log.Printf("docker[%s]: %v", ep.Name, err)
+		}
+		st.cli = cli
+		p.eps = append(p.eps, st)
 	}
 	p.status = Status{Enabled: true}
 	return p
@@ -173,9 +192,15 @@ func (p *Provider) Adopt(endpoint, name string) (*store.Host, []store.Stream, bo
 	return h, append([]store.Stream(nil), a.streams...), true
 }
 
-// Run drives every endpoint until ctx is cancelled.
+// Run drives every endpoint until ctx is cancelled, and aggregates again on a
+// timer in between container events.
 func (p *Provider) Run(ctx context.Context) {
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.runPeriodic(ctx)
+	}()
 	for _, ep := range p.eps {
 		wg.Add(1)
 		go func(ep *epState) {
@@ -186,11 +211,44 @@ func (p *Provider) Run(ctx context.Context) {
 	wg.Wait()
 }
 
+// runPeriodic aggregates the last derivations again every period, so a manual
+// host created or deleted in the meantime takes or frees its name without
+// waiting for a container event. Aggregation reads what the endpoints already
+// derived: no Docker API call is made, and the engine is only reloaded when
+// the resulting set differs from the one it has.
+func (p *Provider) runPeriodic(ctx context.Context) {
+	t := time.NewTicker(p.reaggregate)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p.aggregate()
+		}
+	}
+}
+
 // runEndpoint connects to one Docker host, reconciles, watches events, and
 // reconnects with backoff. Last-known routes survive a daemon blip.
 func (p *Provider) runEndpoint(ctx context.Context, ep *epState) {
 	backoff := time.Second
 	for ctx.Err() == nil {
+		if ep.cli == nil {
+			// The client could not be built at startup (a certificate file
+			// that did not open); try again, the file may be there now.
+			cli, err := NewClient(ep.cfg)
+			if err != nil {
+				ep.setDown(err)
+				p.aggregate()
+				if !sleepCtx(ctx, backoff) {
+					return
+				}
+				backoff = minDur(backoff*2, 30*time.Second)
+				continue
+			}
+			ep.cli = cli
+		}
 		if err := ep.cli.Ping(ctx); err != nil {
 			ep.setDown(fmt.Errorf("cannot reach docker at %s: %w", ep.cfg.Connect, err))
 			p.aggregate()
@@ -278,16 +336,37 @@ func (p *Provider) reconcileEndpoint(ctx context.Context, ep *epState) {
 	p.aggregate()
 }
 
+// coveringWildcard returns the wildcard name that covers an exact name the
+// way the routing table matches ("*.example.com" for "api.example.com"), or
+// "" for a wildcard or a single label.
+func coveringWildcard(dom string) string {
+	if strings.HasPrefix(dom, "*.") {
+		return ""
+	}
+	if i := strings.IndexByte(dom, '.'); i > 0 {
+		return "*." + dom[i+1:]
+	}
+	return ""
+}
+
 // aggregate merges every endpoint's raw derivations into one host+stream set,
-// resolving conflicts (database hosts win, then first-come across endpoints),
-// applies it to the engine, and records status. Serialized so concurrent
-// endpoint goroutines cannot race on the applied set.
+// resolving conflicts (database hosts and streams win, then first-come across
+// endpoints), applies it to the engine when it changed, and records status.
+// Serialized so concurrent endpoint goroutines cannot race on the applied set.
 func (p *Provider) aggregate() {
 	p.aggMu.Lock()
 	defer p.aggMu.Unlock()
 
-	existing := p.existingDomains()
+	var existing map[string]bool
+	if p.existingDomains != nil {
+		existing = p.existingDomains()
+	}
+	var used map[int]bool
+	if p.usedPorts != nil {
+		used = p.usedPorts()
+	}
 	claimed := map[string]bool{}
+	takenPorts := map[int]string{} // listen port -> the container that has it
 	var hosts []store.Host
 	var streams []store.Stream
 	var statuses []ContainerStatus
@@ -309,9 +388,11 @@ func (p *Provider) aggregate() {
 			if rd.host != nil {
 				var kept []string
 				for _, dom := range rd.host.Domains {
-					switch {
+					switch w := coveringWildcard(dom); {
 					case existing[dom]:
-						st.Warnings = append(st.Warnings, dom+" is already served by a manual host (skipped)")
+						st.Warnings = append(st.Warnings, dom+" is configured on a manual host (skipped)")
+					case w != "" && existing[w]:
+						st.Warnings = append(st.Warnings, dom+" is covered by the manual wildcard host "+w+" (skipped)")
 					case claimed[dom]:
 						st.Warnings = append(st.Warnings, dom+" is already claimed by another container (skipped)")
 					default:
@@ -329,13 +410,24 @@ func (p *Provider) aggregate() {
 					st.Upstream = fmt.Sprintf("%s://%s:%d", hc.Upstream.Scheme, hc.Upstream.Host, hc.Upstream.Port)
 				}
 			}
+			var keptStreams []store.Stream
 			for _, s := range rd.streams {
-				streams = append(streams, s)
-				st.Routed = true
-				st.Streams = append(st.Streams, fmt.Sprintf("%d/%s -> %s:%d", s.ListenPort, s.Protocol, s.ForwardHost, s.ForwardPort))
+				who := ep.cfg.Name + "/" + rd.name
+				switch {
+				case used[s.ListenPort]:
+					st.Warnings = append(st.Warnings, fmt.Sprintf("stream %d/%s: listen port %d belongs to a manual stream or to quicgate itself (skipped)", s.ListenPort, s.Protocol, s.ListenPort))
+				case takenPorts[s.ListenPort] != "":
+					st.Warnings = append(st.Warnings, fmt.Sprintf("stream %d/%s: listen port %d is already claimed by container %s (skipped)", s.ListenPort, s.Protocol, s.ListenPort, takenPorts[s.ListenPort]))
+				default:
+					takenPorts[s.ListenPort] = who
+					keptStreams = append(keptStreams, s)
+					streams = append(streams, s)
+					st.Routed = true
+					st.Streams = append(st.Streams, fmt.Sprintf("%d/%s -> %s:%d", s.ListenPort, s.Protocol, s.ForwardHost, s.ForwardPort))
+				}
 			}
-			if routedHost != nil || len(rd.streams) > 0 {
-				adoptable[ep.cfg.Name+"\x00"+rd.name] = adopted{host: routedHost, streams: rd.streams}
+			if routedHost != nil || len(keptStreams) > 0 {
+				adoptable[ep.cfg.Name+"\x00"+rd.name] = adopted{host: routedHost, streams: keptStreams}
 			}
 			statuses = append(statuses, st)
 		}
@@ -348,13 +440,27 @@ func (p *Provider) aggregate() {
 		return statuses[i].Name < statuses[j].Name
 	})
 
-	p.apply(hosts, streams)
-
 	p.mu.Lock()
 	p.status = Status{Enabled: true, Endpoints: endpoints, Containers: statuses, UpdatedAt: nowStr()}
 	p.adoptable = adoptable
 	p.mu.Unlock()
-	log.Printf("docker: %d host(s) + %d stream(s) across %d endpoint(s)", len(hosts), len(streams), len(p.eps))
+
+	// The engine reloads on every apply, so hand it the set only when it is
+	// not the one it already has; the timer-driven aggregation would otherwise
+	// reload it twice a minute for nothing.
+	if sig := routeSignature(hosts, streams); sig != p.lastSig {
+		p.lastSig = sig
+		p.apply(hosts, streams)
+		log.Printf("docker: %d host(s) + %d stream(s) across %d endpoint(s)", len(hosts), len(streams), len(p.eps))
+	}
+}
+
+// routeSignature is a stable rendering of an applied set (pointers by value),
+// so two aggregations of the same derivations compare equal.
+func routeSignature(hosts []store.Host, streams []store.Stream) string {
+	h, _ := json.Marshal(hosts)
+	s, _ := json.Marshal(streams)
+	return string(h) + "\n" + string(s)
 }
 
 func (ep *epState) setDown(err error) {

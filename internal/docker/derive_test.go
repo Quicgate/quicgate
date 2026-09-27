@@ -23,12 +23,13 @@ func testProvider(opts Options, acls map[string]int64) *Provider {
 }
 
 type ctSpec struct {
-	name      string
-	labels    map[string]string
-	exposed   []int
-	published map[int]int // container port -> host port
-	netMode   string
-	running   bool
+	name         string
+	labels       map[string]string
+	exposed      []int
+	published    map[int]int // container TCP port -> host port
+	publishedUDP map[int]int // container UDP port -> host port
+	netMode      string
+	running      bool
 }
 
 func makeContainer(s ctSpec) containerInspect {
@@ -47,6 +48,9 @@ func makeContainer(s ctSpec) containerInspect {
 	in.NetworkSettings.Ports = map[string][]portBinding{}
 	for cp, hp := range s.published {
 		in.NetworkSettings.Ports[fmt.Sprintf("%d/tcp", cp)] = []portBinding{{HostIP: "0.0.0.0", HostPort: fmt.Sprint(hp)}}
+	}
+	for cp, hp := range s.publishedUDP {
+		in.NetworkSettings.Ports[fmt.Sprintf("%d/udp", cp)] = []portBinding{{HostIP: "0.0.0.0", HostPort: fmt.Sprint(hp)}}
 	}
 	return in
 }
@@ -256,7 +260,8 @@ func TestDeriveHTTPSPlusStreamsScenario(t *testing.T) {
 		name: "game", running: true,
 		labels: labels("enable", "true", "host", "game.example.com", "scheme", "https",
 			"port", "8443", "streams", "25565, 27015/udp", "exclude-ports", "9090"),
-		published: map[int]int{8443: 8443, 25565: 25565, 27015: 27015, 9090: 9090},
+		published:    map[int]int{8443: 8443, 25565: 25565, 9090: 9090},
+		publishedUDP: map[int]int{27015: 27015},
 	}), "127.0.0.1")
 	if d.host == nil || upstreamStr(d) != "https://127.0.0.1:8443" {
 		t.Fatalf("host upstream=%s want https://127.0.0.1:8443 (warnings=%v)", upstreamStr(d), d.warnings)
@@ -356,21 +361,29 @@ func TestParseStreamEntry(t *testing.T) {
 }
 
 func TestPortHelpers(t *testing.T) {
-	if n, ok := tcpPort("8080/tcp"); !ok || n != 8080 {
-		t.Fatalf("tcpPort tcp: %d %v", n, ok)
+	if pk, ok := parsePortKey("8080/tcp"); !ok || pk != (portKey{8080, "tcp"}) {
+		t.Fatalf("parsePortKey tcp: %v %v", pk, ok)
 	}
-	if _, ok := tcpPort("8080/udp"); ok {
-		t.Fatal("tcpPort should reject udp")
+	if pk, ok := parsePortKey("8080/udp"); !ok || pk != (portKey{8080, "udp"}) {
+		t.Fatalf("parsePortKey udp: %v %v", pk, ok)
 	}
-	if n, ok := tcpPort("443"); !ok || n != 443 {
-		t.Fatalf("tcpPort bare: %d %v", n, ok)
+	if _, ok := parsePortKey("8080/sctp"); ok {
+		t.Fatal("parsePortKey should reject sctp")
 	}
+	if pk, ok := parsePortKey("443"); !ok || pk != (portKey{443, "tcp"}) {
+		t.Fatalf("parsePortKey bare: %v %v", pk, ok)
+	}
+	// Each protocol has its own publication (F-3: a UDP-only port used to be
+	// invisible, and a both stream sent UDP to the TCP host port).
 	pub := parsePublished(map[string][]portBinding{
 		"3000/tcp": {{HostPort: "3001"}},
-		"53/udp":   {{HostPort: "53"}},
+		"53/udp":   {{HostPort: "5353"}},
 	})
-	if pub[3000] != 3001 || len(pub) != 1 {
-		t.Fatalf("parsePublished=%v want {3000:3001}", pub)
+	if pub[portKey{3000, "tcp"}] != 3001 || pub[portKey{53, "udp"}] != 5353 || len(pub) != 2 {
+		t.Fatalf("parsePublished=%v want {3000/tcp:3001 53/udp:5353}", pub)
+	}
+	if _, ok := pub[portKey{53, "tcp"}]; ok {
+		t.Fatal("a UDP publication must not count as a TCP one")
 	}
 	ex := parseExposed(map[string]struct{}{"80/tcp": {}, "53/udp": {}})
 	if len(ex) != 1 || ex[0] != 80 {
@@ -389,14 +402,145 @@ func TestPortHelpers(t *testing.T) {
 }
 
 func TestTransportForConnect(t *testing.T) {
-	if base, _ := transportFor("tcp://192.168.1.9:2375"); base != "http://192.168.1.9:2375" {
-		t.Fatalf("tcp base=%s", base)
+	ep := func(connect string) Endpoint { return Endpoint{Name: "e", Connect: connect, Address: "127.0.0.1"} }
+	if base, _, err := transportFor(ep("tcp://192.168.1.9:2375")); err != nil || base != "http://192.168.1.9:2375" {
+		t.Fatalf("tcp base=%s err=%v", base, err)
 	}
-	if base, tr := transportFor("/var/run/docker.sock"); base != "http://docker" || tr.DialContext == nil {
-		t.Fatalf("unix base=%s dialer=%v", base, tr.DialContext != nil)
+	if base, tr, err := transportFor(ep("/var/run/docker.sock")); err != nil || base != "http://docker" || tr.DialContext == nil {
+		t.Fatalf("unix base=%s dialer=%v err=%v", base, tr != nil && tr.DialContext != nil, err)
 	}
-	if base, _ := transportFor("unix:///var/run/docker.sock"); base != "http://docker" {
-		t.Fatalf("unix:// base=%s", base)
+	if base, _, err := transportFor(ep("unix:///var/run/docker.sock")); err != nil || base != "http://docker" {
+		t.Fatalf("unix:// base=%s err=%v", base, err)
+	}
+	if base, tr, err := transportFor(ep("https://192.168.1.9:2376")); err != nil || base != "https://192.168.1.9:2376" || tr.TLSClientConfig == nil {
+		t.Fatalf("https base=%s tls=%v err=%v", base, tr != nil && tr.TLSClientConfig != nil, err)
+	}
+	for _, bad := range []string{"", "192.168.1.9:2375", "tcp://192.168.1.9", "tcp://192.168.1.9:99999", "ftp://x:1", "relative/path.sock", "tcp://bad host:2375"} {
+		if _, _, err := transportFor(ep(bad)); err == nil {
+			t.Errorf("connect %q was accepted", bad)
+		}
+	}
+}
+
+// A label key quicgate does not know is a mistake, not noise: quicgate.access_list
+// (wrong separator) used to publish the container with no access list at all.
+// The container is not routed and the warning names the key it probably meant.
+func TestDeriveUnknownLabelIsNotRouted(t *testing.T) {
+	p := testProvider(Options{}, map[string]int64{"lan": 5})
+	d := p.derive(makeContainer(ctSpec{
+		name: "app", running: true,
+		labels:    labels("enable", "true", "host", "app.example.com", "port", "8080", "access_list", "lan", "streams", "5432"),
+		published: map[int]int{8080: 8080, 5432: 5432},
+	}), "127.0.0.1")
+	if !d.enabled {
+		t.Fatal("the container opted in; it must be listed")
+	}
+	if d.host != nil || len(d.streams) != 0 {
+		t.Fatalf("a container with an unknown label was routed: host=%v streams=%v", d.host, d.streams)
+	}
+	if !hasWarning(d, "unknown label quicgate.access_list; did you mean quicgate.access-list?") {
+		t.Fatalf("warnings=%v want the unknown key and the suggestion", d.warnings)
+	}
+	if !hasWarning(d, "not routed") {
+		t.Fatalf("warnings=%v want the consequence spelled out", d.warnings)
+	}
+
+	// Other prefixes and unrelated labels are none of quicgate's business.
+	d = p.derive(makeContainer(ctSpec{
+		name: "app", running: true,
+		labels: map[string]string{"quicgate.enable": "true", "quicgate.host": "app.example.com",
+			"traefik.enable": "true", "com.docker.compose.service": "app", "quicgateway": "x"},
+		published: map[int]int{8080: 8080},
+	}), "127.0.0.1")
+	if d.host == nil {
+		t.Fatalf("labels outside the prefix blocked routing: %v", d.warnings)
+	}
+
+	// A key with nothing close gets no suggestion, but is refused all the same.
+	d = p.derive(makeContainer(ctSpec{
+		name: "app", running: true,
+		labels:    labels("enable", "true", "host", "app.example.com", "middleware.headers", "x"),
+		published: map[int]int{8080: 8080},
+	}), "127.0.0.1")
+	if d.host != nil || !hasWarning(d, "unknown label quicgate.middleware.headers") || hasWarning(d, "did you mean") {
+		t.Fatalf("host=%v warnings=%v", d.host, d.warnings)
+	}
+	for in, want := range map[string]string{"access_list": "access-list", "hosts": "host", "Port": "port", "exclude_ports": "exclude-ports", "tls-skip": "", "nonsense": ""} {
+		if got := suggestLabel(in); got != want {
+			t.Errorf("suggestLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// quicgate.streams resolves each protocol's own publication: a 53/udp stream
+// follows the container's UDP mapping (it used to read TCP mappings only and
+// warn "not published"), and a both stream needs the two protocols on one host
+// port, because it forwards both to one port.
+func TestDeriveStreamsResolveUDPAndBoth(t *testing.T) {
+	p := testProvider(Options{}, nil)
+	d := p.derive(makeContainer(ctSpec{
+		name: "dns", running: true,
+		labels:       labels("enable", "true", "streams", "5353:53/udp, 2222:22/both, 8000:80/tcp"),
+		published:    map[int]int{22: 19332, 80: 19330},
+		publishedUDP: map[int]int{53: 19331, 22: 19332},
+	}), "127.0.0.1")
+	if len(d.warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", d.warnings)
+	}
+	if len(d.streams) != 3 {
+		t.Fatalf("streams=%d want 3: %+v", len(d.streams), d.streams)
+	}
+	udp, both, tcp := d.streams[0], d.streams[1], d.streams[2]
+	if udp.Protocol != "udp" || udp.ListenPort != 5353 || udp.ForwardPort != 19331 {
+		t.Fatalf("udp stream=%+v want 5353/udp -> 19331 (the UDP publication)", udp)
+	}
+	if both.Protocol != "both" || both.ListenPort != 2222 || both.ForwardPort != 19332 {
+		t.Fatalf("both stream=%+v want 2222/both -> 19332", both)
+	}
+	if tcp.Protocol != "tcp" || tcp.ForwardPort != 19330 {
+		t.Fatalf("tcp stream=%+v", tcp)
+	}
+
+	// UDP asked for, only TCP published: not routed, and the warning names
+	// the protocol, so the fix is obvious.
+	d = p.derive(makeContainer(ctSpec{
+		name: "dns", running: true,
+		labels:    labels("enable", "true", "streams", "53/udp"),
+		published: map[int]int{53: 53},
+	}), "127.0.0.1")
+	if len(d.streams) != 0 || !hasWarning(d, "53/udp is not published") {
+		t.Fatalf("streams=%v warnings=%v", d.streams, d.warnings)
+	}
+
+	// A both stream whose protocols are published on different host ports
+	// cannot be one stream: refused with the two ports, never UDP to the TCP port.
+	d = p.derive(makeContainer(ctSpec{
+		name: "game", running: true,
+		labels:       labels("enable", "true", "streams", "27015/both"),
+		published:    map[int]int{27015: 27015},
+		publishedUDP: map[int]int{27015: 27016},
+	}), "127.0.0.1")
+	if len(d.streams) != 0 || !hasWarning(d, "27015 for tcp and 27016 for udp") {
+		t.Fatalf("streams=%v warnings=%v", d.streams, d.warnings)
+	}
+	// One protocol of a both stream missing names that protocol.
+	d = p.derive(makeContainer(ctSpec{
+		name: "game", running: true,
+		labels:    labels("enable", "true", "streams", "27015/both"),
+		published: map[int]int{27015: 27015},
+	}), "127.0.0.1")
+	if len(d.streams) != 0 || !hasWarning(d, "27015/udp is not published") {
+		t.Fatalf("streams=%v warnings=%v", d.streams, d.warnings)
+	}
+
+	// A host-networked container binds its ports directly, on either protocol.
+	d = p.derive(makeContainer(ctSpec{
+		name: "dns", running: true,
+		labels:  labels("enable", "true", "streams", "53/both"),
+		netMode: "host",
+	}), "192.168.1.9")
+	if len(d.streams) != 1 || d.streams[0].Protocol != "both" || d.streams[0].ForwardPort != 53 || d.streams[0].ForwardHost != "192.168.1.9" {
+		t.Fatalf("host-network both stream=%+v warnings=%v", d.streams, d.warnings)
 	}
 }
 
