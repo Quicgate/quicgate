@@ -96,7 +96,7 @@ components:
         clientSecret: { type: string, description: write-mostly, masked in responses }
         scopes: { type: array, items: { type: string }, description: "default: openid email profile" }
         groupsClaim: { type: string, description: "ID-token claim holding groups (default: groups)" }
-        sessionHours: { type: integer, description: "session cookie lifetime (default: 12)" }
+        sessionHours: { type: integer, description: "session cookie lifetime in hours (default: 12, maximum: 720)" }
         skipTlsVerify: { type: boolean }
     AccessList:
       type: object
@@ -185,7 +185,7 @@ paths:
   /api/logout:
     post: { summary: Log out, responses: { "200": { description: ok } } }
   /api/me:
-    get: { summary: Current user, responses: { "200": { description: "{email, mustChange, totpEnabled}" } } }
+    get: { summary: Current user, responses: { "200": { description: "{email, mustChange, totpEnabled}; for an API token {email: \"\", token: true}" } } }
   /api/password:
     post:
       summary: Change password
@@ -206,7 +206,7 @@ paths:
   /api/2fa/setup:
     post: { summary: Begin 2FA setup, responses: { "200": { description: "{secret, uri}" } } }
   /api/2fa/enable:
-    post: { summary: Enable 2FA, responses: { "200": { description: enabled } } }
+    post: { summary: "Enable 2FA with the secret that /api/2fa/setup bound to this session (within 15 minutes); body {code, password}", responses: { "200": { description: enabled } } }
   /api/2fa/disable:
     post: { summary: Disable 2FA, responses: { "200": { description: disabled } } }
   /api/hosts:

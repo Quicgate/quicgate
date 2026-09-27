@@ -74,7 +74,7 @@ Add a host of type **VPN portal**, for example `vpn.example.com`, choose the ide
 and say who may add devices (a group, single people, or everybody from that provider). Register
 `https://vpn.example.com/.qg/vpn/callback` as a redirect URI at the provider.
 
-The portal has to be reachable without the VPN: it is where people go to get the VPN *back*.
+The portal has to be reachable without the VPN: it is where people go to get the VPN *back*. Starting a login and enrolling a device are limited to ten per minute per client address.
 It is served over **HTTPS only**, so the host needs a certificate: plain HTTP is redirected, and
 nothing but the redirect is ever answered there. Behind a proxy that terminates TLS, that proxy
 has to be listed under trusted proxies and send `X-Forwarded-Proto: https`.

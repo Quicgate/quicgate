@@ -23,6 +23,52 @@ SECURITY.md). Every change below carries a regression test that fails without it
   or locations are unaffected. Prefix rules and locations match whole segments: `/api` covers
   `/api` and `/api/...`, no longer `/api-internal`; a rule ending in `/` is a plain prefix as before.
 - **HTTP/3 refuses 0-RTT early data**, which a network attacker could replay.
+- **Admin API request bodies are bounded and the listener has timeouts.** Any client that could
+  reach port 81 could send an unauthenticated login with a body of hundreds of megabytes and drive
+  the process towards an out-of-memory kill of the whole proxy; bodies are now limited to 16 KiB
+  on credential endpoints and 4 MiB on configuration endpoints (413 above that), and the admin
+  server has a 30-second read timeout (the restore upload gets fifteen minutes) and a 120-second
+  idle timeout.
+- **Failed admin logins are counted per account as well as per address.** Ten failures in fifteen
+  minutes lock the account from any address; rotating source addresses no longer buys unlimited
+  attempts, a wrong second-factor code costs the same delay as a wrong password, failed password
+  confirmations count too, a locked entry is never evicted when the table is full, and an unknown
+  account costs the same comparison as a known one (the response time no longer says which
+  addresses are accounts).
+- **A TOTP code is accepted once.** The time step of the last accepted code is remembered per
+  account and that step and earlier ones are refused, at login, when enabling 2FA and when creating
+  a break-glass device.
+- **The admin listener honours trusted proxies.** Behind a proxy listed under trusted proxies the
+  login throttle keys on the address the proxy reports, so one careless colleague behind the proxy
+  no longer locks everyone out and a client behind it cannot spoof its address. The settings are
+  validated on save (addresses or CIDRs, `/0` refused, a valid header name).
+- **The 2FA setup secret is bound to the session.** `/api/2fa/enable` confirms the secret that
+  `/api/2fa/setup` produced for this session (fifteen minutes), not one the client sends.
+- **Cookie-authenticated admin writes need an `Origin` or `Referer` header**, which browsers
+  always send; a request with neither is refused. Scripts use API tokens, which are exempt.
+- **SSO hosts are HTTPS only.** A host with single sign-on on the host or on a path rule redirects
+  plain HTTP to HTTPS (308) and refuses other methods, like the VPN portal, unless quicgate runs
+  with `QG_TLS=off`; the login and the session cookie were served over plain HTTP when force-SSL
+  was off. `X-Forwarded-Proto` is believed only from a trusted proxy, for the cookie's `Secure`
+  flag and the redirect URI alike.
+- **The SSO session cookie is not forwarded to the upstream** or to a forward-auth server; every
+  other cookie is passed unchanged. A backend no longer holds a replayable credential for its host.
+- **Identity headers are stripped on forward-auth hosts too.** `Remote-User`, `Remote-Email` and
+  `Remote-Groups` in any spelling are removed from inbound requests whenever any identity gate
+  exists, not only with the built-in SSO.
+- **A group name cannot inject groups.** Commas, percent signs and control characters in a group
+  name are percent-encoded in `Remote-Groups` (`Sales, EMEA` arrives as `Sales%2C EMEA`).
+- **`preferred_username` satisfies no e-mail rule.** When the ID token carries no `email` claim
+  the username is used as the identity, but it passes allowed-emails and allowed-domains rules only
+  when `email_verified` is true; group rules still apply.
+- **The SSO signing key is never regenerated over one that cannot be opened.** After a restore
+  under another sealing key, single sign-on answers 503 and the log says why, instead of silently
+  making a new key that signed everyone out for good once the right key came back.
+- The admin OIDC sign-in uses distinct random values for `state` and `nonce` and compares the
+  state in constant time; the SSO gate does the same.
+- Provider discovery runs under its own context (a visitor who disconnected mid-discovery no
+  longer poisons the cache), is refreshed hourly and retried ten seconds after a failure.
+- The VPN portal limits login starts and device enrolments to ten per minute per client address.
 - **The declarative import refuses to drop a host's VPN-only restriction**, to downgrade its
   client-certificate mode from *require*, to turn its certificate mode into *none*, to drop
   force-SSL or to drop a minimum TLS version of 1.3: a document that omits the field left a private
@@ -64,7 +110,20 @@ SECURITY.md). Every change below carries a regression test that fails without it
 - **Static hosts serve files only.** A directory without `index.html` answers 404 instead of a
   listing, and dot-prefixed names (`.env`, `.git`) are not served, except under `/.well-known/`.
 - Access-log records cut the host to 253 bytes, the path to 2 KiB and the user agent to 512 bytes.
-- A stream cannot take the admin port; it is reserved like 80 and 443, as the guide already said.
+- A stream cannot take the admin port; it is reserved like 80 and 443, as the guide already said,
+  and the admin port is bound before the engine starts, so a stream configured on it fails as a
+  stream instead of crashing the admin UI.
+- **Admin OIDC sign-in needs only a selected identity provider.** `oidc_enabled` is no longer
+  required, and when the redirect URL is empty the callback URL is derived from the request (the
+  scheme from `X-Forwarded-Proto` only when it comes from a trusted proxy). Starting a sign-in is
+  limited to 30 per client address per fifteen minutes, a full table of pending sign-ins refuses
+  new ones instead of evicting one in progress, and provider error details are logged, not shown.
+- The identity-provider session lifetime (`sessionHours`) is capped at 720 hours (30 days); longer
+  stored values are treated as 720.
+- The admin UI no longer lists directories, `/api/version` no longer includes the Go version, and
+  every `/api/*` and `/metrics` response carries `Cache-Control: no-store`.
+- One admin account holds at most 32 live sessions; the oldest ends when another starts. A
+  password longer than 72 bytes is refused with 400 and a clear message instead of a 500.
 - **Validation is complete on every host and stream field.** Domain labels are limited to 63 and
   names to 253 characters; upstream, forward and redirect hosts must be an IP or hostname; a static
   root must be an absolute path; a forward-auth URL must be http(s); header rules cannot touch
@@ -101,6 +160,14 @@ SECURITY.md). Every change below carries a regression test that fails without it
   connect marks it down, so the following requests go to the other members instead of every other
   one answering 502 for up to fifteen seconds; the health check brings it back when it answers.
 - **The force-SSL redirect keeps a non-standard HTTPS port.**
+- **"Remove device" on the VPN portal works.** The page sent the request without a content type
+  and the portal refused it as not coming from the portal, so a device could never be removed
+  from the page; the page and the check agree now, and the test drives the request as a browser
+  sends it.
+- **Declining the login at the identity provider shows a refusal page (403)** instead of a 502
+  from an empty token exchange.
+- `GET /api/me` with an API token answers `{"email": "", "token": true, ...}` instead of a 500.
+- The portal's `/api/me` reports `connected: false` for a device that has never connected.
 - **`quicgate.streams` entries with `/udp` work.** Only TCP publications were read, so the
   documented `53/udp` example warned "not published"; `/both` now needs the same host port for
   both protocols and is refused with a warning naming both otherwise. A label stream whose listen
