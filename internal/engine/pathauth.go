@@ -33,7 +33,18 @@ func (g *pathGate) matches(r *http.Request) bool {
 	if g.exact {
 		return r.URL.Path == g.path
 	}
-	return strings.HasPrefix(r.URL.Path, g.path)
+	return pathWithin(r.URL.Path, g.path)
+}
+
+// pathWithin reports whether p is prefix itself or lies in the subtree under
+// it: a rule for /api covers /api and /api/..., not /api-internal, whose only
+// likeness is the spelling. A prefix ending in "/" is a plain prefix ("/api/"
+// covers /api/x and not /api; "/" covers everything).
+func pathWithin(p, prefix string) bool {
+	if !strings.HasPrefix(p, prefix) {
+		return false
+	}
+	return len(p) == len(prefix) || strings.HasSuffix(prefix, "/") || p[len(prefix)] == '/'
 }
 
 type pathAuth struct {
@@ -147,5 +158,7 @@ func buildPathAuth(domains []string, rules []store.AuthRule, o store.Options, ac
 	if sso != nil {
 		pa.reserved = sso.wrap(inner)
 	}
-	return pa
+	// Every rule compares the path as text, and the upstream reads it its own
+	// way: a path the two can disagree on is refused before any rule sees it.
+	return rejectAmbiguousPaths(pa)
 }

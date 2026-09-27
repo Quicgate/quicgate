@@ -35,7 +35,12 @@ func (c *realIPConfig) realClientIP(r *http.Request) string {
 	if pip == nil || !c.trusts(pip) {
 		return ""
 	}
-	vals := strings.Split(r.Header.Get(c.header), ",")
+	// Every line of the header is part of the list, in order (RFC 9110 §5.3).
+	// Header.Get returns the first line only, and a front proxy that appends
+	// the client as a line of its own (HAProxy's option forwardfor, any Go
+	// proxy using Header.Add) then delivered a first line the client wrote
+	// itself: the walk saw only that line and believed the spoof.
+	vals := strings.Split(strings.Join(r.Header.Values(c.header), ","), ",")
 	for i := len(vals) - 1; i >= 0; i-- {
 		if ip := net.ParseIP(strings.TrimSpace(vals[i])); ip != nil && !c.trusts(ip) {
 			return ip.String()

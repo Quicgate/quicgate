@@ -37,6 +37,41 @@ func hasDotSegment(p string) bool {
 	return false
 }
 
+// hasAmbiguousSegment reports whether a decoded path holds a construct that
+// quicgate's path rules and locations compare as plain text while common
+// upstreams read it differently: an empty segment ("//", which nginx and
+// Apache merge), a backslash (IIS reads it as "/"), a ";" inside a segment
+// (Tomcat and Jetty strip path parameters, so "/..;/" is ".." to them), or a
+// "%" left after Go decoded the path once (a double-encoded byte the upstream
+// may decode again). "//admin/secret" and "/admin;x/secret" match no rule for
+// /admin/ here and reach /admin/secret there.
+//
+// The case of a path is left alone on purpose: /Admin/ is not /admin/ to
+// quicgate, nor to most upstreams, and matching rules regardless of case would
+// open every public carve-out to its other spellings on the upstreams that do
+// tell them apart. An upstream that ignores case (IIS, a Windows or macOS file
+// system) needs its gated paths listed in the spellings it accepts, or a gate
+// on the whole host; that is the operator's call, and the docs say so.
+func hasAmbiguousSegment(p string) bool {
+	return strings.Contains(p, "//") || strings.ContainsAny(p, `\;%`)
+}
+
+// rejectAmbiguousPaths refuses a path that hasAmbiguousSegment flags with 400,
+// like a dot segment. It guards the path-rule dispatcher (pathauth.go), so only
+// a host with path rules pays for it: a host without a path-keyed decision has
+// none to get past, and its clients keep such paths. Custom locations are a
+// path-keyed decision too; their dispatcher lives in engine.go.
+func rejectAmbiguousPaths(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hasAmbiguousSegment(r.URL.Path) {
+			markBlocked(w, blockExploit)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // rejectTraversal is the outermost middleware on every host, so a traversal
 // attempt never reaches an auth gate, a path rule, a location or an upstream.
 func rejectTraversal(next http.Handler) http.Handler {

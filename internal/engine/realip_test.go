@@ -41,3 +41,23 @@ func TestRealClientIP(t *testing.T) {
 		}
 	}
 }
+
+// A front proxy that appends the client as a header line of its own (HAProxy's
+// option forwardfor, any Go proxy using Header.Add) must not let the client
+// pick its address with a first line it wrote itself: every line is part of
+// the walk, and the address the nearest proxy added is still where it starts.
+func TestRealClientIPReadsEveryHeaderLine(t *testing.T) {
+	cfg := mkRealIP("X-Forwarded-For", "127.0.0.0/8")
+	r, _ := http.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "127.0.0.1:5000"
+	r.Header.Add("X-Forwarded-For", "10.1.1.1")    // written by the client
+	r.Header.Add("X-Forwarded-For", "203.0.113.9") // added by the front proxy
+	if got := cfg.realClientIP(r); got != "203.0.113.9" {
+		t.Fatalf("two header lines: got %q, want the address the proxy added", got)
+	}
+	// A trusted hop on a line of its own is skipped like one in the same line.
+	r.Header.Add("X-Forwarded-For", "127.0.0.2")
+	if got := cfg.realClientIP(r); got != "203.0.113.9" {
+		t.Fatalf("trusted hop on its own line: got %q, want 203.0.113.9", got)
+	}
+}

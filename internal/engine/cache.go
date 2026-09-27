@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"container/list"
 	"net/http"
 	"sort"
 	"strconv"
@@ -15,30 +16,62 @@ import (
 // until they expire. A fresh cache is built on every reload, so a config change
 // clears it.
 //
+// It is bounded in bytes as well as in entries. The key holds the whole request
+// URI, so a client varying a query string could otherwise fill it with 512
+// bodies of up to 2 MiB each: a gibibyte per host. Past the budget the least
+// recently used response goes first.
+//
 // The cache is shared by every client of the host, so it only ever holds
 // anonymous responses: a request tied to an identity (credentials, a cookie, a
 // gate that admitted it by identity) is neither answered from it nor stored.
 type respCache struct {
-	mu  sync.Mutex
-	m   map[string]*cacheEntry
-	ttl time.Duration
-	max int
+	mu       sync.Mutex
+	m        map[string]*cacheEntry
+	lru      *list.List // most recently used at the front; values are *cacheEntry
+	ttl      time.Duration
+	max      int // entries
+	maxBytes int
+	bytes    int // what the stored entries count for, by entrySize
 }
 
 type cacheEntry struct {
+	key     string
 	status  int
 	header  http.Header
 	body    []byte
 	expires time.Time
+	size    int
+	elem    *list.Element
 }
 
 const cacheMaxBodyBytes = 2 << 20 // 2 MiB: do not cache large bodies
+
+// cacheMaxBytesPerHost is the byte budget of one host's cache. A variable so
+// tests can use a small budget.
+var cacheMaxBytesPerHost = 64 << 20
+
+// cacheEntryOverhead stands for what an entry costs beyond its body, key and
+// header text: the structs, the map slot and the list element.
+const cacheEntryOverhead = 256
+
+// entrySize is what an entry counts for against the budget: the body, the key
+// and an estimate of the header.
+func (e *cacheEntry) entrySize() int {
+	n := cacheEntryOverhead + len(e.key) + len(e.body)
+	for k, vs := range e.header {
+		n += len(k)
+		for _, v := range vs {
+			n += len(v) + 4 // ": " and the line end
+		}
+	}
+	return n
+}
 
 func newRespCache(ttl time.Duration, max int) *respCache {
 	if max <= 0 {
 		max = 512
 	}
-	return &respCache{m: map[string]*cacheEntry{}, ttl: ttl, max: max}
+	return &respCache{m: map[string]*cacheEntry{}, lru: list.New(), ttl: ttl, max: max, maxBytes: cacheMaxBytesPerHost}
 }
 
 func (c *respCache) get(key string) *cacheEntry {
@@ -49,30 +82,40 @@ func (c *respCache) get(key string) *cacheEntry {
 		return nil
 	}
 	if time.Now().After(e.expires) {
-		delete(c.m, key)
+		c.remove(e)
 		return nil
 	}
+	c.lru.MoveToFront(e.elem)
 	return e
 }
 
+// put stores e under key, in place of an entry stored there before, and evicts
+// the least recently used entries until the cache is within its entry count
+// and its byte budget. An entry the whole budget cannot hold is not stored.
 func (c *respCache) put(key string, e *cacheEntry) {
+	e.key = key
+	e.size = e.entrySize()
+	if e.size > c.maxBytes {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.m) >= c.max {
-		now := time.Now()
-		for k, v := range c.m { // drop expired entries first
-			if now.After(v.expires) {
-				delete(c.m, k)
-			}
-		}
-		if len(c.m) >= c.max { // still full: drop an arbitrary entry
-			for k := range c.m {
-				delete(c.m, k)
-				break
-			}
-		}
+	if old, ok := c.m[key]; ok {
+		c.remove(old)
 	}
+	for c.lru.Len() > 0 && (len(c.m) >= c.max || c.bytes+e.size > c.maxBytes) {
+		c.remove(c.lru.Back().Value.(*cacheEntry))
+	}
+	e.elem = c.lru.PushFront(e)
 	c.m[key] = e
+	c.bytes += e.size
+}
+
+// remove forgets a stored entry. c.mu is held.
+func (c *respCache) remove(e *cacheEntry) {
+	delete(c.m, e.key)
+	c.lru.Remove(e.elem)
+	c.bytes -= e.size
 }
 
 // sharedCacheable reports whether r may be answered from, or stored in, the

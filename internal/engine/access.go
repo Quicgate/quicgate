@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log"
@@ -42,11 +43,20 @@ type compiledAccess struct {
 	restricted bool
 	// denyAll closes the list entirely. It stands in for a reference to an
 	// access list that no longer exists.
-	denyAll  bool
-	users    map[string]string // username -> bcrypt hash
+	denyAll bool
+	users   map[string]string // username -> bcrypt hash
+	// decoy is a real bcrypt hash, at the cost of the stored hashes, that the
+	// password of an unknown user is compared against, so that refusal takes
+	// as long as a wrong password for a known user (see dummyBcryptHash).
+	decoy    []byte
 	geo      *geoDB
 	ban      *banManager
 	warnings []string // problems found while compiling, surfaced to the operator
+	// credentialsOverrideDeny is the note, also in warnings, that under
+	// "satisfy any" valid credentials admit a client the deny rules refuse. It
+	// is left out of l4Warnings: a stream cannot take credentials, so there
+	// the deny rules hold.
+	credentialsOverrideDeny string
 	// vpnMatch decides whether a VPN subject names a peer. Nil (tests, lists
 	// compiled outside an engine) matches nobody.
 	vpnMatch func(store.VPNSubject, wg.Peer) bool
@@ -191,7 +201,73 @@ func compileAccess(a store.AccessList, geo *geoDB, ban *banManager, dns *dnsCach
 	for _, u := range a.Users {
 		c.users[u.Username] = u.Hash
 	}
+	if len(c.users) > 0 {
+		c.decoy = dummyBcryptHash(bcryptCostOf(c.users))
+	}
+	// Under "satisfy any" the credentials are the other way in, past every
+	// deny rule. That is by design (a deny-country rule with a password for
+	// travelling users), and easy to miss, so the operator is told.
+	if len(c.users) > 0 && c.satisfy == "any" {
+		for _, r := range a.Rules {
+			if r.Action != "allow" {
+				c.credentialsOverrideDeny = fmt.Sprintf("access list %q: with \"satisfy any\", a client its deny rules refuse is still admitted with valid credentials; use \"satisfy all\" if the deny rules must hold for everyone", a.Name)
+				c.warnings = append(c.warnings, c.credentialsOverrideDeny)
+				break
+			}
+		}
+	}
 	return c
+}
+
+// bcryptCostOf is the highest cost among the stored hashes that parse, so the
+// decoy comparison costs what a real one costs on this list, or the cost the
+// store hashes with when none parses. It is capped: a hash claiming cost 31
+// would take hours to compare anyway, and must not make a reload take as long.
+func bcryptCostOf(users map[string]string) int {
+	cost := 0
+	for _, h := range users {
+		if c, err := bcrypt.Cost([]byte(h)); err == nil && c > cost {
+			cost = c
+		}
+	}
+	switch {
+	case cost < bcrypt.MinCost:
+		return bcrypt.DefaultCost
+	case cost > maxDecoyCost:
+		return maxDecoyCost
+	}
+	return cost
+}
+
+const maxDecoyCost = bcrypt.DefaultCost + 4
+
+var (
+	decoyMu     sync.Mutex
+	decoyHashes = map[int][]byte{}
+)
+
+// dummyBcryptHash returns a bcrypt hash at the given cost of a secret nobody
+// holds, made once per process and cost. Comparing an unknown user's password
+// against it takes as long as comparing a known user's, so the response time
+// does not tell a probe which usernames exist. Its outcome is never looked at,
+// so what the secret is does not matter; only the cost does. (The 41-byte
+// stand-in used before was refused by bcrypt in microseconds, ErrHashTooShort,
+// against some 70 ms for a real comparison.)
+func dummyBcryptHash(cost int) []byte {
+	decoyMu.Lock()
+	defer decoyMu.Unlock()
+	if h, ok := decoyHashes[cost]; ok {
+		return h
+	}
+	secret := make([]byte, 32)
+	_, _ = rand.Read(secret) // never fails on this Go; and any value serves
+	h, err := bcrypt.GenerateFromPassword(secret, cost)
+	if err != nil {
+		// Only an out-of-range cost fails, which bcryptCostOf rules out.
+		h, _ = bcrypt.GenerateFromPassword(secret, bcrypt.DefaultCost)
+	}
+	decoyHashes[cost] = h
+	return h
 }
 
 // ipAllowed evaluates the ordered rules for the given method; first match
@@ -231,7 +307,12 @@ func (c *compiledAccess) l4Allowed(remoteAddr string) bool {
 // l4Warnings explains, for the stream status, why a list may admit fewer
 // connections at L4 than the same list admits HTTP requests.
 func (c *compiledAccess) l4Warnings() []string {
-	out := append([]string(nil), c.warnings...)
+	out := make([]string, 0, len(c.warnings)+2)
+	for _, w := range c.warnings {
+		if w != c.credentialsOverrideDeny {
+			out = append(out, w)
+		}
+	}
 	if len(c.users) > 0 && (c.satisfy != "any" || !c.restricted) {
 		out = append(out, fmt.Sprintf("access list %q requires basic-auth credentials, which a stream cannot check, so it admits no connection", c.name))
 	}
@@ -322,8 +403,14 @@ func (c *compiledAccess) authOK(r *http.Request) bool {
 	}
 	hash, exists := c.users[user]
 	if !exists {
-		// Constant-ish cost for unknown users so probing is not cheap.
-		_ = bcrypt.CompareHashAndPassword([]byte("$2a$10$invalidinvalidinvalidinvalidinvali"), []byte(pass))
+		// An unknown user costs a real comparison, like a wrong password for
+		// a known one, so the response time does not reveal which usernames
+		// exist. The result is irrelevant: the user is unknown.
+		decoy := c.decoy
+		if decoy == nil { // a list compiled without compileAccess
+			decoy = dummyBcryptHash(bcrypt.DefaultCost)
+		}
+		_ = bcrypt.CompareHashAndPassword(decoy, []byte(pass))
 		return false
 	}
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pass)) == nil
@@ -366,9 +453,9 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			if c.ban != nil && !viaVPN(r) {
-				c.ban.recordFailure(r.RemoteAddr, routeName(r.Host), fmt.Sprintf("CORS preflight from an address access list %q does not allow", c.name))
-			}
+			// A refused preflight never counts toward a ban: the browser sends
+			// it for whatever page names this host, and the page's author is
+			// not the visitor whose address would be banned.
 			markBlocked(w, blockAccessList)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
@@ -383,18 +470,22 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 			// The first 401 a client without credentials gets is a login prompt
 			// (git and Docker always ask that way, and so does a browser), not a
 			// refusal, as long as credentials could still admit it. It is not
-			// counted as blocked, and it does not count toward a ban: a client
-			// that then sends wrong credentials does, and so does an address the
-			// list refuses whatever it sends.
+			// counted as blocked, and it does not count toward a ban.
 			challenge := len(c.users) > 0 && r.Header.Get("Authorization") == "" && (ipOK || (c.satisfy == "any" && c.restricted))
 			if !challenge {
-				// A refusal inside the tunnel is logged with its peer and never
-				// bans: a tunnel address is not a stranger, and the remedy for
-				// a misbehaving device is to revoke it (S18).
-				if c.ban != nil && !viaVPN(r) {
+				markBlocked(w, blockAccessList)
+				// Only a wrong password counts toward a ban. A refusal by
+				// address alone says nothing about the client's intent: any
+				// web page can make a visitor's browser fetch an image from a
+				// host the visitor's address is not allowed on, and five such
+				// images banned the visitor, and everyone behind the same NAT,
+				// from every host for an hour. A refusal inside the tunnel is
+				// logged with its peer and never bans either: a tunnel address
+				// is not a stranger, and the remedy for a misbehaving device is
+				// to revoke it (S18).
+				if _, _, hasBasic := r.BasicAuth(); hasBasic && len(c.users) > 0 && !authOK && c.ban != nil && !viaVPN(r) {
 					c.ban.recordFailure(r.RemoteAddr, routeName(r.Host), c.refusalReason(r, ipOK, authOK))
 				}
-				markBlocked(w, blockAccessList)
 			}
 			if len(c.users) > 0 && !authOK {
 				w.Header().Set("WWW-Authenticate", `Basic realm="`+c.name+`"`)
@@ -406,14 +497,17 @@ func (c *compiledAccess) wrap(next http.Handler) http.Handler {
 		}
 		if len(c.users) > 0 && authOK {
 			markIdentified(r)
-		}
-		// Strip the credential only when this list actually consumed it for
-		// basic-auth and the user opted not to pass it on (NPM's "Pass Auth
-		// to Host"). A pure IP/CIDR list must never eat the header: backends
-		// like Vaultwarden and gitea authenticate with Authorization: Bearer,
-		// and deleting it here silently breaks their logins.
-		if !c.passAuth && len(c.users) > 0 {
-			r.Header.Del("Authorization")
+			// Strip the credential only when this list consumed it: a Basic
+			// credential that named one of its users, on a list that does not
+			// pass it on (NPM's "Pass Auth to Host"). A request admitted by its
+			// address keeps what it carries, whatever the scheme: backends like
+			// Vaultwarden and gitea authenticate with Authorization: Bearer,
+			// and a "LAN or password" list that ate the header broke their
+			// logins for every LAN client. A pure address list never checks a
+			// credential and never strips one either.
+			if !c.passAuth {
+				r.Header.Del("Authorization")
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
