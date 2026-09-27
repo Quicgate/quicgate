@@ -110,12 +110,22 @@ function showSection(page, section) {
   for (const sec of $(`page-${page}`).querySelectorAll('.setsec')) sec.hidden = sec.dataset.section !== want;
 }
 
-function switchPage(name, section) {
+// setRoute puts the page in the address bar. A page or section the person
+// opens is a history entry of its own, so the browser's Back button returns to
+// the page before it instead of leaving quicgate; restoring a route (after
+// signing in, or on Back and Forward themselves) replaces the entry it is on.
+function setRoute(hash, replace) {
+  if (location.hash === hash) return;
+  if (replace) history.replaceState(null, '', hash);
+  else history.pushState(null, '', hash);
+}
+
+function switchPage(name, section, { replace = false } = {}) {
   if (!pageLoaders[name]) name = 'overview';
   for (const b of $('pagenav').children) b.classList.toggle('is-active', b.dataset.page === name);
   for (const p of Object.keys(pageLoaders)) $(`page-${p}`).hidden = p !== name;
   if (sectionNavs[name]) showSection(name, section);
-  history.replaceState(null, '', `#/${name}${sectionNavs[name] ? '/' + currentSection[name] : ''}`);
+  setRoute(`#/${name}${sectionNavs[name] ? '/' + currentSection[name] : ''}`, replace);
   window.scrollTo(0, 0);
   pageLoaders[name]();
 }
@@ -125,9 +135,17 @@ for (const [page, navId] of Object.entries(sectionNavs)) {
     const b = e.target.closest('[data-section]');
     if (!b) return;
     showSection(page, b.dataset.section);
-    history.replaceState(null, '', `#/${page}/${b.dataset.section}`);
+    setRoute(`#/${page}/${b.dataset.section}`);
   });
 }
+
+// Back and Forward (and an address typed by hand) show the page the address
+// names. Before signing in there is no page to show.
+window.addEventListener('popstate', () => {
+  if ($('view-app').hidden) return;
+  const r = routeFromHash();
+  switchPage(r.page, r.section, { replace: true });
+});
 $('pagenav').addEventListener('click', (e) => {
   if (e.target.dataset.page) switchPage(e.target.dataset.page);
 });
@@ -305,7 +323,7 @@ function afterLogin(me) {
   } else {
     show('view-app');
     const r = routeFromHash();
-    switchPage(r.page, r.section);
+    switchPage(r.page, r.section, { replace: true });
   }
 }
 

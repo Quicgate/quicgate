@@ -4,6 +4,15 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.18.1] - 2026-09-27
+
+### Fixed
+- **The browser's Back button goes to the previous page of the admin UI.** Opening a page or a
+  settings section replaced the address instead of adding a history entry, so Back left quicgate
+  for whatever site was open before it. Every page and section you open is now a step in the
+  browser's history: Back and Forward move between them, and opening the page you are on adds
+  nothing.
+
 ## [1.18.0] - 2026-09-27
 
 Fixes from the September 2026 security, technology and functional scan (the record is in
