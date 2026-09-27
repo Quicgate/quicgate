@@ -52,6 +52,11 @@ type compiledAccess struct {
 	geo      *geoDB
 	ban      *banManager
 	warnings []string // problems found while compiling, surfaced to the operator
+	// credentialsOverrideDeny is the note, also in warnings, that under
+	// "satisfy any" valid credentials admit a client the deny rules refuse. It
+	// is left out of l4Warnings: a stream cannot take credentials, so there
+	// the deny rules hold.
+	credentialsOverrideDeny string
 	// vpnMatch decides whether a VPN subject names a peer. Nil (tests, lists
 	// compiled outside an engine) matches nobody.
 	vpnMatch func(store.VPNSubject, wg.Peer) bool
@@ -199,6 +204,18 @@ func compileAccess(a store.AccessList, geo *geoDB, ban *banManager, dns *dnsCach
 	if len(c.users) > 0 {
 		c.decoy = dummyBcryptHash(bcryptCostOf(c.users))
 	}
+	// Under "satisfy any" the credentials are the other way in, past every
+	// deny rule. That is by design (a deny-country rule with a password for
+	// travelling users), and easy to miss, so the operator is told.
+	if len(c.users) > 0 && c.satisfy == "any" {
+		for _, r := range a.Rules {
+			if r.Action != "allow" {
+				c.credentialsOverrideDeny = fmt.Sprintf("access list %q: with \"satisfy any\", a client its deny rules refuse is still admitted with valid credentials; use \"satisfy all\" if the deny rules must hold for everyone", a.Name)
+				c.warnings = append(c.warnings, c.credentialsOverrideDeny)
+				break
+			}
+		}
+	}
 	return c
 }
 
@@ -290,7 +307,12 @@ func (c *compiledAccess) l4Allowed(remoteAddr string) bool {
 // l4Warnings explains, for the stream status, why a list may admit fewer
 // connections at L4 than the same list admits HTTP requests.
 func (c *compiledAccess) l4Warnings() []string {
-	out := append([]string(nil), c.warnings...)
+	out := make([]string, 0, len(c.warnings)+2)
+	for _, w := range c.warnings {
+		if w != c.credentialsOverrideDeny {
+			out = append(out, w)
+		}
+	}
 	if len(c.users) > 0 && (c.satisfy != "any" || !c.restricted) {
 		out = append(out, fmt.Sprintf("access list %q requires basic-auth credentials, which a stream cannot check, so it admits no connection", c.name))
 	}
