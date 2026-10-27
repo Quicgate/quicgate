@@ -4,6 +4,19 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.18.2] - 2026-10-27
+
+### Security
+- **Built with Go 1.27.3.** Two Go standard library vulnerabilities that quicgate's own code
+  reaches are fixed by it: GO-2026-6617 in HTTP/2 (every HTTPS listener serves HTTP/2, and the
+  WireGuard site transports use it towards upstreams; also fixed in `golang.org/x/net` 0.60.0) and
+  GO-2026-6809 in `crypto/x509` certificate verification (hosts that require client certificates).
+  Images up to 1.18.1 were built with Go 1.27.1 and carry both.
+
+### Changed
+- Dependencies: quic-go 0.64.1, golang.org/x/net 0.60.0, golang.org/x/crypto 0.58.0,
+  certmagic 0.25.6, modernc.org/sqlite 1.60.1, go-ldap 3.4.15, klauspost/compress 1.20.3.
+
 ## [1.18.1] - 2026-09-27
 
 ### Fixed
