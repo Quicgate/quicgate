@@ -16,6 +16,7 @@ All notable changes to quicgate are documented here. The format follows
 ### Changed
 - Dependencies: quic-go 0.64.1, golang.org/x/net 0.60.0, golang.org/x/crypto 0.58.0,
   certmagic 0.25.6, modernc.org/sqlite 1.60.1, go-ldap 3.4.15, klauspost/compress 1.20.3.
+- CI pins staticcheck v0.8.2; v0.8.1 cannot read packages compiled by Go 1.27.3.
 
 ## [1.18.1] - 2026-09-27
 

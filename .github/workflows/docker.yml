@@ -41,7 +41,7 @@ jobs:
       # red, and CI runs a known tool rather than whatever is latest.
       - name: staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
           staticcheck ./...
       - run: go test -race ./...
 
