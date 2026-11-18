@@ -124,6 +124,10 @@ $('add-form').addEventListener('submit', async (e) => {
       publicKey = kp.publicKey;
     }
     const d = await api('POST', '/devices', { name: $('d-name').value.trim(), publicKey });
+    // The answer carries the routes and server of this moment; what this page
+    // loaded may predate a policy change, and AllowedIPs would miss it.
+    if (d.routes) me.routes = d.routes;
+    if (d.server) me.server = d.server;
     const s = me.server || {};
     const allowed = [s.address + '/32'].concat((me.routes || []).map((r) => r.cidr));
     $('config').value = [

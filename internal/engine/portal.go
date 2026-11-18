@@ -427,7 +427,16 @@ func (e *Engine) portalHandler(h store.Host) http.Handler {
 		}
 		e.refreshVPN(r.Context())
 		d.PresharedKey = psk // this once
-		writePortalJSON(w, http.StatusCreated, d)
+		// The page builds the configuration from this answer, so it carries
+		// the routes and server of this moment. The page's own copy is from
+		// when it was opened: a policy added since would be left out of
+		// AllowedIPs, and the device could never reach that part of the LAN.
+		view := e.portalView(s)
+		writePortalJSON(w, http.StatusCreated, struct {
+			store.WGDevice
+			Routes any `json:"routes"`
+			Server any `json:"server,omitempty"`
+		}{d, view["routes"], view["server"]})
 	}))
 	mux.HandleFunc("DELETE /.qg/vpn/api/devices/{id}", api(true, func(w http.ResponseWriter, r *http.Request, s portalSession) {
 		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)

@@ -861,3 +861,50 @@ func TestPortalThrottlesLoginsAndEnrolments(t *testing.T) {
 		t.Fatalf("a login start from another address: %d, want 302", rr.Code)
 	}
 }
+
+// A policy added while the portal page is open must still reach the
+// configuration of a device enrolled from that page: the page builds
+// AllowedIPs from the enrolment answer, so that answer carries the routes and
+// the server of the moment, not those of when the page was loaded.
+func TestEnrolmentAnswerCarriesCurrentRoutes(t *testing.T) {
+	f := newPortalFixture(t)
+	cookie, cb := f.login(t)
+	if cookie == "" {
+		t.Fatalf("login refused: %d %s", cb.Code, cb.Body.String())
+	}
+	if routes, _ := f.me(t, cookie)["routes"].([]any); len(routes) != 0 {
+		t.Fatalf("routes before any policy = %v, want none", routes)
+	}
+	// The page is open now. Then LAN access and a policy for this user arrive.
+	setSettings(t, f.st, map[string]string{"wg_lan_access": "1"})
+	p := &store.VPNPolicy{Name: "lan", Subject: store.VPNSubject{Kind: "group", Provider: f.provider, Group: "vpn-users"},
+		Routes: []store.VPNRoute{{CIDR: "192.168.178.0/24", Proto: "any"}}}
+	if err := f.st.SaveVPNPolicy(p); err != nil {
+		t.Fatal(err)
+	}
+	rr := f.do(http.MethodPost, "/.qg/vpn/api/devices", cookie, map[string]string{"name": "laptop", "publicKey": randomWGKey(t)}, nil)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("enrol: %d %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		store.WGDevice
+		Routes []store.VPNRoute `json:"routes"`
+		Server struct {
+			PublicKey string `json:"publicKey"`
+			Endpoint  string `json:"endpoint"`
+			Address   string `json:"address"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.PresharedKey == "" || got.Address == "" || got.Kind != "sso" {
+		t.Fatalf("the device fields are gone from the answer: %s", rr.Body.String())
+	}
+	if len(got.Routes) != 1 || got.Routes[0].CIDR != "192.168.178.0/24" {
+		t.Fatalf("routes in the enrolment answer = %+v, want the policy added after the page was opened", got.Routes)
+	}
+	if got.Server.PublicKey == "" || got.Server.Endpoint != "vpn.example.com:51820" || got.Server.Address == "" {
+		t.Fatalf("server in the enrolment answer = %+v", got.Server)
+	}
+}
