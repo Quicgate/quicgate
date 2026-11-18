@@ -2,7 +2,7 @@ module quicgate
 
 go 1.26.3
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/caddyserver/certmagic v0.25.6
