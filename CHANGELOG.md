@@ -4,6 +4,16 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.18.3] - 2026-11-18
+
+### Fixed
+- **A device added in the VPN portal gets the LAN routes of that moment.** The portal page read
+  your routes once, when it opened, and built the new device's `AllowedIPs` from that copy. A
+  policy added while the page was open was left out, so the device could never reach that part of
+  the LAN although the portal said it could. Adding a device now answers with the routes and
+  server of that moment and the page uses them. Devices made before a policy change keep their old
+  `AllowedIPs`: edit the configuration in the WireGuard app, or remove the device and add it again.
+
 ## [1.18.2] - 2026-10-27
 
 ### Security
