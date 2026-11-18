@@ -4,6 +4,14 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.18.4] - 2026-11-18
+
+### Security
+- **Built with Go 1.27.4.** It fixes GO-2026-6859 in the standard library's `net/http`, which
+  quicgate's own code reaches. The vulnerability was published after 1.18.2 and stopped the
+  1.18.3 build at the vulnerability check, so **1.18.3 was tagged but no image was published**:
+  this release carries its fix as well.
+
 ## [1.18.3] - 2026-11-18
 
 ### Fixed
