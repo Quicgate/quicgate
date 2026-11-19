@@ -5,11 +5,11 @@
   </picture>
 </p>
 
-<h3 align="center">The reverse proxy manager you would actually enjoy running.</h3>
+<h3 align="center">A reverse proxy you manage from a web page, in one small program.</h3>
 
 <p align="center">
-  Point-and-click hosts, automatic HTTPS, HTTP/3, single sign-on and live traffic charts.<br>
-  <b>One Go binary. One 34 MB container. No nginx, no Traefik, no sidecars.</b>
+  Add a host, get a certificate, decide who may come in, and watch the traffic.<br>
+  <b>One Go binary in one 25 MB container. No nginx or Traefik underneath, nothing to run beside it.</b>
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
   <a href="https://github.com/Quicgate/quicgate/actions/workflows/docker.yml"><img src="https://img.shields.io/github/actions/workflow/status/Quicgate/quicgate/docker.yml?branch=master&label=build" alt="build status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-a3e635" alt="MIT license"></a>
   <img src="https://img.shields.io/github/go-mod/go-version/Quicgate/quicgate?logo=go&color=00ADD8" alt="Go version">
-  <img src="https://img.shields.io/badge/image-~34%20MB%2C%20FROM%20scratch-a3e635" alt="image size">
+  <img src="https://img.shields.io/badge/image-~25%20MB%2C%20FROM%20scratch-a3e635" alt="image size">
   <a href="https://github.com/Quicgate/quicgate/stargazers"><img src="https://img.shields.io/github/stars/Quicgate/quicgate?style=flat&color=a3e635" alt="GitHub stars"></a>
 </p>
 
@@ -26,6 +26,7 @@
   <a href="#a-look-around">Screenshots</a> &middot;
   <a href="#what-you-get">Features</a> &middot;
   <a href="#how-it-compares">Comparison</a> &middot;
+  <a href="#what-to-know-before-you-rely-on-it">Caveats</a> &middot;
   <a href="#documentation">Docs</a>
 </p>
 
@@ -36,34 +37,43 @@
   </picture>
 </p>
 
-> **Live, and under active development.** quicgate runs a real homelab's whole ingress every
-> day, and it gets new releases most weeks. We would love to hear how it works for you, good or
-> bad: what you like, what broke, what is confusing, what is missing.
-> [Open an issue](https://github.com/Quicgate/quicgate/issues), it does not have to be a bug. See the [roadmap](ROADMAP.md) for
-> what is done and what comes next.
+quicgate puts your self-hosted services on the internet, or keeps them off it. You add a host
+in the web UI: a domain name and the address of the service behind it. quicgate fetches the
+certificate, serves the site over HTTP/1.1, HTTP/2 and HTTP/3, and lets you say who is allowed
+in. If you have used Nginx Proxy Manager, the workflow will feel familiar. The difference is
+underneath: quicgate is its own proxy, written in Go, so there is no nginx to reload and no
+generated config file to go wrong.
+
+> **It is young, and it is in daily use.** quicgate has carried all the traffic of my own
+> homelab since July 2026, and a new release comes out most weeks. If you try it, I would like
+> to hear how it went: what worked, what broke, what confused you, what you missed.
+> [Open an issue](https://github.com/Quicgate/quicgate/issues), it does not have to be a bug.
+> Read [what to know before you rely on it](#what-to-know-before-you-rely-on-it) first.
 
 ## Why quicgate
 
-Most homelabs end up with the same pile: a proxy, something to manage it, something for
-certificates, something for login, fail2ban, an exporter and a log viewer. quicgate is that pile as
-one small program with a UI you can hand to someone else.
+Most homelabs grow the same pile of tools: a proxy, a UI to manage it, something for
+certificates, something for logins, fail2ban, a metrics exporter and a log viewer. quicgate is
+that pile as one program, with a UI you can hand to someone else.
 
-- **Add a host in seconds.** Domain, upstream, save. The certificate issues itself and the route
-  is live instantly: no reloads, no restarts, no config files.
-- **Single sign-on without a second service.** quicgate runs the OpenID Connect login itself
-  against Keycloak, Entra ID, Authentik or any compliant provider, per host or even per URL.
-- **HTTP/3 on every host by default.** A native Go data plane on `net/http` and quic-go, not a
-  wrapper around someone else's proxy.
-- **See what is happening.** A week of traffic charts, open ports with their throughput, busiest
-  hosts, visitor countries, and who got refused and why.
-- **Nothing to break with a typo.** Every option is a typed, validated field. There is no free-text
-  config box, so there is no way to take the proxy down with a missing semicolon.
-- **Small enough to trust.** One static binary in a `FROM scratch` image, signed build provenance,
-  a vulnerability gate in CI, and guides that work offline inside the binary.
+- **A new host takes a few seconds.** Type the domain and where the service lives, then save.
+  The certificate is requested for you and the host answers right away. Nothing restarts.
+- **Logins without a second service.** quicgate can send visitors to your identity provider
+  (Keycloak, Entra ID, Authentik, anything that speaks OpenID Connect) before they reach a
+  service. You choose this per host, or per URL on a host.
+- **HTTP/3 on every host.** It is on from the start, and you can turn it off per host.
+- **You can see what is going on.** A week of traffic charts, every open port with its
+  throughput, the busiest hosts, where visitors come from, and who was refused and why.
+- **A typo cannot take the proxy down.** Every option is a field that is checked when you save.
+  There is no box for raw config, on purpose. If quicgate cannot do something through a field,
+  it cannot do it, and that is a fair reason to pick another tool.
+- **Small enough to check.** One static binary in an otherwise empty image. Each release is
+  scanned for known vulnerabilities and signed, and you can verify the signature yourself.
 
-> I loved Nginx Proxy Manager's workflow but not its internals, and Pangolin's engine but not its
-> moving parts. quicgate is the NPM experience rebuilt on a modern engine. It has been the only
-> ingress of my own homelab (about 45 hosts, mail and media streams) since July 2026.
+> I liked the way Nginx Proxy Manager works but not what is inside it, and I liked Pangolin's
+> engine but not how many parts it has. So quicgate keeps the click-and-save workflow and puts
+> it on a proxy written for the job, in one piece. It is the only way into my homelab, for
+> about 45 hosts plus mail and media streams.
 
 ## Quick start
 
@@ -71,9 +81,9 @@ one small program with a UI you can hand to someone else.
 # docker-compose.yml
 services:
   quicgate:
-    image: ghcr.io/quicgate/quicgate:latest
+    image: ghcr.io/quicgate/quicgate:1
     restart: unless-stopped
-    network_mode: host      # engine owns 80/443 (tcp+udp), admin UI on 81
+    network_mode: host      # quicgate listens on 80 and 443 (TCP and UDP); the admin UI is on 81
     environment:
       - QG_ACME_EMAIL=you@example.com
     volumes:
@@ -84,238 +94,290 @@ services:
 docker compose up -d
 ```
 
-Open `http://<host>:81`, sign in with `admin@example.com` / `changeme` (you are made to change the
-password right away, and can give the account your own address under Account & security), add your first proxy host, and watch the certificate arrive.
+Open `http://<host>:81` and sign in with `admin@example.com` and the password `changeme`. You
+have to pick a new password straight away, and you can change the sign-in address to your own
+under Account & security. Then add your first proxy host and watch the certificate arrive.
 
 > [!WARNING]
-> Never expose port 81 to the internet. Put the admin UI behind quicgate itself with an access
-> list, a VPN or a firewall rule, like any other private service.
+> Do not open port 81 to the internet. Reach the admin UI over your own network or a VPN, or
+> put it behind quicgate itself with an access list, like any other private service.
 
-Prefer bridge networking, or want router port forwards managed for you over UPnP? See the comments
-in [`docker-compose.yml`](docker-compose.yml) and the [getting started guide](web/docs/getting-started.md).
+The `:1` tag follows the 1.x releases: you get fixes, and a future 2.0 never arrives by itself.
+
+Would you rather use bridge networking, or have quicgate open the ports on your router over
+UPnP? The comments in [`docker-compose.yml`](docker-compose.yml) and the
+[getting started guide](web/docs/getting-started.md) cover both.
 
 ## A look around
 
 | | |
 |---|---|
 | [![Proxy hosts](brand/screenshots/hosts.png)](brand/screenshots/hosts.png) | [![Editing a host](brand/screenshots/host-edit.png)](brand/screenshots/host-edit.png) |
-| **Proxy hosts.** Everything on one screen: upstream, TLS, which access list guards it, and a per-host log. | **Typed options, not config snippets.** TLS, upstream pools, header rules and security each get their own tab. |
+| **Proxy hosts.** One screen shows where each host points, its certificate, which access list guards it, and its own log. | **Editing a host.** Certificates, upstreams, header rules and security each have a tab with plain fields. |
 | [![Access control](brand/screenshots/access.png)](brand/screenshots/access.png) | [![Open ports and traffic](brand/screenshots/ports.png)](brand/screenshots/ports.png) |
-| **Access control.** Access lists, identity providers, and the addresses auto-ban is refusing, with the reason. | **Open ports.** Every listener and stream with its traffic, plus busiest hosts, countries and HTTP versions. |
+| **Access control.** Access lists, identity providers, and the addresses that are banned right now, each with the reason. | **Open ports.** Every port quicgate listens on with its traffic, plus the busiest hosts, countries and HTTP versions. |
 
-## It replaces the whole stack
+## What it replaces
 
 | Instead of | quicgate gives you |
 |---|---|
-| Nginx Proxy Manager, nginx | proxy hosts, certificates, redirects, static sites, a UI |
-| Traefik, Caddy | routing, ACME, Docker label discovery, HTTP/3 |
-| Authelia, oauth2-proxy, Pomerium | OIDC login, group policy, `Remote-User` passed upstream |
-| fail2ban, an exporter, a log viewer | auto-ban, Prometheus `/metrics`, JSON access logs with a viewer |
+| Nginx Proxy Manager, nginx | proxy hosts, certificates, redirects, static sites, and the UI |
+| Traefik, Caddy | routing, automatic certificates, hosts from Docker labels, HTTP/3 |
+| Authelia, oauth2-proxy, Pomerium | login through your identity provider, rules by group, the user's name passed to the app |
+| fail2ban, an exporter, a log viewer | automatic bans, Prometheus metrics, access logs you can read in the UI |
 
-## Single sign-on, without a sidecar
+## Logins for your services
 
-Most proxies hand SSO to a second service. quicgate runs the OpenID Connect login itself: PKCE and a
-nonce, ID-token signature verification, and a signed session cookie bound to the host **and** to the
-provider that issued it.
+With most proxies, single sign-on means running a second service next to the proxy. quicgate
+does the OpenID Connect login itself.
 
-Define an identity provider once, then choose per host who gets in: by email, by email domain or by
-group. Optionally pass the identity upstream as `Remote-User` / `Remote-Email` / `Remote-Groups`, so
-apps with proxy-auth support log the user straight in. Inbound copies of those headers are always
-stripped, so a client can never forge them.
+You set up an identity provider once. After that you choose per host who gets in: by email
+address, by email domain or by group. If the app behind the host understands proxy logins,
+quicgate can pass the user on as `Remote-User`, `Remote-Email` and `Remote-Groups`, so people
+are signed in to the app as well. A visitor cannot fake those headers: quicgate removes any
+copy that comes in from outside.
 
-Authentication can differ **per URL** on the same host, which is what real apps need:
+Rules can differ per URL on the same host. Real apps need that:
 
-| Path | Gate |
+| Path | Who gets in |
 |---|---|
-| `/ValidationService.asmx` | public: a licensing callback that cannot log in |
-| `/webhooks/` | public, `POST` only |
-| `/admin/` | OIDC, group `platform-admins` |
-| everything else | OIDC, any employee |
+| `/ValidationService.asmx` | everyone: a licensing callback that cannot log in |
+| `/webhooks/` | everyone, `POST` only |
+| `/admin/` | people who logged in and are in the group `platform-admins` |
+| everything else | anyone who logged in |
 
-Different paths can even use **different identity providers**: staff on the company IdP, a partner
-endpoint on theirs. Already running Authelia or Authentik? Point a host at its verify endpoint with
-forward-auth instead. Details in the [Access control & SSO guide](web/docs/sso.md).
+Different paths can use different identity providers, for example staff on the company's and a
+partner on their own. If you already run Authelia or Authentik, you can keep it: point a host
+at its check address and quicgate asks it about every request (forward auth). The
+[access control and SSO guide](web/docs/sso.md) has the details.
 
 ## What you get
 
 <details open>
-<summary><b>Proxying</b></summary>
+<summary><b>Hosts</b></summary>
 
-Proxy, redirect (301/302/307/308), 404 and static hosts &middot; wildcard domains &middot;
-load-balanced pools with health checks and sticky sessions &middot; custom locations &middot; path
-rewrites (strip or add a prefix, RE2) &middot; maintenance mode &middot; response caching &middot; gzip
+- Four kinds of host: proxy to a service, redirect, a plain 404, or a folder of static files
+- Wildcard domains
+- Several upstreams behind one host, with health checks and sticky sessions
+- Custom locations: send one path to a different upstream
+- Path rewrites: strip a prefix, add one, or rewrite with a regular expression
+- Maintenance mode, response caching and gzip
+- Header rules for requests and responses
 </details>
 
 <details open>
-<summary><b>TLS and HTTP/3</b></summary>
+<summary><b>Certificates and HTTP/3</b></summary>
 
-Automatic Let's Encrypt (HTTP-01), DNS-01 wildcards, custom ACME CAs (ZeroSSL, step-ca) &middot;
-upload your own certificates or generate self-signed ones &middot; mTLS client certificates &middot;
-HSTS &middot; HTTP/1.1, HTTP/2 and **HTTP/3 (QUIC)** on every host, with a per-host toggle
+- Automatic certificates from Let's Encrypt, or from another ACME authority such as ZeroSSL or
+  your own step-ca
+- Wildcard certificates through a DNS challenge (DNS-01)
+- Your own certificates: upload them, or let quicgate make a self-signed one
+- Client certificates (mTLS) for hosts that should only answer known devices
+- HSTS
+- HTTP/1.1, HTTP/2 and HTTP/3 on every host
 </details>
 
 <details open>
-<summary><b>Access control</b></summary>
+<summary><b>Who gets in</b></summary>
 
-Ordered access lists by IP/CIDR, dynamic-DNS hostname or GeoIP country &middot; basic auth &middot;
-rules scoped to HTTP methods &middot; built-in OIDC SSO and forward-auth &middot; per-path rules
-&middot; rate limiting &middot; exploit and bad-bot filters &middot; fail2ban-style auto-ban with a
-never-ban list &middot; real client IP behind Cloudflare or another load balancer
+- Access lists with ordered rules: by IP address or range, by a dynamic DNS name, or by country
+- Rules that apply to some HTTP methods only, for example anyone may `GET` but only the office
+  may `POST`
+- Basic auth, login through your identity provider, or forward auth
+- Different rules per URL on one host
+- Rate limits, and filters for common exploit probes and bad bots
+- Automatic bans for addresses that keep misbehaving, with a never-ban list so you cannot lock
+  yourself out
+- The real visitor address when quicgate sits behind Cloudflare or another load balancer
 </details>
 
 <details>
-<summary><b>Streams (TCP/UDP)</b></summary>
+<summary><b>TCP and UDP streams</b></summary>
 
-L4 forwards with source allowlists &middot; PROXY protocol v1/v2 &middot; TLS termination &middot;
-SNI passthrough routing &middot; port ranges &middot; router port forwards managed over **UPnP**,
-self-healing after a router reboot &middot; targets on a remote network through a WireGuard site
+- Forward any TCP or UDP port, or a range of ports, to a service
+- Limit a stream to the addresses on an access list
+- PROXY protocol v1 and v2, in and out
+- End TLS on a stream, or route by server name without opening the connection
+- Port forwards on your router kept in place over UPnP, also after the router restarts
 </details>
 
 <details>
-<summary><b>WireGuard sites</b></summary>
+<summary><b>WireGuard: other networks, and a VPN for people</b></summary>
 
-Reach upstreams on networks quicgate is not on, through an ordinary WireGuard peer at the other
-end: a router, a small Linux box, a VPS. Also the other way round, with quicgate on a VPS and the
-home network calling in. Runs inside quicgate, unprivileged &middot; keys made in your browser,
-never stored &middot; an upstream behind a site is never tried on the local network &middot;
-handshake, traffic and connections per site
-</details>
+WireGuard is built in. It runs inside quicgate and needs no extra privileges, no network
+device and no change to the machine's routing. It does three separate things, and each is off
+until you switch it on.
 
-<details>
-<summary><b>VPN for people</b> (new in 1.17)</summary>
-
-Hosts that exist inside the WireGuard tunnel only, invisible from outside &middot; devices with
-keys made in the browser &middot; access-list rules about who is on the VPN &middot; a portal where
-people log in with single sign-on and add their own devices, re-checked with the identity provider
-every few minutes &middot; experimental LAN access with per-group policies, a flow log, and no way
-to reach quicgate's own admin port through it
+- **Sites.** Reach services on a network quicgate is not on, through an ordinary WireGuard
+  peer at the other end: a router, a small Linux box, a VPS. It works the other way round too,
+  with quicgate on a VPS and your home network calling in.
+- **Devices and the portal.** Hosts can exist inside the tunnel only, so from outside they look
+  like they are not there. People sign in to a portal with single sign-on and add their own
+  phone or laptop. quicgate checks with the identity provider every few minutes whether they
+  are still allowed.
+- **LAN access (experimental).** People who signed in can reach parts of your home network,
+  with a policy per group and a log of every connection. The admin UI can never be reached this
+  way.
 </details>
 
 <details>
 <summary><b>Docker</b></summary>
 
-Opt a container in with `quicgate.enable=true` and its host (and streams) are derived from labels:
-Traefik's provider idea without the router/service/middleware soup. Multi-host, and every derived
-route shows why it is or is not routing.
+- Put `quicgate.enable=true` on a container and quicgate makes the host, and any streams, from
+  its labels
+- Flat labels: a domain, a port, the options you want
+- More than one Docker machine
+- Every host made from labels shows why it is, or is not, being served
+- A host you made by hand always wins over one from a label
 </details>
 
 <details>
-<summary><b>Dual-stack</b></summary>
+<summary><b>IPv6</b></summary>
 
-IPv6 clients, IPv6-literal and AAAA upstreams, IPv6 CIDRs in access lists and trusted-proxy lists,
-GeoIP and rate limits on v6 alike.
+- Visitors and upstreams on IPv6
+- IPv6 ranges in access lists and trusted proxy lists
+- Country rules and rate limits work the same on IPv6
 </details>
 
 <details>
-<summary><b>Operations</b></summary>
+<summary><b>Running it</b></summary>
 
-Overview with a week of traffic charts &middot; JSON access logs with a built-in viewer &middot;
-Prometheus `/metrics` &middot; one-click backup and restore &middot; declarative JSON import &middot;
-certificate-renewal alerts (ntfy, Gotify) &middot; TOTP 2FA &middot; API tokens &middot; OIDC or
-LDAP admin login &middot; offline guides in the UI &middot; light and dark, and a choice of themes
+- An overview page with a week of traffic charts
+- Access logs with a viewer in the UI, and Prometheus metrics at `/metrics`
+- Backup and restore in one click
+- Import a whole setup from one JSON file, safely repeatable
+- A warning before a certificate expires (ntfy, Gotify)
+- Two-factor login for the admin, or admin login through OpenID Connect or LDAP
+- API tokens for scripts
+- Secrets in the database are encrypted
+- Guides built into the UI that work without internet
+- Light and dark, and a choice of themes
 </details>
 
-What is built, tested and qualified against real infrastructure, and what is deliberately deferred,
-is tracked row by row in [FEATURES.md](FEATURES.md).
+[FEATURES.md](FEATURES.md) lists every feature with two answers: is it covered by tests, and
+has it been used on real infrastructure. It also lists what was planned and not built.
 
 ## How it compares
 
 | | **quicgate** | **Nginx Proxy Manager** | **Pangolin** |
 |---|---|---|---|
-| Data plane | native Go (net/http, quic-go) | nginx | Traefik |
-| Deployment | **1 container, ~34 MB, scratch** | 1 container (+ optional db) | 3+ containers |
-| HTTP/3 (QUIC) | **default, per-host toggle** | no | via Traefik config |
-| Config model | **typed, validated options** | UI + free-text nginx snippets | UI + Traefik config |
-| Applying a change | instant atomic swap | nginx reload | Traefik provider push |
-| SSO on your services | **built-in OIDC + forward-auth** | no | **built-in IdP/SSO** |
-| Per-URL auth policy | **yes** | no | per resource |
-| Access lists | IP/CIDR + **GeoIP + dynamic DNS** | IP/CIDR | yes |
-| TCP/UDP streams | yes, + PROXY protocol, SNI, TLS termination | basic | via tunnels |
-| Reaching services on remote networks | **WireGuard sites**, any WireGuard peer, no agent (new in 1.16) | no | **yes, mature, with its own agent and user access** |
-| VPN for people's devices | WireGuard devices, SSO portal with re-checked logins, experimental LAN access (new in 1.17) | no | **yes, mature** |
-| Config from container labels | **yes, flat labels + streams** | no | via Traefik labels |
-| Metrics and API | Prometheus + full REST + OpenAPI | none / undocumented REST | via Traefik / REST |
-| Maturity | **young, read the caveats** | battle-tested, huge community | growing fast |
+| The proxy inside | its own, written in Go | nginx | Traefik |
+| What you run | **1 container, about 25 MB** | 1 container (plus an optional database) | 3 or more containers |
+| HTTP/3 | **on by default, switch per host** | no | through Traefik config |
+| How you configure it | **checked fields only** | UI plus free-text nginx snippets | UI plus Traefik config |
+| When a change applies | at once, nothing reloads | nginx reload | Traefik picks it up |
+| Logins for your services | **built in, plus forward auth** | no | **built in, with its own identity provider** |
+| Rules per URL | **yes** | no | per resource |
+| Access lists | addresses, **countries, dynamic DNS names** | addresses | yes |
+| TCP and UDP streams | yes, with PROXY protocol, routing by server name and TLS | basic | through tunnels |
+| Services on other networks | **WireGuard sites**, any WireGuard peer, no agent to install | no | **yes, mature, with its own agent** |
+| VPN for people's devices | WireGuard devices, a portal with single sign-on, experimental LAN access | no | **yes, mature** |
+| Hosts from container labels | **yes, also streams** | no | through Traefik labels |
+| Metrics and API | Prometheus, a full REST API with an OpenAPI description | none, REST undocumented | through Traefik, REST |
+| How proven | **young, read the caveats below** | many years, huge community | growing fast |
 
-**Choose NPM** for the most battle-tested option and years of community answers.
-**Choose Pangolin** if tunnels are the heart of your setup: it is built around them, with its own
-agent and identity-aware access for users.
-**Choose quicgate** if you want one small container to replace the whole stack (proxy,
-certificates, access control and SSO) on a modern engine.
+**Pick Nginx Proxy Manager** if you want the option with the most years behind it and an
+answer to every question already on a forum somewhere.
+**Pick Pangolin** if tunnels are the centre of your setup. It is built around them, with its
+own agent and access rules per user.
+**Pick quicgate** if you want one small container that covers the proxy, the certificates, the
+access rules and the logins.
 
-### Honest caveats
+### What to know before you rely on it
 
-- Young project, live in production in one homelab and under active development, so expect rough
-  edges. Feedback is wanted, good or bad: tell us in an [issue](https://github.com/Quicgate/quicgate/issues) what worked, what did not and
-  what you miss. A report that says "this confused me" is as useful as a bug.
-- Not everything has met the real world yet. The built-in OIDC SSO, for one, is tested against a
-  synthetic identity provider: try it against yours before you rely on it.
-  [FEATURES.md](FEATURES.md) says per feature what is proven live and what is only tested.
-- WireGuard sites are new in 1.16, and devices, the VPN portal and LAN access are new in 1.17:
-  tested, including adversarial tests, but not yet proven in production. LAN access is marked
-  experimental until the code has had an outside review. It is not a full-tunnel VPN and not a
-  mesh.
-- A single admin account (with 2FA, OIDC or LDAP login), no multi-tenant roles.
+- **It is young.** It runs one homelab in production and changes quickly, so expect rough
+  edges. Tell me about them in an [issue](https://github.com/Quicgate/quicgate/issues). "This
+  confused me" is as useful as a bug report.
+- **Not everything has met the real world.** The built-in login, for one, is tested against a
+  made-up identity provider in the test suite. Try it against yours before you depend on it.
+  [FEATURES.md](FEATURES.md) says per feature what has run on real infrastructure and what is
+  only tested.
+- **The WireGuard parts are the newest.** Sites, devices and the portal are well tested but
+  have little time in production behind them. LAN access is marked experimental: an outside
+  review found twelve defects, all fixed since, and those fixes have not been reviewed from
+  outside yet. It is also not a full-tunnel VPN and not a mesh.
+- **One admin.** There is a single admin account, with two-factor login or login through
+  OpenID Connect or LDAP. There are no roles and there is no log of who changed what. An API
+  token can do everything the admin can and does not expire.
+- **No raw config.** If you depend on a hand-written nginx snippet, quicgate has no place to
+  put it.
+
+## Security work
+
+A security scan of the whole project in September 2026 led to release 1.18.0, which fixed what
+it found; each fix came with a test that fails without it. The record is in
+[SECURITY.md](SECURITY.md). Since then the API reference and the OpenAPI document also require
+signing in, so the list of management endpoints is no longer readable by anyone who asks.
+
+If you find a vulnerability, please report it privately as described in
+[SECURITY.md](SECURITY.md), not in a public issue.
 
 ## Performance
 
-On a Ryzen 7 9800X3D: **~45,000 proxied requests/sec** to a local backend, **~180,000/sec** for cache
-hits, ~9 ns routing lookups, and ~8,900 TLS-proxied req/s on a single core. Access lists add no
-measurable overhead. Those are microbenchmarks on one machine, not a sustained-load qualification,
-and authentication, TLS and your backends change the picture, so measure your own workload.
-Reproduce with `go test -bench=. ./internal/engine`; methodology in [BENCHMARKS.md](BENCHMARKS.md).
+On a Ryzen 7 9800X3D: about 45,000 proxied requests per second to a local backend, about
+180,000 per second for cache hits, and about 8,900 per second with TLS on a single core. Access
+lists add nothing you can measure. These are short benchmarks on one machine, not a long load
+test, and logins, TLS and your own backends change the picture. Measure your own workload. You
+can repeat mine with `go test -bench=. ./internal/engine`; [BENCHMARKS.md](BENCHMARKS.md)
+explains the method.
 
-## Supply chain
+## Checking what you run
 
-Release images are multi-arch (amd64, arm64), built in CI from a digest-pinned base, gated by
-`govulncheck`, and carry signed SLSA build provenance you can verify yourself:
+Release images are built by CI for amd64 and arm64, from a base image pinned by its digest. A
+release is only published when the vulnerability check passes. Each image carries a signed
+record of how it was built, which you can verify:
 
 ```bash
-gh attestation verify oci://ghcr.io/quicgate/quicgate:latest --owner Quicgate
+gh attestation verify oci://ghcr.io/quicgate/quicgate:1 --owner Quicgate
 ```
 
-Pin `ghcr.io/quicgate/quicgate:1` to follow the 1.x line: patches arrive, a major version never
-does on its own.
+Use the tag `ghcr.io/quicgate/quicgate:1` to follow the 1.x releases, or a full version such as
+`:1.18.6` to stay on one release until you choose to move.
 
 ## Documentation
 
-The guides live in [`web/docs/`](web/docs/) and are **built into the binary**: open Help (`?` in
-the top bar) and pick one. They work offline, air-gapped installs included.
+The guides live in [`web/docs/`](web/docs/) and are also built into the program: open Help
+(the `?` in the top bar) and pick one. They work without internet.
 
-- [Getting started](web/docs/getting-started.md): run it, first host, TLS modes, host types, themes
-- [Configuration reference](web/docs/configuration.md): env vars and settings, real client IP, GeoIP, HTTP/3, IPv6
-- [Access control & SSO](web/docs/sso.md): access lists, OIDC login, forward auth, per-path rules, security model
-- [Docker labels](web/docs/docker.md): hosts and streams from container labels, multi-host
-- [Streams & port forwards](web/docs/streams.md): TCP/UDP forwarding, PROXY protocol, SNI routing, UPnP
+- [Getting started](web/docs/getting-started.md): run it, your first host, certificates, kinds of host, themes
+- [Configuration reference](web/docs/configuration.md): environment variables and settings, real visitor addresses, country rules, HTTP/3, IPv6
+- [Access control and SSO](web/docs/sso.md): access lists, logins, forward auth, rules per URL, the security model
+- [Docker labels](web/docs/docker.md): hosts and streams from container labels
+- [Streams and port forwards](web/docs/streams.md): TCP and UDP forwarding, PROXY protocol, routing by server name, UPnP, WireGuard sites
+- [VPN](web/docs/vpn.md): devices, the portal and LAN access
 
 ## API
 
-Everything the UI does is a REST call: interactive Swagger at `/docs.html`, the spec at
-`/openapi.yaml`, prose in [API.md](API.md). Create a bearer token under the account menu, API tokens:
+Everything the UI does is a REST call, so everything can be scripted. Once you are signed in,
+the interactive reference is at `/docs.html` and the OpenAPI document at `/openapi.yaml`. The
+same material in prose is in [API.md](API.md). Make a token under the account menu, API
+tokens:
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" http://<host>:81/api/hosts
 ```
 
-`POST /api/import` does idempotent, declarative bulk import, which is how my own NPM and Pangolin
-migrations were scripted.
+`POST /api/import` takes a whole setup as JSON and can be run again and again with the same
+result. That is how I scripted my own moves from Nginx Proxy Manager and Pangolin.
 
 ## Building from source
 
 ```bash
-go build .                   # single static binary
-docker build -t quicgate .   # multi-stage, FROM scratch
+go build .                   # one static binary
+docker build -t quicgate .   # the release image
 ```
 
-Dev mode without TLS: `QG_TLS=off QG_HTTP=:8090 QG_ADMIN=:8091 QG_DATA=./devdata go run .`
+To run it for development without TLS:
+`QG_TLS=off QG_HTTP=:8090 QG_ADMIN=:8091 QG_DATA=./devdata go run .`
 
 ## Project
 
-- [SPEC.md](SPEC.md): the NPM feature-parity matrix and architecture decisions
-- [ROADMAP.md](ROADMAP.md): features mined from NPM's issue tracker (all five phases implemented)
+- [SPEC.md](SPEC.md): how quicgate compares to Nginx Proxy Manager feature by feature, and the design decisions
+- [SPEC-wireguard.md](SPEC-wireguard.md): the WireGuard design, what it defends against, and its review record
+- [ROADMAP.md](ROADMAP.md): what is done and what comes next
 - [CHANGELOG.md](CHANGELOG.md): what changed, release by release
-- [CONTRIBUTING.md](CONTRIBUTING.md): quicgate is deliberately opinionated (one binary, typed options, no free-text config)
-- [SECURITY.md](SECURITY.md): found a vulnerability? Report it privately, never as a public issue
+- [CONTRIBUTING.md](CONTRIBUTING.md): quicgate is opinionated on purpose (one binary, checked fields, no raw config)
+- [SECURITY.md](SECURITY.md): how to report a vulnerability
 
 If quicgate saves you a container or three, a star helps other self-hosters find it.
 
