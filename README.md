@@ -81,7 +81,7 @@ that pile as one program, with a UI you can hand to someone else.
 # docker-compose.yml
 services:
   quicgate:
-    image: ghcr.io/quicgate/quicgate:1
+    image: ghcr.io/quicgate/quicgate:latest
     restart: unless-stopped
     network_mode: host      # quicgate listens on 80 and 443 (TCP and UDP); the admin UI is on 81
     environment:
@@ -328,11 +328,12 @@ release is only published when the vulnerability check passes. Each image carrie
 record of how it was built, which you can verify:
 
 ```bash
-gh attestation verify oci://ghcr.io/quicgate/quicgate:1 --owner Quicgate
+gh attestation verify oci://ghcr.io/quicgate/quicgate:latest --owner Quicgate
 ```
 
-Use the tag `ghcr.io/quicgate/quicgate:1` to follow the 1.x releases, or a full version such as
-`:1.18.6` to stay on one release until you choose to move.
+The quick start uses `:latest`, which always points at the newest release. If you would rather
+pin, use `ghcr.io/quicgate/quicgate:1` to follow the 1.x line, or a full version such as `:1.18.6`
+to stay on one release until you choose to move.
 
 ## Documentation
 
