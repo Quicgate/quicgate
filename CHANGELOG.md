@@ -4,6 +4,16 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.18.6] - 2026-11-19
+
+### Changed
+- **Dependencies are up to date.** quic-go 0.65.0, golang.org/x/net 0.61.0,
+  golang.org/x/oauth2 0.38.0, modernc.org/sqlite 1.62.0, go-proxyproto 0.16.0,
+  klauspost/compress 1.20.4, goupnp 1.3.1 and go-jose 4.1.6. Nothing changes in how quicgate
+  behaves or is configured.
+- **The minimum Go version to build from source is 1.26.9.** The release image is still built
+  with Go 1.27.4.
+
 ## [1.18.5] - 2026-11-19
 
 ### Security
