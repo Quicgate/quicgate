@@ -204,16 +204,39 @@ func (s *Server) Handler() http.Handler {
 	return s.securityHeaders(s.csrf(mux))
 }
 
+// signedInFiles are the embedded files that are served to a signed-in caller
+// only: the API reference (the OpenAPI document and the page that renders it,
+// with that page's own scripts and styles). Together they map every management
+// endpoint, which is nobody's business before signing in. The names are clean
+// paths inside the embedded tree, without a leading slash. Everything else
+// (the app itself, its fonts, the guides) stays public: the login page needs
+// it before there is a session.
+var signedInFiles = map[string]bool{
+	"openapi.yaml":         true,
+	"docs.html":            true,
+	"docs.js":              true,
+	"swagger-ui-bundle.js": true,
+	"swagger-ui.css":       true,
+}
+
 // staticFiles serves the embedded UI. A path that names a directory other
 // than the root answers 404: the file server would list it, and the layout of
 // the embedded tree (docs, fonts) is nobody's business before signing in.
+// The API reference (signedInFiles) goes through the same check as the API.
 func (s *Server) staticFiles() http.Handler {
 	if s.webFS == nil {
 		return http.NotFoundHandler()
 	}
 	files := http.FileServerFS(s.webFS)
+	signedIn := s.auth(files.ServeHTTP)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The clean form of the path decides, as it does in the file server,
+		// so no spelling of a name gets around either check.
 		if name := strings.Trim(path.Clean("/"+r.URL.Path), "/"); name != "" {
+			if signedInFiles[name] {
+				signedIn(w, r)
+				return
+			}
 			if info, err := fs.Stat(s.webFS, name); err == nil && info.IsDir() {
 				http.NotFound(w, r)
 				return

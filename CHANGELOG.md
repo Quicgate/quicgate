@@ -4,6 +4,15 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.18.5] - 2026-11-19
+
+### Security
+- **The OpenAPI document and the API reference now require signing in.** `/openapi.yaml`
+  and the `/docs.html` reference page (with the scripts and styles it loads) were served to
+  anyone who asked, so the full set of management endpoints was readable before signing in.
+  They now go through the same authentication as the API they describe. The app itself, its
+  fonts and the guides stay public: the login page needs them before there is a session.
+
 ## [1.18.4] - 2026-11-18
 
 ### Security
