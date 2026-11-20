@@ -4,6 +4,13 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.18.8] - 2026-11-20
+
+### Changed
+- **Dependencies are up to date.** golang.org/x/crypto 0.59.0 and golang.org/x/net 0.62.0,
+  two maintenance releases from the Go team. Nothing changes in how quicgate behaves or is
+  configured.
+
 ## [1.18.7] - 2026-11-20
 
 ### Security
