@@ -4,6 +4,17 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.18.7] - 2026-11-20
+
+### Security
+- **The admin interface now sends a `Permissions-Policy` header.** It was the one common
+  security header the interface did not send. The policy tells the browser that these pages
+  never use the camera, microphone, location, payment or USB, so a script that somehow ended up
+  on a page could not ask for them either. Copying to the clipboard stays allowed for the
+  interface itself, because the Copy buttons on WireGuard configurations and in the API reference
+  need it. Nothing changes in how the interface works. Pages of your proxied hosts are not
+  touched: their headers remain yours to set per host.
+
 ## [1.18.6] - 2026-11-19
 
 ### Changed

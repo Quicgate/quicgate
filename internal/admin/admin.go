@@ -855,6 +855,10 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
+		// The UI uses no camera, microphone, location, payment or USB. It does
+		// copy to the clipboard (the Copy buttons on WireGuard configs and in
+		// the API reference), so that stays allowed for this origin only.
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), clipboard-write=(self)")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
 		// API answers carry settings, tokens, second-factor secrets and
 		// backups: nothing a browser cache or a proxy may keep a copy of.

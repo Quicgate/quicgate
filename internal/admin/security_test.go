@@ -93,6 +93,14 @@ func TestSecurityHeadersAreApplied(t *testing.T) {
 	if got := rr.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
 		t.Fatalf("Content-Security-Policy = %q, want frame-ancestors restriction", got)
 	}
+	// The Copy buttons write to the clipboard: the policy switches off what
+	// the UI never uses without switching that off.
+	pp := rr.Header().Get("Permissions-Policy")
+	for _, want := range []string{"camera=()", "microphone=()", "geolocation=()", "payment=()", "usb=()", "clipboard-write=(self)"} {
+		if !strings.Contains(pp, want) {
+			t.Fatalf("Permissions-Policy = %q, want it to contain %q", pp, want)
+		}
+	}
 }
 
 // Credentials for other systems must not be echoed back on a settings read,
