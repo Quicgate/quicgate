@@ -34,12 +34,15 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Name string }
+	var body struct{ Name, Access string }
 	if err := decodeJSON(w, r, &body, maxLoginBody, false); err != nil {
 		writeBodyErr(w, err)
 		return
 	}
-	tok, err := s.store.CreateAPIToken(body.Name)
+	if body.Access == "" {
+		body.Access = store.TokenFull // what a token was before there was a choice
+	}
+	tok, err := s.store.CreateAPITokenFor(body.Name, body.Access)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return

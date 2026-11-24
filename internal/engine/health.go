@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"quicgate/internal/store"
 )
 
 // healthChecker actively probes upstream targets and tracks up/down so the
@@ -105,6 +107,29 @@ func (e *Engine) HealthStatuses() []TargetStatus {
 	defer e.health.mu.RUnlock()
 	out := make([]TargetStatus, 0, len(e.health.targets))
 	for key, t := range e.health.targets {
+		out = append(out, TargetStatus{Target: key, Up: t.up, LastErr: t.lastErr})
+	}
+	return out
+}
+
+// BackendStatuses returns the health of the backends one host forwards to, in
+// the host's own order. A backend quicgate does not probe (the host is off,
+// or is not a proxy host) is left out.
+func (e *Engine) BackendStatuses(h store.Host) []TargetStatus {
+	e.health.mu.RLock()
+	defer e.health.mu.RUnlock()
+	out := []TargetStatus{}
+	seen := map[string]bool{}
+	for _, u := range append([]store.Upstream{h.Upstream}, h.Upstreams...) {
+		if u.Host == "" {
+			continue
+		}
+		key := upstreamKey(u)
+		t, ok := e.health.targets[key]
+		if !ok || seen[key] {
+			continue
+		}
+		seen[key] = true
 		out = append(out, TargetStatus{Target: key, Up: t.up, LastErr: t.lastErr})
 	}
 	return out

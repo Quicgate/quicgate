@@ -16,7 +16,7 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      description: "API token from POST /api/tokens (Authorization: Bearer qg_...)."
+      description: "API token from POST /api/tokens (Authorization: Bearer qg_...). A token is full access, monitoring, or monitoring plus switching hosts on or off; see POST /api/tokens."
   schemas:
     VPNSubject:
       type: object
@@ -185,7 +185,7 @@ paths:
   /api/logout:
     post: { summary: Log out, responses: { "200": { description: ok } } }
   /api/me:
-    get: { summary: Current user, responses: { "200": { description: "{email, mustChange, totpEnabled}; for an API token {email: \"\", token: true}" } } }
+    get: { summary: Current user, responses: { "200": { description: "{email, mustChange, totpEnabled}; for an API token {email: \"\", token: true, access}" } } }
   /api/password:
     post:
       summary: Change password
@@ -228,6 +228,16 @@ paths:
       summary: Delete host
       parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
       responses: { "200": { description: deleted } }
+  /api/hosts/status:
+    get:
+      summary: "Every host as a status page wants it: what it is, whether it is on, whether its backends answer, how its certificate is doing. Nothing of how a host is configured. Open to monitoring tokens."
+      responses: { "200": { description: "[{id, name, domains, type, enabled, target, backends: [{target, up, lastErr}], certificate: {mode, status, domain, notAfter, lastError}}]; certificate is absent for a host without one and for a host that is off" } }
+  /api/hosts/{id}/enabled:
+    put:
+      summary: "Switch one host on or off, and change nothing else about it. Open to switch tokens."
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      requestBody: { content: { application/json: { schema: { type: object, required: [enabled], properties: { enabled: {type: boolean} } } } } }
+      responses: { "200": { description: "{id, enabled}" }, "400": { description: "no enabled in the body, or anything else in it" }, "404": { description: not found } }
   /api/health:
     get: { summary: Upstream health, responses: { "200": { description: "[{target, up, lastErr}]" } } }
   /api/access-lists:
@@ -364,11 +374,16 @@ paths:
   /api/notify-test:
     post: { summary: Send a test webhook alert, responses: { "200": { description: sent } } }
   /api/tokens:
-    get: { summary: List API tokens, responses: { "200": { description: OK } } }
+    get: { summary: List API tokens, responses: { "200": { description: "[{id, name, access, createdAt}]" } } }
     post:
       summary: Create an API token (returns raw token once)
-      requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string} } } } } }
-      responses: { "201": { description: "{id, name, token}" } }
+      description: >
+        access says what the token may do. "monitor" reads status only: GET /api/me, /api/overview,
+        /api/hosts/status, /api/health, /api/certs, /api/traffic, /api/bans and /metrics. "switch" is
+        that plus PUT /api/hosts/{id}/enabled. "full" (the default) does everything. A limited token
+        gets 403 on anything else. The raw token starts qgm_, qgs_ or qg_ accordingly.
+      requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string}, access: {type: string, enum: [full, monitor, switch], default: full} } } } } }
+      responses: { "201": { description: "{id, name, access, token}" }, "400": { description: unknown access level or no name } }
   /api/tokens/{id}:
     delete:
       summary: Revoke token

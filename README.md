@@ -298,7 +298,8 @@ access rules and the logins.
   outside yet. It is also not a full-tunnel VPN and not a mesh.
 - **One admin.** There is a single admin account, with two-factor login or login through
   OpenID Connect or LDAP. There are no roles and there is no log of who changed what. An API
-  token can do everything the admin can and does not expire.
+  token does not expire; it can be limited to monitoring, or to monitoring plus switching
+  hosts on or off, and otherwise does everything the admin can.
 - **No raw config.** If you depend on a hand-written nginx snippet, quicgate has no place to
   put it.
 
@@ -352,7 +353,8 @@ The guides live in [`web/docs/`](web/docs/) and are also built into the program:
 Everything the UI does is a REST call, so everything can be scripted. Once you are signed in,
 the interactive reference is at `/docs.html` and the OpenAPI document at `/openapi.yaml`. The
 same material in prose is in [API.md](API.md). Make a token under the account menu, API
-tokens:
+tokens, and give it no more than its job needs: a monitoring token for a dashboard, a full
+one for scripts that change things.
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" http://<host>:81/api/hosts

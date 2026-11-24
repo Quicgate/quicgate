@@ -35,6 +35,9 @@ type session struct {
 	// ends up on the account is the one quicgate made.
 	totpSetup      string
 	totpSetupUntil time.Time
+	// tokenAccess is what an API token may do (store.TokenFull and so on);
+	// empty for a person.
+	tokenAccess string
 }
 
 // isToken reports whether the principal is an API token rather than a person.

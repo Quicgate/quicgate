@@ -14,9 +14,17 @@ Two schemes; either works on every `/api/*` route except the public ones (`/api/
 curl -H "Authorization: Bearer qg_xxxxxxxx" https://quicgate.example.com/api/hosts
 ```
 
-Tokens are shown once at creation and stored only as a SHA-256 hash. Bearer auth bypasses the session and 2FA, so treat tokens as full-access credentials.
+Tokens are shown once at creation and stored only as a SHA-256 hash. Bearer auth bypasses the session and 2FA. A token is one of three kinds, chosen when it is made:
 
-The admin port itself should stay network-gated (e.g. behind Pangolin/an IP allow-list); the API has no per-token scoping.
+| Kind | `access` | Starts | May call |
+|---|---|---|---|
+| Monitoring | `monitor` | `qgm_` | `GET /api/me`, `/api/overview`, `/api/hosts/status`, `/api/health`, `/api/certs`, `/api/traffic`, `/api/bans`, `/metrics` |
+| Monitoring + host switch | `switch` | `qgs_` | the same, and `PUT /api/hosts/{id}/enabled` |
+| Full access | `full` | `qg_` | everything |
+
+A limited token gets `403` on anything else. Treat a full token as you treat the admin password.
+
+The admin port itself should stay network-gated (for example behind an IP allow-list).
 
 ## Conventions
 
@@ -55,6 +63,8 @@ Host object (fields depend on `type`): `{id, type, domains[], upstream{scheme,ho
 | POST | `/api/hosts` | Create; returns the host with its `id`. |
 | PUT | `/api/hosts/{id}` | Full replace. |
 | DELETE | `/api/hosts/{id}` | |
+| GET | `/api/hosts/status` | Every host for a status page: `{id, name, domains, type, enabled, target, backends: [{target, up, lastErr}], certificate: {mode, status, domain, notAfter, lastError}}`. Nothing of how a host is configured. `certificate` is absent for a host without one and for a host that is off. Open to monitoring tokens. |
+| PUT | `/api/hosts/{id}/enabled` | `{"enabled": true|false}` switches one host on or off and changes nothing else. Open to switch tokens. |
 | GET | `/api/health` | Backend health for pooled upstreams: `[{target, up, lastErr}]`. |
 
 ## Access lists
@@ -106,7 +116,7 @@ Keys: `acme_email`, `acme_staging` (`"1"`/`"0"`), `acme_ca_url`, `acme_dns_provi
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/tokens` | List (no secret). |
-| POST | `/api/tokens` | `{name}` → returns `{id, name, token}`; **`token` shown once**. |
+| POST | `/api/tokens` | `{name, access}` (`access` is `full`, `monitor` or `switch`; `full` when left out) → returns `{id, name, access, token}`; **`token` shown once**. |
 | DELETE | `/api/tokens/{id}` | Revoke. |
 
 ## System / ops

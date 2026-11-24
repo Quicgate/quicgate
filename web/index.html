@@ -581,12 +581,28 @@
           <section class="setsec" data-section="tokens" hidden>
             <div class="panel">
               <div class="panel__head panel__head--row">
-                <div><h2>API tokens</h2><p>Long-lived bearer tokens for the API (<span class="mono">Authorization: Bearer &lt;token&gt;</span>). A token is shown once, when it is created.</p></div>
+                <div><h2>API tokens</h2><p>Long-lived bearer tokens for the API (<span class="mono">Authorization: Bearer &lt;token&gt;</span>). A token is shown once, when it is created. Give each one no more than its job needs.</p></div>
                 <button id="btn-add-token" class="btn btn--primary btn--sm">New token</button>
               </div>
+              <form id="token-form" class="tokenform" hidden>
+                <div class="field-row">
+                  <label class="field"><span>Name</span><input id="token-name" required maxlength="80" placeholder="home dashboard" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore></label>
+                  <label class="field"><span>What it may do</span>
+                    <select id="token-access">
+                      <option value="monitor">Monitoring: read status only</option>
+                      <option value="switch">Monitoring, and switch hosts on or off</option>
+                      <option value="full">Full access: everything the API offers</option>
+                    </select></label>
+                </div>
+                <p class="form-hint" id="token-access-hint"></p>
+                <div class="tokenform__actions">
+                  <button type="submit" class="btn btn--primary btn--sm">Create token</button>
+                  <button type="button" id="token-cancel" class="btn btn--sm">Cancel</button>
+                </div>
+              </form>
               <div id="new-token" class="tokenbox mono" hidden></div>
               <table class="table" id="tokens-table">
-                <thead><tr><th>Name</th><th>Created</th><th></th></tr></thead>
+                <thead><tr><th>Name</th><th>May</th><th>Created</th><th></th></tr></thead>
                 <tbody id="tokens-body"></tbody>
               </table>
               <div id="tokens-empty" class="empty" hidden>No API tokens yet.</div>
@@ -881,7 +897,7 @@
         <details><summary>Is it safe to expose the admin UI?</summary>
           <p><b>No.</b> Never expose the admin port (81) to the internet. Put it behind quicgate itself with an access list, a VPN, or a firewall rule: treat it like any other private service. Change the default <code>admin@example.com</code>/<code>changeme</code> on first run (the address under Sign-in email, the password right below it) and enable 2FA (account menu &rarr; Account &amp; security).</p></details>
         <details><summary>How do I script quicgate / use the API?</summary>
-          <p>Create a bearer token under <b>your account menu → API tokens</b> and send <code>Authorization: Bearer &lt;token&gt;</code>. Everything the UI does is a REST call: see the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>. <code>POST /api/import</code> does idempotent bulk config-as-code.</p></details>
+          <p>Create a bearer token under <b>your account menu → API tokens</b> and send <code>Authorization: Bearer &lt;token&gt;</code>. You choose what a token may do: only read status (for a dashboard), also switch hosts on or off (for home automation), or everything. Everything the UI does is a REST call: see the interactive <a href="docs.html" target="_blank" rel="noopener">API docs</a>. <code>POST /api/import</code> does idempotent bulk config-as-code.</p></details>
         <details><summary>SSO in front of a host?</summary>
           <p>Two ways. <b>Built-in OIDC</b> (no extra service): add your IdP under <b>Access control &rarr; Identity providers</b>, then enable <b>OIDC SSO</b> on the host's Security tab. quicgate runs the OpenID Connect login itself, keeps a signed per-host session, checks the allowed emails/domains/groups you set, and can pass the identity upstream as <code>Remote-User</code> / <code>Remote-Email</code> / <code>Remote-Groups</code> (spoofed inbound copies are always stripped). Register the redirect URI <code>https://&lt;host&gt;/.qg/oidc/callback</code> at the IdP; sign out at <code>/.qg/oidc/logout</code>. Or use <b>Forward authentication</b> against an Authelia / Authentik verify endpoint if you already run one.</p></details>
         <details><summary>Can one path be public while the rest of the host needs auth?</summary>

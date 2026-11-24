@@ -50,7 +50,7 @@ func TestRestoreFromOlderSnapshotEmptiesTablesItLacks(t *testing.T) {
 	if _, err := st.RestoreFrom(snap); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
-	if st.ValidAPIToken(live.Token) {
+	if _, ok := st.TokenAccess(live.Token); ok {
 		t.Fatal("a live API token survived restoring a snapshot that has no token table")
 	}
 }

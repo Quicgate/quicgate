@@ -4,6 +4,39 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.19.0] - 2026-11-24
+
+### Added
+- **An API token can be limited to what its job needs.** Until now every token could do
+  everything the admin can. When you make a token (account menu, API tokens) you now choose
+  what it may do:
+  - **Monitoring** reads how things are doing: hosts and whether their backends answer,
+    certificates, traffic, bans and the Prometheus metrics. It cannot see how a host is
+    configured, cannot read settings, logs or backups, and cannot change anything. Right for a
+    dashboard or a metrics scraper.
+  - **Monitoring + host switch** reads the same and can switch a proxy host on or off. It can
+    change nothing else. Right for home automation.
+  - **Full access** is what a token was before.
+
+  A limited token gets `403` on everything outside its list, and the list is one of what is
+  allowed: an endpoint added in a later version is closed to limited tokens until it is put
+  on it. The token page shows what each token may do, and a token says what it is by how it
+  starts (`qgm_`, `qgs_`, `qg_`). Tokens you already have keep working and stay full access;
+  to limit one, make a new one and revoke the old one.
+- **`GET /api/hosts/status`**: every host as a status page wants it. What it is, whether it is
+  on, whether its backends answer, and how its certificate is doing (the worst state among
+  its names, and the date the first one expires). It carries nothing of how a host is
+  configured, because a host's header rules can hold a backend's credentials. This is what
+  limited tokens read instead of `GET /api/hosts`.
+- **`PUT /api/hosts/{id}/enabled`** with `{"enabled": true}` or `{"enabled": false}` switches
+  one host on or off and changes nothing else about it. A script no longer has to read a whole
+  host and send it back to flip one switch.
+
+### Notes
+- **Going back to an older version:** a limited token stops working there, it is not read as a
+  full one. Older versions know only full tokens, so limited tokens are stored in a way an
+  older version does not recognise. Full tokens work on both sides.
+
 ## [1.18.8] - 2026-11-20
 
 ### Changed

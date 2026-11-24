@@ -986,6 +986,23 @@ func updateHost(q dbtx, h *Host) error {
 	return nil
 }
 
+// SetHostEnabled switches one host on or off and touches nothing else of it.
+// It goes around the checks of a full save on purpose: a host that was valid
+// when it was saved stays what it was, and a name belongs to one host whether
+// that host is on or off, so switching cannot make two hosts share a name.
+func (s *Store) SetHostEnabled(id int64, enabled bool) error {
+	s.hostMu.Lock()
+	defer s.hostMu.Unlock()
+	res, err := s.db.Exec("UPDATE hosts SET enabled=?, updated_at=? WHERE id=?", b2i(enabled), now(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) DeleteHost(id int64) error {
 	res, err := s.db.Exec("DELETE FROM hosts WHERE id=?", id)
 	if err != nil {

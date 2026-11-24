@@ -71,7 +71,7 @@ columns mean:
 | Single admin account, 2FA (TOTP) | yes | account only | Sign-in email and 2FA changes require the current password. |
 | Admin login through OIDC or LDAP | yes, synthetic IdP | no | PKCE, nonce and one-use sign-in for OIDC; LDAP requires `ldaps://`. Neither asks for the local TOTP code: require MFA at the IdP or directory. |
 | Session revocation (password change, sign out others, SSO key rotation) | yes | no | |
-| API tokens | yes | yes | Full administrator credentials: no scopes, no expiry. |
+| API tokens | yes | yes | Three kinds: full access, monitoring (reads status only), and monitoring plus switching hosts on or off. No expiry. The limited kinds are new in 1.19.0 and have little time in production. |
 | Backup and restore | yes | partly (a backup is taken before every upgrade; a restore has only run in tests) | Restores every table and the certificate tree as a unit, or changes nothing. Refuses files that are not quicgate backups or would leave no admin able to sign in. Archives are not encrypted as a whole: secrets from the database are sealed inside them and the sealing key is never included, but the certificate tree (ACME and imported private keys) is in the clear. |
 | Secrets encrypted at rest (2FA secrets, OIDC client secrets, DNS credentials, custom certificate keys, SSO cookie key) | yes, including a raw-byte search of the database, WAL and archive | yes (v1.15.0 migrated a live database) | XChaCha20-Poly1305, bound to row and column. A missing or wrong key locks the secrets and fails closed; it never replaces them. Rollback to an older version needs `quicgate -unseal`. |
 | Declarative import | yes | no | One transaction, idempotent by natural key; never silently removes protection. (The earlier, non-transactional import was used for a live migration.) |
@@ -88,7 +88,7 @@ Planned in earlier documents and not built. They stay open until they are built 
 dropped:
 
 - Multiple admin users with roles, and an audit log of configuration changes.
-- Scoped and expiring API tokens.
+- Expiring API tokens, and finer scopes than the three kinds there are.
 - Encryption of the ACME certificate files under `certs/` (database secrets are sealed; for the files use disk encryption
   and treat backups as sensitive).
 - Per-location overrides of options other than upstream and path rewrite.

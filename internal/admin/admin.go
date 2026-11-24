@@ -126,6 +126,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/hosts", s.auth(s.handleCreateHost))
 	mux.HandleFunc("PUT /api/hosts/{id}", s.auth(s.handleUpdateHost))
 	mux.HandleFunc("DELETE /api/hosts/{id}", s.auth(s.handleDeleteHost))
+	mux.HandleFunc("GET /api/hosts/status", s.auth(s.handleHostStatus))
+	mux.HandleFunc("PUT /api/hosts/{id}/enabled", s.auth(s.handleSetHostEnabled))
 	mux.HandleFunc("GET /api/certs", s.auth(s.handleCerts))
 	mux.HandleFunc("GET /api/health", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.engine.HealthStatuses())
@@ -910,11 +912,16 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// API-token bearer auth for automation (no session/2FA needed).
 		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-			if s.store.ValidAPIToken(strings.TrimPrefix(h, "Bearer ")) {
-				next(w, r.WithContext(context.WithValue(r.Context(), sessionKey, session{email: "api-token"})))
+			access, ok := s.store.TokenAccess(strings.TrimPrefix(h, "Bearer "))
+			if !ok {
+				writeErr(w, http.StatusUnauthorized, "invalid API token")
 				return
 			}
-			writeErr(w, http.StatusUnauthorized, "invalid API token")
+			if !tokenMay(access, r.Pattern) {
+				writeErr(w, http.StatusForbidden, "this API token may not do that: it is a "+tokenAccessName(access)+" token")
+				return
+			}
+			next(w, r.WithContext(context.WithValue(r.Context(), sessionKey, session{email: "api-token", tokenAccess: access})))
 			return
 		}
 		c, err := r.Cookie("qg_session")
@@ -1098,7 +1105,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// password to change, no second factor. Say so instead of looking
 		// for a row that cannot exist.
 		writeJSON(w, http.StatusOK, map[string]any{
-			"email": "", "token": true, "mustChange": false, "totpEnabled": false, "version": s.engine.Version(),
+			"email": "", "token": true, "access": sess.tokenAccess, "mustChange": false, "totpEnabled": false, "version": s.engine.Version(),
 		})
 		return
 	}

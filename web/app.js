@@ -2304,24 +2304,43 @@ async function refreshTokens() {
   for (const t of tokens) {
     const tr = document.createElement('tr');
     const td0 = document.createElement('td'); td0.textContent = t.name;
+    const tdMay = document.createElement('td'); tdMay.textContent = TOKEN_ACCESS[t.access] ? TOKEN_ACCESS[t.access].name : t.access;
     const td1 = document.createElement('td'); td1.className = 'domain'; td1.textContent = t.createdAt ? new Date(t.createdAt).toLocaleDateString() : '';
     const td2 = document.createElement('td'); td2.style.textAlign = 'right';
     const del = document.createElement('button');
     del.className = 'btn btn--danger btn--sm'; del.textContent = 'Revoke';
     del.addEventListener('click', async () => { await api('DELETE', `/api/tokens/${t.id}`); refreshTokens(); });
     td2.appendChild(del);
-    tr.append(td0, td1, td2);
+    tr.append(td0, tdMay, td1, td2);
     body.appendChild(tr);
   }
 }
-$('btn-add-token').addEventListener('click', async () => {
-  const name = prompt('Token name (e.g. "ci-pipeline"):');
+// What each kind of API token may do, in the words of the token page.
+const TOKEN_ACCESS = {
+  monitor: { name: 'Monitoring', hint: 'Reads how things are doing: hosts and whether their backends answer, certificates, traffic, bans and metrics. It cannot see how a host is configured, cannot read settings, logs or backups, and cannot change anything. Right for a dashboard.' },
+  switch: { name: 'Monitoring + host switch', hint: 'Reads what a monitoring token reads, and can switch a proxy host on or off. It can change nothing else. Right for home automation.' },
+  full: { name: 'Full access', hint: 'Does everything you can do in this interface, including downloading backups and changing settings. Give it only to something you trust as much as your own login.' },
+};
+function tokenAccessHint() { $('token-access-hint').textContent = TOKEN_ACCESS[$('token-access').value].hint; }
+$('token-access').addEventListener('change', tokenAccessHint);
+$('btn-add-token').addEventListener('click', () => {
+  $('token-form').hidden = false;
+  $('new-token').hidden = true;
+  tokenAccessHint();
+  $('token-name').focus();
+});
+$('token-cancel').addEventListener('click', () => { $('token-form').hidden = true; $('token-form').reset(); });
+$('token-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = $('token-name').value.trim();
   if (!name) return;
   try {
-    const t = await api('POST', '/api/tokens', { name });
+    const t = await api('POST', '/api/tokens', { name, access: $('token-access').value });
     const el = $('new-token');
     el.hidden = false;
-    el.textContent = `New token (copy now, shown once): ${t.token}`;
+    el.textContent = `New ${TOKEN_ACCESS[t.access].name.toLowerCase()} token (copy now, shown once): ${t.token}`;
+    $('token-form').hidden = true;
+    $('token-form').reset();
     refreshTokens();
   } catch (err) { alert(err.message); }
 });

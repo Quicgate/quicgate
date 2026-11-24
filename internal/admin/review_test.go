@@ -387,10 +387,10 @@ func TestRestoreRestoresTokensAndPortForwards(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("restore: %d %s", rr.Code, rr.Body.String())
 	}
-	if !s.store.ValidAPIToken(inBackup.Token) {
+	if _, ok := s.store.TokenAccess(inBackup.Token); !ok {
 		t.Fatal("an API token that was in the backup is not valid after restore")
 	}
-	if s.store.ValidAPIToken(later.Token) {
+	if _, ok := s.store.TokenAccess(later.Token); ok {
 		t.Fatal("an API token created after the backup survived the restore")
 	}
 	if pfs, _ := s.store.ListPortForwards(); len(pfs) != 1 || pfs[0].ExtPort != 2350 {
