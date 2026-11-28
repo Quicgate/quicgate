@@ -4,6 +4,16 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.19.1] - 2026-11-28
+
+### Changed
+- **Dependencies are up to date.** klauspost/compress 1.20.5, golang.org/x/net 0.63.0 and
+  modernc.org/sqlite 1.63.0. The compression library behind a host's Compression option
+  fixes a few edge cases: a partial (206) response without a Content-Range header is no
+  longer compressed, the status code a backend chose is kept when the response is buffered
+  before compressing, and an Accept-Encoding sent on several header lines is read whole.
+  Nothing changes in how quicgate is configured.
+
 ## [1.19.0] - 2026-11-24
 
 ### Added
