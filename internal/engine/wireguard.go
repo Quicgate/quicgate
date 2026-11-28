@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"quicgate/internal/store"
@@ -68,7 +69,13 @@ func WGSettings(st *store.Store) (port int, network netip.Prefix, endpoint strin
 		}
 		port = p
 	}
-	network, err = netip.ParsePrefix(st.GetSetting("wg_network", wgDefaultNetwork))
+	// An empty setting is the default, like an unset one: the form sends the
+	// field as it is, and an empty field means "the usual addresses".
+	raw := strings.TrimSpace(st.GetSetting("wg_network", ""))
+	if raw == "" {
+		raw = wgDefaultNetwork
+	}
+	network, err = netip.ParsePrefix(raw)
 	if err != nil || !network.Addr().Is4() || network.Bits() < 16 || network.Bits() > 29 {
 		return 0, netip.Prefix{}, "", fmt.Errorf("wg_network must be an IPv4 prefix between /16 and /29")
 	}

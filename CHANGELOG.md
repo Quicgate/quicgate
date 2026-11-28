@@ -4,6 +4,78 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.20.0] - 2026-11-28
+
+### Changed
+- **The VPN page is rebuilt around what you come to do.** It opens with four lines: use my
+  own phone or laptop away from home, let one device reach something on my local network, let
+  other people log in and add their own devices, have quicgate use a service on another
+  network. Each line says where it stands and has one button for the next step. Below that are
+  three sections instead of eight panels: Devices, People who log in, Other networks. Settings
+  you set once (the port, the address devices connect to, local network access, addresses
+  nobody may reach, the login rules) fold away and stay editable. A section that cannot work
+  yet is still shown, and says what it is for, what it needs first and where to get that.
+- **Switching the VPN on is two fields** on a first visit: the address devices connect to, and
+  the port. An address typed without a port gets the VPN port added.
+- **Plainer names.** Sites are now "Other networks", LAN access is "Local network access",
+  LAN policies are "rules", protected endpoints are "Addresses nobody may reach", a device's
+  configuration is its "setup file", and revoking a device is "Remove". Nothing changed in what
+  these do. The VPN guide uses the same names.
+- **One table for all devices**, yours and those people added themselves, with a column that
+  says what each one may reach and when it was last seen.
+- **Adding a device is two steps**: name it and say what it may reach, then set it up on the
+  device with the steps listed.
+
+### Added
+- **A device you add yourself can reach addresses on your local network.** In "Add a device",
+  choose "Private hosts, and addresses on my local network" and name them: a name (NAS), the
+  address, and what for (file sharing, a web page, remote desktop, SSH, printing, or your own
+  ports). The dialog checks on the spot whether quicgate would let the device get there, and
+  says why not. "Change access" on a device changes the list later. Until now this took a
+  person logging in through a login provider, or one of two break-glass devices.
+
+  **What this costs in safety, plainly.** Nobody logs in behind such a device. Whoever holds
+  its setup file reaches the addresses you named until you remove the device or its end date
+  passes, and no login provider can cut it off. That is why:
+  - giving a device local addresses, and every later change to them, asks for your password
+    and a two-factor code, and your account must have two-factor on;
+  - an end date is filled in by default (a year), and "no end date" has to be ticked;
+  - only addresses on private networks can be named, with the ports you choose;
+  - every connection is written to `logs/vpn-flows.log`, and the Overview page keeps saying
+    that such devices exist;
+  - an API token cannot give or change local addresses at all.
+
+  quicgate's own listeners, the router and the addresses under "Addresses nobody may reach"
+  stay out of reach for these devices as for everybody else. Local network access is still
+  marked experimental, and it has to be switched on under VPN settings for any of this to work.
+- **Break-glass devices are now simply devices with local addresses.** The ones you have keep
+  working as they were and show up in the Devices table with what they may reach. There is no
+  limit of two any more. `POST /api/wg/breakglass` still works and does the same as
+  `POST /api/wg/devices` with routes.
+- **A name on an address.** A destination in a rule or on a device can carry a name, so the
+  tables say "NAS" next to `192.168.1.10`. The name is for reading only.
+- **After changing what a device may reach**, the page shows the one line to paste into the
+  WireGuard app on that device (`AllowedIPs`). quicgate cannot make the setup file again
+  because it never has the device's private key. On quicgate's side the change is in force at
+  once, and addresses you took away stop working at once.
+- `PUT /api/wg/devices/{id}/access` in the API, and `routes`, `expiresAt`, `neverExpires`,
+  `password` and `code` on `POST /api/wg/devices`.
+
+### Fixed
+- **Switching the VPN on with the field for its inner addresses left empty no longer stops it
+  from starting.** The empty field was saved as an empty setting, and the VPN then refused to
+  run with "wg_network must be an IPv4 prefix". An empty setting now means the usual
+  `10.77.0.0/24`.
+
+### Upgrade notes
+- Nothing to do. The database does not change shape, and existing devices, rules, logins and
+  break-glass devices stay as they are.
+- The Overview's numbers for these devices have new names in `GET /api/overview`:
+  `vpn.localAccessDevices` and `vpn.localAccessNoExpiry`, and they now count every device of
+  yours that has local addresses. The old names `vpn.breakGlass` and `vpn.breakGlassNoExpiry`
+  still carry the same numbers for clients that read them.
+- An address in a rule may now be written without `/32`.
+
 ## [1.19.1] - 2026-11-28
 
 ### Changed

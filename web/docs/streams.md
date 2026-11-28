@@ -35,9 +35,10 @@ With `QG_UPNP=1`, quicgate manages your router's port forwards over UPnP IGD:
 
 Note that a forwarded stream hides the original client IP from the backend unless you enable PROXY protocol (and the backend supports it). For protocols with their own notion of client identity (SMTP spam filtering, for example), a direct router forward to the real server is often better than a stream.
 
-## WireGuard sites
+## Other networks (WireGuard sites)
 
-A **site** lets quicgate reach upstreams on a network it is not on. The site is an ordinary
+On the VPN page these are called **Other networks**; this guide calls one a **site**.
+A site lets quicgate reach upstreams on a network it is not on. The site is an ordinary
 WireGuard peer at that location: a router with WireGuard (OpenWrt, pfSense, a FRITZ!Box), a
 small Linux box, a VPS. Once a site exists, a proxy host or a stream gets a **Reach through**
 choice next to its upstream. Two typical uses:
@@ -49,13 +50,13 @@ choice next to its upstream. Two typical uses:
 
 ### Set it up
 
-1. **VPN page, switch WireGuard on.** Pick the UDP port (51820 by default) and forward it on the
-   router in front of quicgate, or let `QG_UPNP=1` map it. Fill in the public address sites will
-   call (`vpn.example.com:51820`).
-2. **Add site.** Name it, list the networks behind it (`192.168.50.0/24`), and give its endpoint
-   if quicgate can call it (`cabin.example.net:51820`). Leave the endpoint empty for a site that
-   can only call in.
-3. **Take the configuration.** The browser makes the site's keypair and shows a complete
+1. **VPN page, switch the VPN on.** Pick the UDP port (51820 by default) and forward it on the
+   router in front of quicgate, or let `QG_UPNP=1` map it. Fill in the address sites and devices
+   connect to (`vpn.example.com:51820`).
+2. **Other networks, Connect a network.** Name it, list the addresses there (`192.168.50.0/24`),
+   and say where quicgate can call it (`cabin.example.net:51820`). Leave that empty for a site
+   that can only call in.
+3. **Take the setup file.** The browser makes the site's keypair and shows a complete
    WireGuard configuration **once**: quicgate never sees the private key and cannot show the
    configuration again. On a page without HTTPS the browser cannot make keys; run
    `wg genkey | tee private.key | wg pubkey` on the site and paste the public key instead.
@@ -77,8 +78,9 @@ choice next to its upstream. Two typical uses:
   the site or the tunnel is down the host answers 502; the address is never tried on the local
   network, where it may belong to another machine. An address outside the site's networks is
   refused.
-- **Status.** The VPN page shows each site's last handshake, traffic and open connections. "up"
-  means a handshake in the last three minutes. A site shows "waiting" until traffic flows:
+- **Status.** The VPN page shows when each site was last seen, and which hosts and streams use
+  it. "Connected" means a handshake in the last three minutes. A site shows "Waiting" until
+  traffic flows:
   WireGuard only shakes hands when there is something to send.
 - **Restarts.** A site with an endpoint is back the moment quicgate is. A site that calls in is
   called back at the address it was last seen at (quicgate remembers it across restarts), which

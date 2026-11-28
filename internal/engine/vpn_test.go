@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -270,5 +271,122 @@ func TestADeviceOutsideTheTunnelNetworkIsLeftOut(t *testing.T) {
 	setSettings(t, st, map[string]string{"wg_network": "10.88.0.0/24"})
 	if devs, _ := e.wgDevices(time.Now(), false); len(devs) != 0 {
 		t.Fatalf("a device at %s is configured although the tunnel network is 10.88.0.0/24 now: %+v", dev.Address, devs)
+	}
+}
+
+// A device the admin adds can carry addresses on the local network of its
+// own. They count only while local network access is on, an end date that
+// has passed takes the whole device off, a device without addresses of its
+// own gets none from anybody's rule, and a device from before the two kinds
+// were one (kind "breakglass") behaves exactly the same.
+func TestAnAdminDeviceCarriesItsOwnLocalAddresses(t *testing.T) {
+	t.Setenv("QG_SECRET_KEY", "")
+	t.Setenv("QG_SECRET_KEY_FILE", "")
+	e, st := newTestEngine(t)
+	_, network, _, err := WGSettings(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A rule for people must never spill over to a device nobody logged in on.
+	idp := &store.OIDCProvider{Name: "idp", Issuer: "https://idp.example.com", ClientID: "c", ClientSecret: "s"}
+	if err := st.CreateOIDCProvider(idp); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveVPNPolicy(&store.VPNPolicy{Name: "everybody", Subject: store.VPNSubject{Kind: "any-user", Provider: idp.ID},
+		Routes: []store.VPNRoute{{CIDR: "192.168.9.0/24", Proto: "any"}}}); err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	nas := []store.VPNRoute{{Name: "NAS", CIDR: "192.168.1.10/32", Proto: "tcp", Ports: "445"}}
+	make := func(name, kind string, routes []store.VPNRoute, expires string) store.WGDevice {
+		d := store.WGDevice{Name: name, Kind: kind, PublicKey: newTunnelClient(t).pub, Enabled: true, Routes: routes, ExpiresAt: expires}
+		psk, err := wg.NewPresharedKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.CreateWGDevice(&d, network, psk, 0); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	plain := make("plain", "admin", nil, "")
+	phone := make("phone", "admin", nas, until)
+	old := make("old", "breakglass", nas, until)
+
+	byID := func(now time.Time, lan bool) map[int64]wg.Device {
+		devs, owners := e.wgDevices(now, lan)
+		if len(owners) != 0 {
+			t.Fatalf("an admin's device has an owner at an identity provider: %+v", owners)
+		}
+		out := map[int64]wg.Device{}
+		for _, d := range devs {
+			out[d.ID] = d
+		}
+		return out
+	}
+	// Local network access off: every device is there, none has a route.
+	off := byID(time.Now(), false)
+	for _, d := range []store.WGDevice{plain, phone, old} {
+		got, ok := off[d.ID]
+		if !ok || len(got.Routes) != 0 {
+			t.Fatalf("with local network access off, device %q = %+v (present %v), want it present without routes", d.Name, got, ok)
+		}
+	}
+	// On: the two devices with addresses get exactly theirs, the plain one none.
+	on := byID(time.Now(), true)
+	if got := on[plain.ID]; len(got.Routes) != 0 {
+		t.Fatalf("a device without addresses of its own got routes: %+v", got.Routes)
+	}
+	for _, d := range []store.WGDevice{phone, old} {
+		got := on[d.ID]
+		if len(got.Routes) != 1 || got.Routes[0].Prefix.String() != "192.168.1.10/32" || got.Routes[0].Proto != "tcp" ||
+			len(got.Routes[0].Ports) != 1 || got.Routes[0].Ports[0].From != 445 || got.Routes[0].Ports[0].To != 445 {
+			t.Fatalf("device %q routes = %+v, want tcp 192.168.1.10/32 port 445 and nothing else", d.Name, got.Routes)
+		}
+		if got.Until.IsZero() {
+			t.Fatalf("device %q has no deadline although it has an end date", d.Name)
+		}
+	}
+	// Past the end date both are gone, routes and all; the plain one stays.
+	late := byID(time.Now().Add(2*time.Hour), true)
+	if _, ok := late[plain.ID]; !ok {
+		t.Fatal("the device without an end date is gone")
+	}
+	for _, d := range []store.WGDevice{phone, old} {
+		if got, ok := late[d.ID]; ok {
+			t.Fatalf("device %q is still configured after its end date: %+v", d.Name, got)
+		}
+	}
+	// What such a device carries never opens what is protected: quicgate's
+	// own listeners stay out of reach, whatever its routes say.
+	wide := []store.VPNRoute{{CIDR: "127.0.0.0/8", Proto: "any"}}
+	if err := wide[0].Validate(); err == nil {
+		t.Fatal("loopback was accepted as a route")
+	}
+	setSettings(t, st, map[string]string{"wg_protected_endpoints": "192.168.1.2"})
+	if answer, err := e.ExplainRoute([]store.VPNRoute{{CIDR: "192.168.1.0/24", Proto: "any"}}, "tcp", "192.168.1.2:22"); err != nil || !strings.HasPrefix(answer, "refused") {
+		t.Fatalf("a protected endpoint under a whole-network route: %q %v, want refused", answer, err)
+	}
+	if answer, err := e.ExplainRoute(nas, "tcp", "192.168.1.10:22"); err != nil || !strings.HasPrefix(answer, "refused") {
+		t.Fatalf("a port the route does not name: %q %v, want refused", answer, err)
+	}
+	if answer, err := e.ExplainRoute(nas, "tcp", "192.168.1.10:445"); err != nil || !strings.HasPrefix(answer, "allowed") {
+		t.Fatalf("the named address and port: %q %v, want allowed", answer, err)
+	}
+}
+
+// The form for switching the VPN on has a field for the addresses used
+// inside it, and leaving that field empty means "the usual ones". An empty
+// setting must not stop the VPN from starting.
+func TestAnEmptyTunnelNetworkSettingMeansTheDefault(t *testing.T) {
+	_, st := newTestEngine(t)
+	setSettings(t, st, map[string]string{"wg_network": ""})
+	_, network, _, err := WGSettings(st)
+	if err != nil || network.String() != wgDefaultNetwork {
+		t.Fatalf("network = %v, err = %v, want %s", network, err, wgDefaultNetwork)
+	}
+	setSettings(t, st, map[string]string{"wg_network": "not a network"})
+	if _, _, _, err := WGSettings(st); err == nil {
+		t.Fatal("a network that is not one was accepted")
 	}
 }

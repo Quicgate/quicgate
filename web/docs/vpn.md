@@ -1,193 +1,266 @@
-# VPN: devices, the portal and LAN access
+# VPN: devices, people who log in and your local network
 
-quicgate has a WireGuard endpoint built in. It runs inside the quicgate process, without a
-network device, extra privileges or a change to the host's routing. It does three separate
-things, and each one is off until you ask for it:
+quicgate has a VPN built in (WireGuard). It runs inside the quicgate process, without a
+network device, extra privileges or a change to the machine's routing. The **VPN** page is
+built around four things you may want, and each one is off until you ask for it:
 
-| | What it is for | Who holds the key |
+| What you want | What it takes | Section on the page |
 |---|---|---|
-| **Sites** | quicgate reaches upstreams on *another* network | a router or a small box at the other location |
-| **Devices** | a phone or a laptop reaches hosts that quicgate serves **in the tunnel only** | a person's device |
-| **LAN access** *(experimental)* | a person who logged in reaches parts of the network quicgate is on | a person's device, after single sign-on |
+| Use my own phone or laptop away from home | a device, and a host marked "VPN only" | Devices |
+| Let one device reach something on my local network | a device with the addresses you name | Devices |
+| Let other people log in and add their own devices | a login provider and a login page | People who log in |
+| Have quicgate use a service on another network | a router or small machine there | Other networks |
 
-Sites are described in the [Streams & port forwards](streams.md) guide. This guide is about the
-other two.
+The page opens with these four as a list. Each line says where it stands and has one button
+for the next step.
+
+Other networks are described in the [Streams & port forwards](streams.md) guide (there they
+are the "Reach through" choice of a host or a stream). This guide is about the other three.
 
 ## Switch it on
 
-On the **VPN** page, enable the endpoint, pick a UDP port (forward it on your router, or let UPnP
-do it) and fill in the **public address** people's devices will connect to, for example
-`vpn.example.com:51820`. quicgate makes its own key at that moment; it is sealed at rest and no
-API call returns it.
+On the **VPN** page, fill in the **address devices connect to**, for example
+`vpn.example.com:51820`, and the **port** (forward that UDP port on your router, or let UPnP do
+it), then press **Switch on**. quicgate makes its own key at that moment; it is sealed at rest
+and no API call returns it. Afterwards these settings live under **VPN settings** at the bottom
+of the page.
 
-## Hosts that exist only on the VPN
+## Hosts that exist only on the VPN ("private hosts")
 
-Edit a host and tick **VPN only**. From then on:
+On the Proxy hosts page, edit a host and tick **VPN only**. From then on:
 
-- The host is served inside the tunnel and nowhere else. On the public listeners the name gets
-  the same answer as a name quicgate has never heard of, and the TLS handshake for it fails the
+- The host is served inside the VPN and nowhere else. On the public side the name gets the
+  same answer as a name quicgate has never heard of, and the TLS handshake for it fails the
   same way. Nothing tells a visitor that the host exists.
-- Devices find it without any DNS work on your side. The configuration a device gets uses
-  quicgate as its DNS server, and quicgate answers the names of its own hosts with its tunnel
-  address. Other names are passed on to the resolvers quicgate itself uses.
+- Devices find it without any DNS work on your side. The setup file a device gets uses
+  quicgate as its DNS server, and quicgate answers the names of its own hosts with its address
+  inside the VPN. Other names are passed on to the resolvers quicgate itself uses.
 - The certificate is the usual one. For a name that has no public DNS record, use DNS-01 or an
   uploaded certificate: HTTP-01 cannot reach a host that is not served publicly.
 
+Every device on the VPN reaches every private host, unless an access list says otherwise (see
+"VPN rules in access lists").
+
 ## Devices you add yourself
 
-**VPN, Add device.** Give it a name. The browser makes the keypair, so the private key never
-reaches quicgate; if you would rather make the tunnel in the WireGuard app first, paste its
-public key instead. The configuration is shown **once**, with a button to download it as a
-`.conf` file that the WireGuard apps import. It is not stored anywhere: when it is lost, revoke
-the device and add it again.
+**VPN, Add a device.** Give it a name and choose what it may reach:
 
-A device you add this way reaches quicgate's hosts in the tunnel. It never gets LAN access.
+- **Private hosts only.** Right for most phones and laptops.
+- **Private hosts, and addresses on my local network.** For things that are not a web page
+  behind quicgate: a file share, remote desktop, SSH, a printer. See the next section.
 
-**Revoking is final.** The key cannot be registered again, open connections are closed at once,
-and the tunnel address stays out of use so that nothing of the old device can end up at a new
-one.
+The browser makes the key, so the private half never reaches quicgate; if you would rather
+make the tunnel in the WireGuard app first, open "Technical details" and paste its public key.
+The second step of the dialog lists what to do on the device: install the WireGuard app,
+download the **setup file** and open it in the app, switch the tunnel on. The setup file is
+shown **once** and is not stored anywhere: when it is lost, remove the device and add it again.
+
+The Devices table shows every device, yours and those people added themselves, with what each
+may reach and when it was last seen. The "Allowed" switch pauses a device.
+
+**Removing a device is final.** Its key cannot be registered again, open connections are
+closed at once, and its address inside the VPN stays out of use so that nothing of the old
+device can end up at a new one.
+
+## One device, one address on your local network
+
+Local network access has to be on: **VPN settings, Local network access**. It is marked
+experimental (see "Local network access" below for what it does and does not do).
+
+In **Add a device**, choose "Private hosts, and addresses on my local network" and fill in a
+line per destination:
+
+- **Name**: what you call it, like NAS. For reading only.
+- **Address**: one address like `192.168.1.10`, or a whole network like `192.168.1.0/24`.
+  Name a single address where you can.
+- **What for**: file sharing, a web page, remote desktop, SSH, printing, everything on this
+  address, or ports of your own. This fills in the ports.
+
+Under the lines the dialog says whether quicgate would let the device get there, and why not
+(a protected address, quicgate itself, a network that is reached through another network).
+
+**Nobody logs in behind such a device.** Whoever holds its setup file reaches the addresses
+you named until you remove the device or its end date passes, and no login provider can cut
+it off. That is why it costs more than a plain device:
+
+- your **password and a two-factor code**, and your account must have two-factor on (your name
+  at the top right, Account, "Sign-in & 2FA");
+- an **end date**, filled in with a year from now. "No end date" has to be ticked on purpose.
+  After the end date the device stops working altogether;
+- the Overview page keeps reminding you that such devices exist;
+- an API token cannot do it.
+
+**Changing it later.** "Change access" on the device's row opens the same choices and asks for
+the same confirmation, also when you only take addresses away. On quicgate's side the change is
+in force at once. The device itself still has its old setup file, and quicgate cannot make a
+new one because it never has the device's private key. So the page shows the one line to put
+into the WireGuard app on that device: edit the tunnel and replace the line that starts with
+`AllowedIPs`. Until then the device does not send traffic for new addresses into the VPN. On a
+phone it is often easier to remove the device and add it again.
+
+### If you had break-glass devices
+
+Before 1.20 there was a separate kind of device for this, the break-glass device, and there
+could be two. They are now ordinary devices with local addresses: the ones you have keep
+working and show up in the Devices table, and there is no limit of two. One use for them
+stays worth remembering: if your login provider itself is behind the VPN, an outage locks
+everybody out, you included. A device of your own with the addresses you need to repair it is
+the way back in. Keep its setup file offline.
 
 ## VPN rules in access lists
 
 An access list has a fourth kind of rule next to IP, hostname and country: **On the VPN**. It
-matches requests that came through the tunnel, and says who:
+matches requests that came through the VPN, and says who:
 
-- anyone on the VPN, any site, any device,
-- one site or one device,
-- a group, one person, or everybody from one identity provider (devices that people enrolled at
-  the portal, see below).
+- anyone on the VPN, any other network, any device,
+- one other network or one device,
+- a group, one person, or everybody from one login provider (devices that people added at the
+  login page, see below).
 
 Two properties keep this safe to switch on:
 
-- A request from outside the tunnel **never** matches a VPN rule, and a request from inside the
-  tunnel **never** matches an IP or country rule. So adding the VPN cannot change who passes a
-  list you already have, and a tunnel address cannot be used to slip through an "allow
-  10.0.0.0/8" rule.
-- A group or a person is always named together with its identity provider. "admins" from one
+- A request from outside the VPN **never** matches a VPN rule, and a request from inside the
+  VPN **never** matches an IP or country rule. So adding the VPN cannot change who passes a
+  list you already have, and an address inside the VPN cannot be used to slip through an
+  "allow 10.0.0.0/8" rule.
+- A group or a person is always named together with its login provider. "admins" from one
   provider is never "admins" from another.
 
-Requests from inside the tunnel are not counted toward automatic bans.
+Requests from inside the VPN are not counted toward automatic bans.
 
-## The portal: people add their own devices
+## People who log in
 
-Add a host of type **VPN portal**, for example `vpn.example.com`, choose the identity provider,
-and say who may add devices (a group, single people, or everybody from that provider). Register
-`https://vpn.example.com/.qg/vpn/callback` as a redirect URI at the provider.
+For family or colleagues: they sign in with their own account and add their own devices. You
+do not hand out files. The section on the VPN page walks three steps:
 
-The portal has to be reachable without the VPN: it is where people go to get the VPN *back*. Starting a login and enrolling a device are limited to ten per minute per client address.
-It is served over **HTTPS only**, so the host needs a certificate: plain HTTP is redirected, and
-nothing but the redirect is ever answered there. Behind a proxy that terminates TLS, that proxy
-has to be listed under trusted proxies and send `X-Forwarded-Proto: https`.
+1. **A login provider.** The service people sign in with, such as Keycloak or Authentik. Add
+   it on the Access control page, where it is called an identity provider.
+2. **A login page.** A proxy host of the type **VPN portal**, for example `vpn.example.com`.
+   Choose the login provider and say who may add devices (a group, single people, or
+   everybody from that provider). Register `https://vpn.example.com/.qg/vpn/callback` as a
+   redirect URI at the provider.
+3. **What they may reach.** Private hosts straight away. For addresses on your local network,
+   add a **rule** (see below).
 
-What a person sees: log in, name a device, download the configuration. What quicgate does with
-that login is stricter than an ordinary web login, because a VPN configuration outlives a
-browser session:
+The login page has to be reachable without the VPN: it is where people go to get the VPN
+*back*. Starting a login and adding a device are limited to ten per minute per client address.
+It is served over **HTTPS only**, so the host needs a certificate: plain HTTP is redirected,
+and nothing but the redirect is ever answered there. Behind a proxy that terminates TLS, that
+proxy has to be listed under trusted proxies and send `X-Forwarded-Proto: https`.
+
+What a person sees: log in, name a device, download the setup file. What quicgate does with
+that login is stricter than an ordinary web login, because a setup file outlives a browser
+session. The settings named here are under **Login rules** in the section:
 
 - **The login has to be fresh.** quicgate asks the provider to authenticate the person now
   (`max_age`) and checks the `auth_time` the provider states. A browser that was still logged in
-  from this morning is not enough. The window is the **Fresh login** setting, 15 minutes by
+  from this morning is not enough. The window is **How recent a login must be**, 15 minutes by
   default.
 - **The provider has to issue a refresh token** (scope `offline_access`). Without one the login
-  is refused: quicgate would have no way to notice later that the account was disabled.
-- **quicgate asks again, every few minutes** (the **Check every** setting, 10 by default), by
-  redeeming the refresh token. When the provider refuses, or names another person, the devices
-  of that person are taken off the endpoint at once and their open connections are closed.
+  is refused: quicgate would have no way to notice later that the account was switched off.
+- **quicgate asks again, every few minutes** (**Check with the login provider every**, 10 by
+  default), by redeeming the refresh token. When the provider refuses, or names another person,
+  the devices of that person are taken off the VPN at once and their open connections are
+  closed.
 - **An outage is not a refusal.** When the provider cannot be reached, nothing is extended. The
-  devices keep working until the current check runs out, plus the **outage grace** if you set one
-  (0 by default), and no longer.
-- **However well the checks go, the person logs in again** after **Log in again after** (30 days
-  by default).
-- **Adding a device takes a login that is fresh at that moment.** A portal page that has been
+  devices keep working until the current check runs out, plus **Keep working when it cannot be
+  reached** if you set that (0 by default), and no longer.
+- **However well the checks go, the person logs in again** after **Log in again after** (30
+  days by default).
+- **Adding a device takes a login that is fresh at that moment.** A login page that has been
   open since this morning shows your devices, and asks you to log in again before it adds one.
-- **What is open ends with the authorization.** When a login lapses, is ended, or reaches its
-  limit, the connections the person's devices hold are closed at that moment, not just new ones
+- **What is open ends with the login.** When a login lapses, is ended, or reaches its limit,
+  the connections the person's devices hold are closed at that moment, not just new ones
   refused.
-- A device keeps its configuration across all of this. After a lapse the person logs in at the
-  portal and the same device works again.
+- A device keeps its setup file across all of this. After a lapse the person logs in at the
+  login page and the same device works again.
 
-On the VPN page, **People** shows every login with its state. **End** takes a person's devices
-off until they log in again. **Block** keeps them off whatever the provider says, until you lift
-it.
+The section lists every person with their devices and the state of their login. **End login**
+takes a person's devices off until they log in again. **Block** keeps them off whatever the
+provider says, until you lift it.
 
-### Requirements for the identity provider
+### Rules: what people may reach on your local network
+
+A rule says *for whom* (a group, a person, everybody from one login provider) and *may reach*
+(the same lines as for a device: name, address, what for). A person gets what every rule that
+names them allows; there are no "deny" rules, and what no rule allows is refused. The rule
+dialog has a **Check an address** box that says whether a destination would get through, and
+why not.
+
+A device that was set up before a rule existed does not know about the new addresses: its
+setup file was written when it was added. The person adds the device again at the login page,
+or puts the addresses into the `AllowedIPs` line in the WireGuard app by hand.
+
+### What the login provider has to support
 
 | Needed | Why | Keycloak |
 |---|---|---|
 | refresh tokens for the client, scope `offline_access` | the repeated check | client scope `offline_access` assigned to the client |
 | an `auth_time` claim in the ID token | the fresh-login check | sent by default |
 | honouring `max_age` | the fresh-login check | yes |
-| groups in the ID token **of a refresh response**, or at the UserInfo endpoint | group policies and group rules | add a Group Membership mapper, with "Add to ID token" and "Add to userinfo" on |
+| groups in the ID token **of a refresh response**, or at the UserInfo endpoint | rules by group | add a Group Membership mapper, with "Add to ID token" and "Add to userinfo" on |
 
 If your provider leaves the groups out of refreshed tokens, set **Read groups from** to "the
-UserInfo endpoint" on the portal host. quicgate treats a missing groups claim as "in no group",
-never as "unchanged": a person whose groups it cannot see loses what the groups gave them.
+UserInfo endpoint" on the login page's host. quicgate treats a missing groups claim as "in no
+group", never as "unchanged": a person whose groups it cannot see loses what the groups gave
+them.
 
-This part is tested against a synthetic identity provider, including refusals, outages, token
+This part is tested against a synthetic login provider, including refusals, outages, token
 rotation, another person's answer, and an admin ending a login while a check is in flight. It
 has not been qualified against a live Keycloak yet. Try it against yours before you depend on it.
 
-## LAN access (experimental)
+## Local network access (experimental)
 
-Off by default, and marked experimental until the code has had an outside review. With it on, a
-person who logged in at the portal can reach the destinations their **policies** name, on the
-networks the quicgate machine is on.
-
-A policy says *for whom* (a group, a person, everybody from one provider) and *may reach* (IPv4
-prefixes in private address space, with a protocol and ports). A person gets the routes of every
-policy that names them; there are no deny rules. The policy editor has a **Try it** box that
-says whether a destination would pass, and why not.
+Off by default (**VPN settings, Local network access**), and marked experimental until the
+code has had an outside review. With it on, a device reaches the addresses that were named for
+it: on the device itself when you added it, or in the rules for the person who added it.
 
 How it works, and what follows from it:
 
-- quicgate is not a router. It terminates each connection in its own userspace network stack
-  and opens a new one to the destination. The destination sees **quicgate's address**, not the
-  device's. Devices cannot talk to each other, and nothing on the LAN can open a connection to a
-  device.
+- quicgate is not a router. It ends each connection in its own network stack and opens a new
+  one to the destination. The destination sees **quicgate's address**, not the device's.
+  Devices cannot talk to each other, and nothing on the local network can open a connection to
+  a device.
 - TCP and UDP only. No ICMP, so `ping` does not work through it. IPv4 only.
-- **Whatever a policy says, these are refused:** every port quicgate itself listens on (the
-  admin UI above all), loopback, link-local (which includes cloud metadata addresses), multicast
-  and broadcast, the tunnel network itself and the networks behind sites.
-- **This machine is not part of "the LAN".** quicgate's own addresses, the default gateway (in
-  Docker that is the host, where published ports live) and the addresses you list under
-  **Protected endpoints** are not covered by a route like `192.168.1.0/24`. Reaching another
-  service on one of them takes a route for exactly that address (`/32`) with explicit ports, and
-  quicgate's own listeners stay out of reach even then.
-- Every flow is recorded in `logs/vpn-flows.log` before it is allowed: who, which device, where
-  to, allowed or refused and why. "Recorded" means written to the file, not queued: if the log
-  cannot be written (a full disk, a directory that cannot be created, a disk that hangs), LAN
-  flows are refused until it can, and the Overview page says so. Records of *refused* and ended
-  flows are best effort; what is lost of them is counted. A record is handed to the operating
-  system, not forced to the disk, so a power cut can still lose the last ones.
+- **Whatever a device or a rule was given, these are refused:** every port quicgate itself
+  listens on (the admin page above all), loopback, link-local (which includes cloud metadata
+  addresses), multicast and broadcast, the addresses used inside the VPN and the networks
+  behind other networks.
+- **This machine is not part of "the local network".** quicgate's own addresses, the default
+  gateway (in Docker that is the host, where published ports live) and the addresses you list
+  under **Addresses nobody may reach** are not covered by a line like `192.168.1.0/24`.
+  Reaching another service on one of them takes a line for exactly that address with explicit
+  ports, and quicgate's own listeners stay out of reach even then. "Check an address" under
+  VPN settings says whether an address is protected.
+- Every connection is recorded in `logs/vpn-flows.log` before it is allowed: who, which
+  device, where to, allowed or refused and why. "Recorded" means written to the file, not
+  queued: if the log cannot be written (a full disk, a directory that cannot be created, a disk
+  that hangs), connections to the local network are refused until it can, and the Overview page
+  says so. Records of *refused* and ended connections are best effort; what is lost of them is
+  counted. A record is handed to the operating system, not forced to the disk, so a power cut
+  can still lose the last ones.
 - Limits per device and in total keep one device from exhausting quicgate.
-- When a login lapses, a device is revoked, or a policy changes, the flows that are no longer
-  allowed are closed, not just new ones refused.
+- When a login lapses, a device is removed or reaches its end date, or its addresses or a rule
+  change, the connections that are no longer allowed are closed, not just new ones refused.
 
 ### In Docker on a bridge network
 
 quicgate sees its container address there, not the Docker host's. A published port
-(`-p 81:81`) lives on the host's address, which quicgate cannot know, so a policy that grants
-the host's address would reach quicgate's own admin port through the back door. When quicgate
-detects this situation it refuses to switch LAN access on until you either list the Docker
-host's addresses under **Protected endpoints**, or confirm that no quicgate port is published
-on an address a policy can reach. With `network_mode: host` quicgate sees the real addresses and
-protects them itself.
-
-### Break-glass devices
-
-If the identity provider is itself behind the VPN, an outage locks everybody out, you included.
-A break-glass device is the way back in: it has LAN routes of its own and no login behind it.
-That makes it the most dangerous thing on the page, so it costs the most to make: your password
-and a two-factor code (the admin account must have 2FA on), at most two of them, and an expiry
-date unless you state that it shall not expire. Keep the configuration offline. The Overview
-page reminds you that they exist.
+(`-p 81:81`) lives on the host's address, which quicgate cannot know, so a device that was
+given the host's address would reach quicgate's own admin port through the back door. When
+quicgate detects this situation it refuses to switch local network access on until you either
+list the Docker host's addresses under **Addresses nobody may reach**, or tick **No quicgate
+port within reach** to confirm that no quicgate port is published on an address a device could
+be given. With `network_mode: host` quicgate sees the real addresses and protects them itself.
 
 ## What this is not
 
-- Not a full-tunnel VPN: there is no route to the internet through quicgate, and the device
-  configurations only send quicgate's tunnel address and the granted prefixes into the tunnel.
-- Not a mesh. Devices reach quicgate, and through it what a policy grants. Sites are reached by
-  quicgate's upstreams, not by devices.
+- Not a full-tunnel VPN: there is no route to the internet through quicgate, and the setup
+  files only send quicgate's address inside the VPN and the named addresses into it.
+- Not a mesh. Devices reach quicgate, and through it what was named for them. Other networks
+  are reached by quicgate's hosts and streams, not by devices.
+- Streams are not reachable from devices: only proxy hosts and named local addresses are.
 - The official WireGuard apps for iOS and Android have not been tested by the project. The key
   format the browser produces is verified against the WireGuard implementation quicgate embeds,
-  and the configuration is the standard format, but nobody has imported one on a phone yet.
+  and the setup file is the standard format, but nobody has imported one on a phone yet.
   Pasting the public key of a tunnel made in the app always works.

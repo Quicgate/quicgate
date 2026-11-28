@@ -601,6 +601,16 @@ flow. A panic elsewhere in the stack ends the process (section 4).
 
 ### 8.7 Break-glass (S33 *(v2)*)
 
+> **Changed in 1.20.0 (2026-11-28), after this text was reviewed.** The owner chose to widen this
+> exception: any device the admin adds may carry routes of its own, not only two break-glass
+> devices. What S33 asks for at issuance still holds for every such device (TOTP on the account,
+> password and a TOTP code, an expiry unless waived in so many words), and the same is asked
+> again for every later change of the routes. The cap of two is gone. Rows of kind `breakglass`
+> stay valid and are treated like kind `admin` with routes. The trade-off is the one T20 names:
+> the key is the only credential, so a copied configuration reaches the named addresses until
+> the device is revoked or expires, and no identity provider can cut it off. Routes may carry a
+> name for display; it is never part of a decision. This change has had no outside review.
+
 If the identity provider is itself behind quicgate, a broken IdP would lock the operator out of
 the VPN needed to fix it. One exception to mandatory SSO: the local admin may create at most two
 break-glass devices with a LAN policy attached directly. Creating one requires the admin account

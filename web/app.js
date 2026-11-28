@@ -497,10 +497,10 @@ async function ovLoadState() {
     attn('warn', `${plural(o.docker.endpoints - o.docker.connected, 'Docker host is', 'Docker hosts are')} disconnected`, 'docker');
   }
   const V = o.vpn || {};
-  if (V.enabled && !V.running) attn('bad', `The WireGuard endpoint is not running: ${V.error || 'unknown error'}`, 'vpn');
-  if (V.breakGlassNoExpiry) attn('warn', `${plural(V.breakGlassNoExpiry, 'break-glass VPN device never expires', 'break-glass VPN devices never expire')}: a lost copy reaches the LAN until somebody revokes it`, 'vpn');
-  else if (V.breakGlass) attn('info', `${plural(V.breakGlass, 'break-glass VPN device exists', 'break-glass VPN devices exist')}: they reach the LAN without a login`, 'vpn');
-  if (V.flowLogError) attn('bad', `The VPN flow log cannot be written (${V.flowLogError}). LAN flows are refused until it can`, 'vpn');
+  if (V.enabled && !V.running) attn('bad', `The VPN is switched on but does not run: ${V.error || 'unknown error'}`, 'vpn');
+  if (V.localAccessNoExpiry) attn('warn', `${plural(V.localAccessNoExpiry, 'VPN device reaches', 'VPN devices reach')} your local network without a login and without an end date: a lost setup file works until somebody removes the device`, 'vpn');
+  else if (V.localAccessDevices) attn('info', `${plural(V.localAccessDevices, 'VPN device reaches', 'VPN devices reach')} your local network without a login`, 'vpn');
+  if (V.flowLogError) attn('bad', `The VPN connection log cannot be written (${V.flowLogError}). Connections to the local network are refused until it can`, 'vpn');
   if (V.flowLogDropped) attn('warn', `${V.flowLogDropped} VPN flow records were dropped because the log could not keep up`, 'vpn');
   if (pendingCerts) attn('info', `${plural(pendingCerts, 'certificate is', 'certificates are')} waiting to be issued`, 'certs');
   if (!attention.length) attn('ok', 'Nothing needs attention.', '');
@@ -2824,7 +2824,7 @@ function fillViaSelect(selectId, rowId, value) {
   for (const s of wgSites) {
     const o = document.createElement('option');
     o.value = String(s.id);
-    o.textContent = `WireGuard site ${s.name} (${(s.networks || []).join(', ')})${s.enabled ? '' : ', disabled'}`;
+    o.textContent = `another network: ${s.name} (${(s.networks || []).join(', ')})${s.enabled ? '' : ', switched off'}`;
     sel.appendChild(o);
   }
   sel.value = String(value || 0);
@@ -2847,80 +2847,619 @@ function ago(ts) {
   return `${Math.round(sec / 3600)} h ago`;
 }
 
+/* ---- VPN page ----
+   Built around what a person comes to do: use their own device, let one
+   device reach one address at home, let other people log in, reach another
+   network. Nothing hides because its prerequisite is missing: a part that is
+   not set up says what it is for, what it needs first and where to get that. */
+let vpnSettings = {};
+let vpnStatus = {};
+let vpnStreams = [];
+let vpnTwoFactor = false;
+
+// node builds an element: node('span', 'cls', 'text').
+function node(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+
+// twoLines fills a table cell with a main line and a quieter one under it.
+function twoLines(td, main, sub) {
+  td.textContent = '';
+  if (main instanceof Node) td.append(main); else td.append(node('span', 'cell-main', main));
+  if (sub) td.append(node('span', 'cell-sub', sub));
+  return td;
+}
+
+function dayText(ts) {
+  return new Date(ts).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+function hadContact(st) {
+  return !!(st && st.lastHandshake && !st.lastHandshake.startsWith('0001'));
+}
+
 async function refreshVPN() {
-  const [settings, status] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/wg/status'), loadWGSites()]);
+  const [settings, status, , streamList, me, hostList] = await Promise.all([
+    api('GET', '/api/settings'), api('GET', '/api/wg/status'), loadWGSites(),
+    api('GET', '/api/streams').catch(() => []), api('GET', '/api/me').catch(() => ({})), api('GET', '/api/hosts').catch(() => hosts),
+  ]);
+  vpnSettings = settings;
+  vpnStatus = status;
+  vpnStreams = streamList || [];
+  vpnTwoFactor = !!me.totpEnabled;
+  hosts = hostList || [];
+  [vpnPolicies, vpnBlocked] = await Promise.all([
+    api('GET', '/api/wg/policies').catch(() => []),
+    api('GET', '/api/wg/blocked').catch(() => []),
+    loadVPNPeople(),
+  ]);
+  if (!oidcProviders.length) oidcProviders = await api('GET', '/api/oidc-providers').catch(() => []);
+
+  const off = !status.enabled;
+  const lan = settings.wg_lan_access === '1';
+
+  // The line at the top: is it on, and where do devices connect to.
+  const badge = $('vpn-state-badge');
+  badge.className = 'badge ' + (off ? 'badge--muted' : status.running ? 'badge--success' : 'badge--danger');
+  badge.textContent = off ? 'Off' : status.running ? 'On' : 'Not running';
+  $('vpn-state-line').textContent = off ? '' : (status.endpoint ? `Devices connect to ${status.endpoint}` : 'No address for devices yet: fill it in under VPN settings');
+  const problem = $('vpn-problem');
+  problem.hidden = off || status.running;
+  problem.textContent = `The VPN is switched on but does not run: ${status.error || 'unknown error'}. Devices cannot connect, and hosts and streams that go through another network answer 502 until this is fixed.`;
+
+  // First visit: two fields and one button.
+  $('vpn-start').hidden = !off;
+  $('vs-endpoint').value = settings.wg_endpoint || '';
+  $('vs-port').value = settings.wg_port || '';
+  $('vs-network').value = settings.wg_network || '';
+  const pinned = wgSites.length > 0 || wgDevices.some((d) => !d.revokedAt);
+  $('vs-network').disabled = pinned;
+
+  // The settings fold.
   $('wg-enabled').checked = settings.wg_enabled === '1';
   $('wg-port').value = settings.wg_port || '';
   $('wg-endpoint').value = settings.wg_endpoint || '';
   $('wg-network').value = settings.wg_network || '';
-  $('wg-network').disabled = wgSites.length > 0;
-  $('wg-config').hidden = !$('wg-enabled').checked;
-  $('wg-pubkey').textContent = status.publicKey || '-';
-  $('btn-add-wgsite').disabled = !status.running;
-  $('btn-add-wgsite').title = status.running ? '' : 'Switch WireGuard on first';
-  let line = 'Off. Nothing listens and no upstream can use a site.';
-  if (status.enabled && status.running) line = `Listening on UDP ${status.port} as ${status.address} in ${status.network}.`;
-  else if (status.enabled) line = `Not running: ${status.error || 'unknown error'}. Upstreams that name a site answer 502 until this is fixed.`;
-  $('wg-status-line').textContent = line;
-  $('wg-status-line').classList.toggle('form-error', status.enabled && !status.running);
+  $('wg-network').disabled = pinned;
+  $('wg-pubkey').textContent = status.publicKey || 'made when the VPN is switched on';
+  $('wg-status-line').textContent = status.enabled && status.running
+    ? `quicgate itself is ${status.address} inside the VPN. A new key would make every setup file useless, so there is no button for it.`
+    : (status.keyUnreadable ? 'The stored key cannot be opened: it was sealed with another secret key. Restore that key, or make a new server key and set every device and network up again.' : '');
   $('wg-reset-key').hidden = !status.keyUnreadable;
-  if (!hosts.length) hosts = await api('GET', '/api/hosts').catch(() => []);
-  await refreshVPNDevices(settings, status);
+  $('vlan-enabled').checked = lan;
+  $('vlan-protected').value = (settings.wg_protected_endpoints || '').split(/[\s,]+/).filter(Boolean).join('\n');
+  $('vlan-waive').checked = settings.wg_no_published_aliases === '1';
+  $('vpn-settings-summary').textContent = off
+    ? 'Off. Nothing listens.'
+    : `${status.running ? 'On' : 'Not running'}. Port ${status.port || settings.wg_port || 51820}${status.endpoint ? `, devices connect to ${status.endpoint}` : ''}. Local network access ${lan ? 'on' : 'off'}.`;
+
+  renderVPNDevices();
+  renderVPNPeople();
+  renderVPNNetworks();
+  renderVPNMap();
+}
+
+// peopleRoutes lists what a person's device may reach on the local network:
+// the destinations of every rule that names its owner.
+function peopleRoutes(d) {
+  const s = vpnSessions.find((x) => x.provider === d.provider && x.sub === d.sub);
+  const groups = (s && s.groups) || [];
+  const out = [];
+  for (const p of vpnPolicies) {
+    const v = p.subject || {};
+    if (v.provider !== d.provider) continue;
+    if (v.kind === 'any-user' || (v.kind === 'user' && v.sub === d.sub) || (v.kind === 'group' && groups.includes(v.group))) out.push(...(p.routes || []));
+  }
+  return out;
+}
+
+const isOwnDevice = (d) => d.kind === 'admin' || d.kind === 'breakglass';
+
+function renderVPNDevices() {
+  const status = vpnStatus;
+  const off = !status.enabled;
+  const lan = vpnSettings.wg_lan_access === '1';
+  const shown = wgDevices.filter((d) => !d.revokedAt);
+  $('btn-add-wgdevice').disabled = !status.running;
+  $('btn-add-wgdevice').title = status.running ? '' : 'Switch on the VPN first';
+  $('vpn-devices-card').classList.toggle('is-waiting', off);
 
   const live = {};
-  for (const st of status.sites || []) live[st.id] = st;
-  const body = $('wgsites-body');
-  body.innerHTML = '';
-  $('wgsites-empty').hidden = wgSites.length > 0;
-  $('wgsites-table').hidden = wgSites.length === 0;
-  $('wgsites-note').hidden = !wgSites.some((s) => !s.endpoint);
-  for (const s of wgSites) {
-    const st = live[s.id];
+  for (const st of status.devices || []) live[st.id] = st;
+  const body = $('wgdevices-body');
+  body.textContent = '';
+  const empty = $('wgdevices-empty');
+  empty.hidden = shown.length > 0;
+  empty.textContent = '';
+  empty.append(node('b', '', 'No devices yet. '), 'A device gets a setup file for the WireGuard app and then reaches your private hosts, and the local addresses you name for it. '
+    + (off ? 'Needs the VPN switched on, at the top of this page.' : 'Start with "Add a device".'));
+  $('wgdevices-table').hidden = shown.length === 0;
+
+  for (const d of shown) {
+    const st = live[d.id];
+    const own = isOwnDevice(d);
     const tr = document.createElement('tr');
-    const cell = (text, cls) => { const td = document.createElement('td'); if (cls) td.className = cls; td.textContent = text; tr.appendChild(td); return td; };
-    cell(s.name, 'domain').title = `tunnel address ${s.address}`;
-    cell((s.networks || []).join(', '), 'mono');
-    cell(s.endpoint || 'calls in', s.endpoint ? 'mono' : 'hs-muted');
-    const tdState = cell('');
-    let badge = ['badge--muted', 'disabled', ''];
-    if (s.enabled && !status.running) badge = ['badge--danger', 'endpoint down', ''];
-    else if (s.enabled && st && st.up) badge = ['badge--success', 'up', `last handshake ${ago(st.lastHandshake)}${st.endpoint ? ', seen at ' + st.endpoint : ''}`];
-    else if (s.enabled && st && st.lastHandshake && !st.lastHandshake.startsWith('0001')) badge = ['badge--danger', 'no handshake', `last handshake ${ago(st.lastHandshake)}`];
-    else if (s.enabled) badge = ['badge--muted', 'waiting', 'no handshake yet. quicgate starts one with the first request when the site has an endpoint; otherwise the site has to call.'];
-    // A problem of this site alone (an endpoint name that does not resolve)
-    // does not stop it from calling in, so it is shown next to the state.
-    if (st && st.warning) badge = [badge[0], badge[1], `${st.warning}. ${badge[2]}`];
-    tdState.innerHTML = `<span class="badge ${badge[0]}">${esc(badge[1])}</span>` + (st && st.warning ? ' <span class="badge badge--danger">endpoint</span>' : '');
-    tdState.title = badge[2];
-    cell(st ? `${fmtBytes(st.rxBytes)} in, ${fmtBytes(st.txBytes)} out${st.connections ? ', ' + st.connections + ' open' : ''}` : '-', 'hs-muted');
-    cell(s.enabled ? 'yes' : 'no');
-    const tdAct = document.createElement('td');
-    tdAct.className = 'actions';
-    const edit = document.createElement('button');
-    edit.className = 'btn btn--secondary btn--sm';
-    edit.textContent = 'Edit';
-    edit.addEventListener('click', () => openWGSiteModal(s));
-    const del = document.createElement('button');
-    del.className = 'btn btn--ghost btn--sm btn--danger-hover';
-    del.textContent = 'Delete';
-    del.addEventListener('click', async () => {
-      if (!confirm(`Delete site ${s.name}? Its configuration stops working at once.`)) return;
-      try { await api('DELETE', `/api/wg/sites/${s.id}`); refreshVPN(); } catch (err) { alert(err.message); }
+    const cell = () => tr.appendChild(document.createElement('td'));
+
+    const tdName = twoLines(cell(), d.name);
+    tdName.title = `Address inside the VPN: ${d.address}`;
+
+    const tdBy = cell();
+    if (own) tdBy.textContent = 'You';
+    else { tdBy.textContent = d.email || d.sub; tdBy.title = `Logged in with ${providerName(d.provider)}`; }
+
+    // What it may reach: private hosts always, local addresses when named.
+    const tdReach = cell();
+    const reach = node('div', 'reach');
+    reach.append(node('span', 'reach__item', 'Private hosts'));
+    const routes = own ? (d.routes || []) : peopleRoutes(d);
+    for (const r of routes) reach.append(destChip(r));
+    tdReach.append(reach);
+    const expired = d.expiresAt && new Date(d.expiresAt) < new Date();
+    const notes = [];
+    if (routes.length && !lan) notes.push('Local network access is switched off: only private hosts work now.');
+    if (own && routes.length) notes.push(d.expiresAt ? `${expired ? 'Stopped working on' : 'Stops working on'} ${dayText(d.expiresAt)}.` : 'No end date, and no login behind it.');
+    if (notes.length) tdReach.append(node('span', 'cell-sub', notes.join(' ')));
+
+    const tdSeen = cell();
+    const traffic = st ? `${fmtBytes(st.rxBytes)} in, ${fmtBytes(st.txBytes)} out${st.connections ? ', ' + st.connections + ' open' : ''}` : '';
+    if (!d.enabled) twoLines(tdSeen, node('span', 'cell-main cell-main--muted', 'Paused'), 'switched off under "Allowed"');
+    else if (!status.running) twoLines(tdSeen, node('span', 'cell-main cell-main--muted', 'VPN not running'));
+    else if (!st) twoLines(tdSeen, node('span', 'cell-main cell-main--muted', 'No access'), own ? 'its end date has passed' : 'the login ran out or was ended: logging in again brings it back');
+    else if (st.up) twoLines(tdSeen, 'Connected', `${ago(st.lastHandshake)}${st.endpoint ? ', from ' + st.endpoint : ''}`);
+    else if (hadContact(st)) twoLines(tdSeen, node('span', 'cell-main cell-main--muted', 'Not connected'), `last seen ${ago(st.lastHandshake)}`);
+    else twoLines(tdSeen, node('span', 'cell-main cell-main--muted', 'Never connected'), d.createdAt ? `added ${dayText(d.createdAt)}` : '');
+    tdSeen.title = traffic;
+
+    const tdOn = cell();
+    const sw = document.createElement('input');
+    sw.type = 'checkbox';
+    sw.checked = d.enabled;
+    sw.title = d.enabled ? 'Pause this device' : 'Let this device connect again';
+    sw.setAttribute('aria-label', `${d.name} is allowed to connect`);
+    sw.addEventListener('change', async () => {
+      try { await api('PUT', `/api/wg/devices/${d.id}/enabled`, { enabled: sw.checked }); } catch (err) { alert(err.message); }
+      refreshVPN();
     });
-    tdAct.append(edit, ' ', del);
-    tr.appendChild(tdAct);
+    const wrap = node('span', 'switch switch--sm');
+    wrap.append(sw, node('span', 'switch__slot'), node('span', 'switch__knob'));
+    tdOn.append(wrap);
+
+    const tdAct = cell();
+    tdAct.className = 'actions';
+    const acts = node('span', 'rowactions');
+    if (own) {
+      const change = node('button', 'linkbtn', 'Change access');
+      change.type = 'button';
+      change.addEventListener('click', () => openWGDeviceModal({ device: d }));
+      acts.append(change);
+    }
+    const del = node('button', 'btn btn--ghost btn--sm btn--danger-hover', 'Remove');
+    del.type = 'button';
+    del.addEventListener('click', async () => {
+      if (!confirm(`Remove ${d.name}? Its setup file stops working at once and can never be used again.`)) return;
+      try { await api('DELETE', `/api/wg/devices/${d.id}`); refreshVPN(); } catch (err) { alert(err.message); }
+    });
+    acts.append(del);
+    tdAct.append(acts);
     body.appendChild(tr);
   }
 }
 
-$('wg-enabled').addEventListener('change', () => { $('wg-config').hidden = !$('wg-enabled').checked; });
+function renderVPNPeople() {
+  const off = !vpnStatus.enabled;
+  const lan = vpnSettings.wg_lan_access === '1';
+  const settings = vpnSettings;
+  const portals = hosts.filter((h) => h.type === 'vpn-portal');
+  const portal = portals[0];
+  const portalURL = portal ? `https://${portal.domains[0]}` : '';
+  const haveProvider = oidcProviders.length > 0;
+  $('vpn-people-card').classList.toggle('is-waiting', off);
+
+  const hint = $('vpn-people-hint');
+  hint.textContent = portal
+    ? `at ${portalURL}${portal.options && portal.options.portal ? ' with ' + providerName(portal.options.portal.providerId) : ''}`
+    : 'family or colleagues add their own devices';
+  $('vpn-people-intro').hidden = vpnSessions.length > 0;
+
+  const addRule = $('btn-add-vpnpolicy');
+  addRule.disabled = off || !haveProvider;
+  addRule.title = off ? 'Switch on the VPN first' : (haveProvider ? '' : 'A rule is about people from a login provider: add one first');
+
+  // The three steps, shown until people can log in.
+  const step = (id, done, desc, where, enabled) => {
+    const li = $(id);
+    li.classList.toggle('is-done', done);
+    li.classList.toggle('is-waiting', !done && !enabled);
+    li.classList.toggle('is-next', !done && enabled);
+    li.querySelector('.goal__mark').textContent = done ? '✓' : li.dataset.n || (li.dataset.n = li.querySelector('.goal__mark').textContent);
+    li.querySelector('.needs__d').textContent = desc;
+    li.querySelector('.goal__where').textContent = done ? '' : where;
+    const btn = li.querySelector('button');
+    btn.hidden = done;
+    btn.disabled = !enabled;
+  };
+  $('vpn-people-steps').hidden = !!portal;
+  step('vp-step-provider', haveProvider,
+    haveProvider ? `${oidcProviders.map((p) => p.name).join(', ')}.` : 'None yet. This is the service people sign in with, such as Keycloak or Authentik. On the Access control page it is called an identity provider.',
+    'on Access control', true);
+  step('vp-step-portal', false,
+    'A proxy host of the type "VPN portal", for example vpn.example.com. People go there to sign in and get their setup file. It has to be reachable without the VPN.',
+    off ? 'needs the VPN switched on' : (haveProvider ? 'on Proxy hosts' : 'needs step 1'), haveProvider && !off);
+  // A rule only needs a login provider, so it can be made before the login
+  // page exists; it is optional, and done once there is one.
+  step('vp-step-rules', vpnPolicies.length > 0,
+    vpnPolicies.length
+      ? `${vpnPolicies.length === 1 ? 'One rule' : vpnPolicies.length + ' rules'}, listed below.`
+      : 'Private hosts straight away. For addresses on your local network, add a rule for a group or for one person.',
+    off ? 'needs the VPN switched on' : (haveProvider ? 'optional' : 'needs step 1'), haveProvider && !off);
+
+  // Rules: who may reach what on the local network.
+  const pbody = $('vpnpolicies-body');
+  pbody.textContent = '';
+  $('vpnpolicies-table').hidden = vpnPolicies.length === 0;
+  const pnote = $('vpnpolicies-empty');
+  pnote.textContent = '';
+  if (vpnPolicies.length && !lan) {
+    pnote.hidden = false;
+    pnote.append(node('b', '', 'These rules do nothing yet. '), 'Local network access is switched off: switch it on under VPN settings.');
+  } else if (!vpnPolicies.length && portal) {
+    pnote.hidden = false;
+    pnote.append(node('b', '', 'No rules yet. '), 'People who log in reach your private hosts only. Add a rule to let a group or a person reach addresses on your local network.');
+  } else pnote.hidden = true;
+  for (const p of vpnPolicies) {
+    const tr = document.createElement('tr');
+    const cell = () => tr.appendChild(document.createElement('td'));
+    twoLines(cell(), describeSubject(p.subject), `rule "${p.name}"`);
+    const reach = node('div', 'reach');
+    for (const r of p.routes || []) reach.append(destChip(r));
+    cell().append(reach);
+    const tdAct = cell();
+    tdAct.className = 'actions';
+    const acts = node('span', 'rowactions');
+    const edit = node('button', 'linkbtn', 'Change');
+    edit.type = 'button';
+    edit.addEventListener('click', () => openPolicyModal(p));
+    const del = node('button', 'btn btn--ghost btn--sm btn--danger-hover', 'Remove');
+    del.type = 'button';
+    del.addEventListener('click', async () => {
+      if (!confirm(`Remove the rule "${p.name}"? Open connections that only this rule allowed are closed.`)) return;
+      try { await api('DELETE', `/api/wg/policies/${p.id}`); refreshVPN(); } catch (err) { alert(err.message); }
+    });
+    acts.append(edit, del);
+    tdAct.append(acts);
+    pbody.appendChild(tr);
+  }
+
+  // People and the state of their login.
+  const sbody = $('vpnsessions-body');
+  sbody.textContent = '';
+  $('vpnsessions-table').hidden = vpnSessions.length === 0;
+  const snote = $('vpnsessions-empty');
+  snote.hidden = !portal || vpnSessions.length > 0;
+  snote.textContent = '';
+  if (portal) snote.append(node('b', '', 'Nobody has logged in yet. '), `People go to ${portalURL}/, sign in and add their own devices there.`);
+  const isBlocked = (s) => vpnBlocked.some((b) => b.provider === s.provider && b.sub === s.sub);
+  for (const s of vpnSessions) {
+    const tr = document.createElement('tr');
+    const cell = () => tr.appendChild(document.createElement('td'));
+    twoLines(cell(), s.email || s.sub, (s.groups || []).join(', ')).title = `Logged in with ${providerName(s.provider)}`;
+    const theirs = wgDevices.filter((d) => d.kind === 'sso' && !d.revokedAt && d.provider === s.provider && d.sub === s.sub);
+    const tdDev = cell();
+    tdDev.textContent = theirs.map((d) => d.name).join(', ') || 'none yet';
+    if (!theirs.length) tdDev.className = 'hs-muted';
+    const until = new Date(s.transient && new Date(s.graceUntil) > new Date(s.leaseUntil) ? s.graceUntil : s.leaseUntil);
+    const hard = new Date(s.hardUntil);
+    const liveNow = s.state === 'active' && until > new Date() && hard > new Date();
+    let state = ['badge--muted', s.state === 'ended' ? 'Ended' : 'Ran out', 'has to log in again'];
+    if (isBlocked(s)) state = ['badge--danger', 'Blocked', 'stays off until you lift the block'];
+    else if (liveNow && s.transient) state = ['badge--danger', 'Provider unreachable', `keeps working until ${until.toLocaleTimeString()}`];
+    else if (liveNow) state = ['badge--success', 'Good', `checked ${ago(s.renewedAt)}`];
+    twoLines(cell(), node('span', `badge ${state[0]}`, state[1]), state[2]);
+    const tdAgain = cell();
+    tdAgain.textContent = liveNow ? dayText(s.hardUntil) : '';
+    const tdAct = cell();
+    tdAct.className = 'actions';
+    const acts = node('span', 'rowactions');
+    if (liveNow) {
+      const end = node('button', 'linkbtn', 'End login');
+      end.type = 'button';
+      end.title = 'Their devices stop until they log in again';
+      end.addEventListener('click', async () => {
+        if (!confirm(`End the login of ${s.email}? Their devices stop until they log in again.`)) return;
+        try { await api('POST', `/api/wg/sessions/${s.id}/end`); refreshVPN(); } catch (err) { alert(err.message); }
+      });
+      acts.append(end);
+    }
+    if (!isBlocked(s)) {
+      const block = node('button', 'btn btn--ghost btn--sm btn--danger-hover', 'Block');
+      block.type = 'button';
+      block.title = 'Their devices stay off whatever the login provider says';
+      block.addEventListener('click', async () => {
+        if (!confirm(`Block ${s.email} from the VPN? Their devices stop now and stay off, whatever the login provider says, until you lift the block.`)) return;
+        try { await api('POST', '/api/wg/owners/block', { provider: s.provider, sub: s.sub, email: s.email }); refreshVPN(); } catch (err) { alert(err.message); }
+      });
+      acts.append(block);
+    }
+    tdAct.append(acts);
+    sbody.appendChild(tr);
+  }
+  const blockedBox = $('vpnblocked');
+  blockedBox.hidden = vpnBlocked.length === 0;
+  blockedBox.textContent = '';
+  if (vpnBlocked.length) {
+    blockedBox.append('Blocked: ');
+    vpnBlocked.forEach((b, i) => {
+      if (i) blockedBox.append(', ');
+      blockedBox.append(`${b.email || b.sub} `);
+      const un = node('button', 'linkbtn', 'lift the block');
+      un.type = 'button';
+      un.addEventListener('click', async () => {
+        try { await api('POST', '/api/wg/owners/unblock', { provider: b.provider, sub: b.sub }); refreshVPN(); } catch (err) { alert(err.message); }
+      });
+      blockedBox.append(un);
+    });
+  }
+
+  $('vl-lease').value = settings.wg_lease_minutes || '';
+  $('vl-grace').value = settings.wg_outage_grace_minutes || '';
+  $('vl-days').value = settings.wg_session_days || '';
+  $('vl-maxage').value = settings.wg_auth_max_age || '';
+  $('vl-devices').value = settings.wg_devices_per_user || '';
+  $('vpn-lease-summary').textContent = `checked every ${settings.wg_lease_minutes || 10} minutes, log in again after ${settings.wg_session_days || 30} days, ${settings.wg_devices_per_user || 5} devices per person`;
+}
+
+// networkUsers lists the hosts and streams that send traffic through one of
+// the other networks.
+function networkUsers(id) {
+  const out = [];
+  for (const h of hosts) {
+    const through = [h.upstream, ...(h.upstreams || []), ...(h.locations || []).map((l) => l.upstream)].some((u) => u && u.via === id);
+    if (through) out.push(h.domains && h.domains[0] ? h.domains[0] : `host ${h.id}`);
+  }
+  for (const s of vpnStreams) if (s.via === id) out.push(`stream on port ${s.listenPort || s.port || '?'}`);
+  return out;
+}
+
+function renderVPNNetworks() {
+  const status = vpnStatus;
+  const off = !status.enabled;
+  $('btn-add-wgsite').disabled = !status.running;
+  $('btn-add-wgsite').title = status.running ? '' : 'Switch on the VPN first';
+  $('vpn-sites-card').classList.toggle('is-waiting', off);
+  const live = {};
+  for (const st of status.sites || []) live[st.id] = st;
+  const body = $('wgsites-body');
+  body.textContent = '';
+  const empty = $('wgsites-empty');
+  empty.hidden = wgSites.length > 0;
+  empty.textContent = '';
+  empty.append(node('b', '', 'No other network connected. '), 'For a service at the office or on a rented server that a proxy host or a stream here should use. Not needed for your own phone or laptop. '
+    + (off ? 'Needs the VPN switched on, at the top of this page.' : ''));
+  $('wgsites-table').hidden = wgSites.length === 0;
+  for (const s of wgSites) {
+    const st = live[s.id];
+    const tr = document.createElement('tr');
+    const cell = () => tr.appendChild(document.createElement('td'));
+    twoLines(cell(), s.name).title = `Address inside the VPN: ${s.address}`;
+    const tdNet = cell();
+    tdNet.className = 'mono';
+    tdNet.textContent = (s.networks || []).join(', ');
+    const how = s.endpoint ? `quicgate calls it at ${s.endpoint}` : 'it calls in';
+    const tdState = cell();
+    if (!s.enabled) twoLines(tdState, node('span', 'badge badge--muted', 'Switched off'), 'hosts and streams that go through it answer 502');
+    else if (!status.running) twoLines(tdState, node('span', 'badge badge--danger', 'VPN not running'));
+    else if (st && st.up) twoLines(tdState, node('span', 'badge badge--success', 'Connected'), `${ago(st.lastHandshake)}, ${how}`);
+    else if (hadContact(st)) twoLines(tdState, node('span', 'badge badge--danger', 'Lost'), `last seen ${ago(st.lastHandshake)}, ${how}`);
+    else twoLines(tdState, node('span', 'badge badge--muted', 'Waiting'), s.endpoint
+      ? `No contact yet. quicgate calls it at ${s.endpoint} with the first request that needs it.`
+      : 'It has not connected yet. Put its setup file on the router or the machine there.');
+    // A problem of this network alone (a name that does not resolve) does
+    // not stop it from calling in, so it is said next to the state.
+    if (st && st.warning) tdState.append(node('span', 'cell-sub cell-sub--bad', st.warning));
+    if (st) tdState.title = `${fmtBytes(st.rxBytes)} in, ${fmtBytes(st.txBytes)} out${st.connections ? ', ' + st.connections + ' open' : ''}`;
+    const users = networkUsers(s.id);
+    const tdUsed = cell();
+    if (users.length) twoLines(tdUsed, users.slice(0, 3).join(', ') + (users.length > 3 ? ` and ${users.length - 3} more` : ''));
+    else twoLines(tdUsed, node('span', 'cell-main cell-main--muted', 'Nothing yet'), `On a host or a stream, pick "Reach through: ${s.name}".`);
+    const tdAct = cell();
+    tdAct.className = 'actions';
+    const acts = node('span', 'rowactions');
+    const edit = node('button', 'linkbtn', 'Change');
+    edit.type = 'button';
+    edit.addEventListener('click', () => openWGSiteModal(s));
+    const del = node('button', 'btn btn--ghost btn--sm btn--danger-hover', 'Remove');
+    del.type = 'button';
+    del.addEventListener('click', async () => {
+      if (!confirm(`Remove ${s.name}? Its setup file stops working at once, and hosts and streams that go through it answer 502.`)) return;
+      try { await api('DELETE', `/api/wg/sites/${s.id}`); refreshVPN(); } catch (err) { alert(err.message); }
+    });
+    acts.append(edit, del);
+    tdAct.append(acts);
+    body.appendChild(tr);
+  }
+}
+
+// The map: per thing a person comes to do, where it stands and the one next
+// step. state is done, next (something concrete is waiting), idle (not
+// started, and nothing is wrong with that) or waiting (needs the VPN first).
+function setGoal(id, state, text, label, action, where) {
+  const el = $(id);
+  for (const s of ['done', 'next', 'waiting']) el.classList.toggle(`is-${s}`, s === state);
+  const mark = el.querySelector('.goal__mark');
+  if (!el.dataset.n) el.dataset.n = mark.textContent;
+  mark.textContent = state === 'done' ? '✓' : el.dataset.n;
+  el.querySelector('.goal__state').textContent = text;
+  el.querySelector('.goal__where').textContent = where || '';
+  const btn = el.querySelector('button');
+  btn.textContent = label;
+  btn.disabled = !action;
+  btn.onclick = action || null;
+  // One button on the map stands out: the first step that is waiting.
+  let first = true;
+  for (const g of $('vpnmap').querySelectorAll('.goal')) {
+    const lead = first && g.classList.contains('is-next');
+    if (lead) first = false;
+    g.querySelector('button').className = 'btn btn--sm ' + (lead ? 'btn--primary' : 'btn--secondary');
+  }
+}
+
+function openVPNFold(id) {
+  const fold = $(id);
+  fold.open = true;
+  fold.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function switchLocalAccessOn() {
+  if (!confirm('Switch local network access on? Devices can then reach the local addresses you named for them, and nothing else. The VPN restarts, which drops open VPN connections for a moment.')) return false;
+  try {
+    await api('PUT', '/api/settings', { wg_lan_access: '1' });
+  } catch (err) {
+    alert(`${err.message}\n\nYou can set this under VPN settings, at the bottom of the VPN page.`);
+    return false;
+  }
+  await refreshVPN();
+  return true;
+}
+
+async function addPortalHost() {
+  if (!oidcProviders.length) {
+    alert('A login page signs people in through a login provider. Add one first: Access control page, Identity providers.');
+    switchPage('access');
+    return;
+  }
+  switchPage('hosts');
+  await refresh();
+  openModal(null);
+  $('f-type').value = 'vpn-portal';
+  syncHostType();
+}
+
+function renderVPNMap() {
+  const status = vpnStatus;
+  const lan = vpnSettings.wg_lan_access === '1';
+  const devices = wgDevices.filter((d) => !d.revokedAt);
+  const live = {};
+  for (const st of status.sites || []) live[st.id] = st;
+
+  if (!status.enabled) {
+    setGoal('vg-own', 'waiting', 'Switch on the VPN first. Then: add a device, and mark a host "VPN only".', 'Add a device');
+    setGoal('vg-local', 'waiting', 'Switch on the VPN first. Then: add a device and name the address it may reach.', 'Give a device access');
+    setGoal('vg-people', 'waiting', 'Switch on the VPN first. It also needs a login provider, such as Keycloak.', 'Add a login provider');
+    setGoal('vg-networks', 'waiting', 'Switch on the VPN first. Then: connect the other network.', 'Connect a network');
+    return;
+  }
+  const canAdd = status.running;
+
+  // 1. My own phone or laptop.
+  const privateHosts = hosts.filter((h) => h.options && h.options.vpnOnly).length;
+  if (!devices.length) setGoal('vg-own', 'next', 'No device yet. A device gets a setup file for the WireGuard app.', 'Add a device', canAdd && (() => openWGDeviceModal({})));
+  else if (!privateHosts) setGoal('vg-own', 'next', `${plural(devices.length, 'device', 'devices')} added. No host is private yet, so they have nothing to open: tick "VPN only" on a proxy host.`, 'Make a host private', () => switchPage('hosts'), 'on Proxy hosts');
+  else setGoal('vg-own', 'done', `${plural(devices.length, 'device', 'devices')}, ${plural(privateHosts, 'private host', 'private hosts')}.`, 'Add a device', canAdd && (() => openWGDeviceModal({})));
+
+  // 2. One device, one address at home.
+  const withLocal = devices.filter((d) => isOwnDevice(d) && (d.routes || []).length);
+  if (!withLocal.length) {
+    setGoal('vg-local', 'idle', `No device of yours may reach your local network yet${lan ? '' : ', and local network access is switched off'}.`, 'Give a device access', canAdd && (() => openWGDeviceModal({ local: true })));
+  } else if (!lan) {
+    setGoal('vg-local', 'next', `${withLocal.map((d) => d.name).join(', ')} ${withLocal.length === 1 ? 'has' : 'have'} local addresses, but local network access is switched off.`, 'Switch it on', () => switchLocalAccessOn());
+  } else {
+    const first = withLocal[0];
+    const r = first.routes[0];
+    const more = withLocal.length - 1;
+    setGoal('vg-local', 'done', `${first.name} may reach ${r.name || destAddress(r)}${first.routes.length > 1 ? ' and more' : ''}${more ? `, and ${plural(more, 'other device has', 'other devices have')} local addresses too` : ''}.`, 'Give a device access', canAdd && (() => openWGDeviceModal({ local: true })));
+  }
+
+  // 3. Other people log in.
+  const portal = hosts.find((h) => h.type === 'vpn-portal');
+  if (!oidcProviders.length) setGoal('vg-people', 'idle', 'Needs a login provider first, such as Keycloak or Authentik.', 'Add a login provider', () => switchPage('access'), 'on Access control');
+  else if (!portal) setGoal('vg-people', 'next', 'Needs a login page: a proxy host of the type "VPN portal".', 'Add the login page', () => addPortalHost(), 'on Proxy hosts');
+  else if (!vpnSessions.length) {
+    const url = `https://${portal.domains[0]}/`;
+    setGoal('vg-people', 'next', `Nobody has logged in yet. Send people to ${url}`, 'Copy the address', async (e) => {
+      try { await navigator.clipboard.writeText(url); e.currentTarget.textContent = 'Copied'; } catch (err) { prompt('The address of the login page', url); }
+    });
+  } else setGoal('vg-people', 'done', `${plural(vpnSessions.length, 'person has', 'people have')} logged in at ${portal.domains[0]}. ${plural(vpnPolicies.length, 'rule', 'rules')} for the local network.`, 'Add a rule', () => openPolicyModal(null));
+
+  // 4. Another network.
+  if (!wgSites.length) setGoal('vg-networks', 'idle', 'No other network connected. Only needed when a service lives somewhere else.', 'Connect a network', canAdd && (() => openWGSiteModal(null)));
+  else {
+    const never = wgSites.find((s) => s.enabled && !(live[s.id] && (live[s.id].up || hadContact(live[s.id]))));
+    const unused = wgSites.find((s) => !networkUsers(s.id).length);
+    if (never) setGoal('vg-networks', 'next', `${never.name} is added but has not connected yet.`, 'How to connect it', () => openVPNFold('vpn-sites-info'));
+    else if (unused) setGoal('vg-networks', 'next', `${unused.name} is connected, but no host or stream uses it yet. Pick it under "Reach through".`, 'Pick it on a host', () => switchPage('hosts'), 'on Proxy hosts');
+    else setGoal('vg-networks', 'done', `${plural(wgSites.length, 'network', 'networks')} connected and in use.`, 'Connect a network', canAdd && (() => openWGSiteModal(null)));
+  }
+}
+
+$('vpn-open-settings').addEventListener('click', () => openVPNFold('vpn-settings'));
+$('vm-guide').addEventListener('click', async (e) => { e.preventDefault(); switchPage('help'); await openGuide('vpn'); });
+$('vp-step-provider').querySelector('button').addEventListener('click', () => switchPage('access'));
+$('vp-step-portal').querySelector('button').addEventListener('click', () => addPortalHost());
+$('vp-step-rules').querySelector('button').addEventListener('click', () => openPolicyModal(null));
+
+// withPort adds the port to an address that was typed without one.
+function withPort(address, port) {
+  address = address.trim();
+  if (!address || /:\d+$/.test(address)) return address;
+  return `${address}:${port || 51820}`;
+}
+
+$('vpn-start').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const port = $('vs-port').value || '';
+  const ok = await saveSettings($('vpn-start'), {
+    wg_enabled: '1',
+    wg_port: port,
+    wg_endpoint: withPort($('vs-endpoint').value, port),
+    ...($('vs-network').disabled || !$('vs-network').value.trim() ? {} : { wg_network: $('vs-network').value.trim() }),
+  });
+  if (ok) refreshVPN();
+});
+
 $('wg-form').addEventListener('submit', async (e) => {
   e.preventDefault();
+  const on = $('wg-enabled').checked;
+  const lanOn = $('vlan-enabled').checked;
+  if (!on && vpnSettings.wg_enabled === '1' && !confirm('Switch the VPN off? Every device and every other network stops at once.')) return;
+  if (lanOn && vpnSettings.wg_lan_access !== '1' && !confirm('Switch local network access on? Devices can then reach the local addresses you named for them, and nothing else. The VPN restarts, which drops open VPN connections for a moment.')) return;
+  const port = $('wg-port').value || '';
   await saveSettings($('wg-form'), {
-    wg_enabled: $('wg-enabled').checked ? '1' : '0',
-    wg_port: $('wg-port').value || '',
-    wg_endpoint: $('wg-endpoint').value.trim(),
-    ...($('wg-network').disabled ? {} : { wg_network: $('wg-network').value.trim() }),
+    wg_enabled: on ? '1' : '0',
+    wg_port: port,
+    wg_endpoint: withPort($('wg-endpoint').value, port),
+    ...($('wg-network').disabled || !$('wg-network').value.trim() ? {} : { wg_network: $('wg-network').value.trim() }),
+    wg_lan_access: lanOn ? '1' : '0',
+    wg_protected_endpoints: $('vlan-protected').value.split(/[\s,]+/).filter(Boolean).join(', '),
+    wg_no_published_aliases: $('vlan-waive').checked ? '1' : '0',
+  });
+  refreshVPN();
+});
+
+$('vlan-check').addEventListener('click', async () => {
+  const out = $('vlan-check-answer');
+  let dest = $('vlan-check-dest').value.trim();
+  if (dest && !dest.includes(':')) dest += ':443';
+  const ip = dest.split(':')[0];
+  try {
+    const r = await api('POST', '/api/wg/explain', { routes: [{ cidr: `${ip}/32`, proto: 'any' }], proto: 'tcp', dest });
+    const refused = r.answer.startsWith('refused');
+    out.textContent = r.answer.startsWith('refused')
+      ? `Nobody can reach ${dest}, whatever they are given: ${r.answer.replace(/^refused:\s*/, '')}.`
+      : `A device that was given ${ip} could reach ${dest}. Nothing protects it.`;
+  } catch (err) {
+    out.textContent = err.message;
+  }
+});
+
+$('vpn-lease-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  await saveSettings($('vpn-lease-form'), {
+    wg_lease_minutes: $('vl-lease').value, wg_outage_grace_minutes: $('vl-grace').value, wg_session_days: $('vl-days').value,
+    wg_auth_max_age: $('vl-maxage').value, wg_devices_per_user: $('vl-devices').value,
   });
   refreshVPN();
 });
@@ -2954,7 +3493,7 @@ $('w-key-paste').addEventListener('change', syncWGKeyMode);
 
 async function openWGSiteModal(s) {
   editingWGSiteId = s ? s.id : null;
-  $('wgsite-modal-title').textContent = s ? `Edit site ${s.name}` : 'Add site';
+  $('wgsite-modal-title').textContent = s ? `Change ${s.name}` : 'Connect a network';
   setError('wgsite-error', null);
   $('wgsite-form').hidden = false;
   $('wgsite-created').hidden = true;
@@ -3033,7 +3572,7 @@ $('wgsite-form').addEventListener('submit', async (e) => {
       `# quicgate`,
       `PublicKey = ${status.publicKey}`,
       `PresharedKey = ${created.presharedKey}`,
-      ...(status.endpoint ? [`Endpoint = ${status.endpoint}`] : ['# Endpoint = (set "Public address" on the VPN page, or let quicgate call this site)']),
+      ...(status.endpoint ? [`Endpoint = ${status.endpoint}`] : ['# Endpoint = (fill in "Address devices connect to" under VPN settings, or let quicgate call this network)']),
       `AllowedIPs = ${status.address}/32`,
       ...(created.keepalive ? [`PersistentKeepalive = ${created.keepalive}`] : []),
       '',
@@ -3054,7 +3593,6 @@ let wgDevices = [];
 let vpnPolicies = [];
 let vpnSessions = [];
 let vpnBlocked = [];
-let wgDeviceMode = 'admin'; // or 'breakglass'
 let editingPolicyId = null;
 
 // loadVPNPeople fetches what the subject pickers offer: the devices, and the
@@ -3147,7 +3685,7 @@ function makeSubjectPicker(box, current, identityOnly, fixedProvider) {
       const people = knownPeople(providerID());
       for (const p of people) control.add(new Option(p.email, p.sub));
       if (cur && cur.sub && !people.some((p) => p.sub === cur.sub)) control.add(new Option(cur.sub, cur.sub));
-      if (!control.options.length) control.add(new Option('nobody has logged in at a portal yet', ''));
+      if (!control.options.length) control.add(new Option('nobody has logged in yet', ''));
       if (cur && cur.sub) control.value = cur.sub;
     } else if (kind.value === 'group') {
       control = document.createElement('input');
@@ -3182,327 +3720,236 @@ function makeSubjectPicker(box, current, identityOnly, fixedProvider) {
   };
 }
 
-// addRouteRow adds one LAN destination to a routes editor.
-function addRouteRow(boxId, route) {
-  const row = document.createElement('div');
-  row.className = 'hdr-rule';
-  row.innerHTML =
-    '<input class="rt-cidr" placeholder="192.168.1.0/24 or one address" autocomplete="off" spellcheck="false">' +
-    '<select class="rt-proto"><option value="any">tcp + udp</option><option value="tcp">tcp</option><option value="udp">udp</option></select>' +
-    '<input class="rt-ports" placeholder="all ports" autocomplete="off" spellcheck="false">' +
-    '<button type="button" class="btn btn--ghost btn--sm">&times;</button>';
+/* destinations on the local network: one line per address, with a name and
+   a "what for" that fills in the ports */
+const DEST_USES = [
+  // key, label, protocol, ports (null: the person types them)
+  ['file', 'File sharing', 'tcp', '445'],
+  ['web', 'Web page', 'tcp', '80,443'],
+  ['rdp', 'Remote desktop', 'any', '3389'],
+  ['ssh', 'SSH', 'tcp', '22'],
+  ['print', 'Printing', 'tcp', '631,9100'],
+  ['all', 'Everything on this address', 'any', ''],
+  ['tcp', 'Other ports (TCP)', 'tcp', null],
+  ['udp', 'Other ports (UDP)', 'udp', null],
+  ['any', 'Other ports (TCP and UDP)', 'any', null],
+];
+
+function destUse(route) {
+  const proto = route.proto || 'any';
+  const ports = (route.ports || '').replace(/\s+/g, '');
+  return DEST_USES.find((u) => u[3] !== null && u[2] === proto && u[3] === ports) || DEST_USES.find((u) => u[3] === null && u[2] === proto);
+}
+
+// destAddress writes a route's address the way a person does: one address
+// without its /32.
+const destAddress = (r) => String(r.cidr || '').replace(/\/32$/, '');
+
+// destChip shows one destination: its name, its address and what for.
+function destChip(r) {
+  const chip = node('span', 'reach__item');
+  const single = /\/32$/.test(r.cidr || '') || !String(r.cidr || '').includes('/');
+  if (r.name) chip.append(r.name + ' ');
+  else if (!single) chip.append('Network ');
+  chip.append(node('code', '', destAddress(r)));
+  const use = destUse(r);
+  let what = '';
+  if (use[3] === null) what = `${{ tcp: 'TCP', udp: 'UDP', any: 'TCP and UDP' }[use[2]]} ${r.ports}`;
+  else if (use[0] !== 'all') what = use[1].toLowerCase();
+  if (what) chip.append(' ' + what);
+  chip.title = use[0] === 'all' ? 'Every port, TCP and UDP' : `${{ tcp: 'TCP', udp: 'UDP', any: 'TCP and UDP' }[r.proto || 'any']}, port ${r.ports}`;
+  return chip;
+}
+
+// addDestRow adds one destination to an editor. onChange is called when the
+// person changed something that is worth checking again.
+function addDestRow(boxId, route, onChange) {
+  const row = node('div', 'dest');
+  const field = (label, el) => { const l = node('label', '', label); l.append(el); row.append(l); return el; };
+  const name = field('Name', node('input', 'dt-name'));
+  name.placeholder = 'NAS';
+  name.maxLength = 64;
+  name.autocomplete = 'off';
+  const cidr = field('Address', node('input', 'dt-cidr mono'));
+  cidr.placeholder = '192.168.1.10';
+  cidr.autocomplete = 'off';
+  cidr.spellcheck = false;
+  const use = field('What for', node('select', 'dt-use'));
+  for (const u of DEST_USES) use.add(new Option(u[1], u[0]));
+  const ports = field('Ports', node('input', 'dt-ports mono'));
+  ports.autocomplete = 'off';
+  ports.spellcheck = false;
+  const del = node('button', 'btn btn--ghost btn--sm', '×');
+  del.type = 'button';
+  del.title = 'Take this address out';
+  del.setAttribute('aria-label', 'Take this address out');
+  row.append(del);
+
+  const sync = (keep) => {
+    const u = DEST_USES.find((x) => x[0] === use.value);
+    ports.readOnly = u[3] !== null;
+    if (u[3] !== null) ports.value = u[3];
+    else if (!keep) ports.value = '';
+    ports.placeholder = u[0] === 'all' ? 'all ports' : '8080 or 8000-8100';
+  };
   if (route) {
-    row.querySelector('.rt-cidr').value = route.cidr;
-    row.querySelector('.rt-proto').value = route.proto || 'any';
-    row.querySelector('.rt-ports').value = route.ports || '';
-  }
-  row.querySelector('button').addEventListener('click', () => row.remove());
+    name.value = route.name || '';
+    cidr.value = destAddress(route);
+    use.value = destUse(route)[0];
+    ports.value = route.ports || '';
+    sync(true);
+  } else sync(false);
+  use.addEventListener('change', () => { sync(false); if (ports.readOnly === false) ports.focus(); });
+  row.addEventListener('change', () => onChange && onChange());
+  del.addEventListener('click', () => { row.remove(); if (onChange) onChange(); });
   $(boxId).appendChild(row);
 }
 
-function readRoutes(boxId) {
+function readDests(boxId) {
   const out = [];
   for (const row of $(boxId).children) {
-    let cidr = row.querySelector('.rt-cidr').value.trim();
+    let cidr = row.querySelector('.dt-cidr').value.trim();
     if (!cidr) continue;
     if (!cidr.includes('/')) cidr += '/32';
-    out.push({ cidr, proto: row.querySelector('.rt-proto').value, ports: row.querySelector('.rt-ports').value.trim() });
+    const u = DEST_USES.find((x) => x[0] === row.querySelector('.dt-use').value);
+    out.push({ name: row.querySelector('.dt-name').value.trim(), cidr, proto: u[2], ports: row.querySelector('.dt-ports').value.replace(/\s+/g, '') });
   }
   return out;
 }
 
-const describeRoute = (r) => `${r.cidr}${r.ports ? ` ${r.proto === 'any' ? 'tcp+udp' : r.proto} ${r.ports}` : (r.proto && r.proto !== 'any' ? ' ' + r.proto : '')}`;
-
-async function refreshVPNDevices(settings, status) {
-  [vpnPolicies, vpnBlocked] = await Promise.all([
-    api('GET', '/api/wg/policies').catch(() => []),
-    api('GET', '/api/wg/blocked').catch(() => []),
-    loadVPNPeople(),
-  ]);
-  if (!oidcProviders.length) oidcProviders = await api('GET', '/api/oidc-providers').catch(() => []);
-  const portals = hosts.filter((h) => h.type === 'vpn-portal');
-  const shownDevices = wgDevices.filter((d) => !d.revokedAt);
-  const lan = settings.wg_lan_access === '1';
-
-  $('wg-network').disabled = wgSites.length > 0 || wgDevices.some((d) => !d.revokedAt);
-  $('btn-add-wgdevice').disabled = !status.running;
-  $('btn-add-wgdevice').title = status.running ? '' : 'Switch WireGuard on first';
-  $('btn-add-breakglass').hidden = !lan;
-  $('btn-add-breakglass').disabled = !status.running;
-
-  // Devices.
-  const live = {};
-  for (const st of status.devices || []) live[st.id] = st;
-  const shown = shownDevices;
-  const body = $('wgdevices-body');
-  body.innerHTML = '';
-  $('wgdevices-empty').hidden = shown.length > 0;
-  $('wgdevices-table').hidden = shown.length === 0;
-  for (const d of shown) {
-    const st = live[d.id];
-    const tr = document.createElement('tr');
-    const cell = (text, cls) => { const td = document.createElement('td'); if (cls) td.className = cls; td.textContent = text; tr.appendChild(td); return td; };
-    cell(d.name, 'domain');
-    const tdOwner = cell('');
-    if (d.kind === 'breakglass') {
-      const expired = d.expiresAt && new Date(d.expiresAt) < new Date();
-      tdOwner.innerHTML = `<span class="badge badge--danger">break-glass</span> <span class="hs-muted">${esc(d.expiresAt ? (expired ? 'expired ' : 'until ') + new Date(d.expiresAt).toLocaleDateString() : 'never expires')}</span>`;
-      tdOwner.title = 'Reaches: ' + (d.routes || []).map(describeRoute).join(', ');
-    } else if (d.kind === 'sso') {
-      tdOwner.textContent = d.email || d.sub;
-      tdOwner.title = `${providerName(d.provider)}, subject ${d.sub}`;
-    } else {
-      tdOwner.innerHTML = '<span class="hs-muted">added by an admin</span>';
+// checkDests asks quicgate, for every destination in an editor, whether a
+// device that was given it could really get there, and says why not. It
+// tries the first port of each line.
+const destCheckRun = {};
+async function checkDests(boxId, outId) {
+  const run = (destCheckRun[outId] = (destCheckRun[outId] || 0) + 1);
+  const lines = [];
+  for (const r of readDests(boxId)) {
+    const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+)$/.exec(r.cidr);
+    if (!m) { lines.push([false, `${r.cidr} is not an address like 192.168.1.10`]); continue; }
+    const single = m[5] === '32';
+    // For a whole network, try its first address.
+    const host = single ? destAddress(r) : `${m[1]}.${m[2]}.${m[3]}.${Math.min(254, (parseInt(m[4], 10) & ~1) + 1)}`;
+    const port = (/\d+/.exec(r.ports) || ['443'])[0];
+    const proto = r.proto === 'udp' ? 'udp' : 'tcp';
+    try {
+      const a = await api('POST', '/api/wg/explain', { routes: [r], proto, dest: `${host}:${port}` });
+      if (a.answer.startsWith('refused')) lines.push([false, `${host} on port ${port} cannot be reached: ${a.answer.replace(/^refused:\s*/, '')}`]);
+      else lines.push([true, `Checked: ${host} on port ${port} can be reached with this${single ? '' : ' (tried the first address of the network)'}.`]);
+    } catch (err) {
+      lines.push([false, err.message]);
     }
-    cell(d.address, 'mono');
-    const tdState = cell('');
-    let badge = ['badge--muted', 'disabled', ''];
-    if (d.enabled && !status.running) badge = ['badge--danger', 'endpoint down', ''];
-    else if (d.enabled && !st) badge = ['badge--muted', 'no access', d.kind === 'sso' ? 'The owner\'s login ran out, was ended, or no longer allows a device. Logging in at the portal brings it back.' : 'The device has expired.'];
-    else if (d.enabled && st.up) badge = ['badge--success', 'connected', `last handshake ${ago(st.lastHandshake)}${st.endpoint ? ', from ' + st.endpoint : ''}`];
-    else if (d.enabled) badge = ['badge--muted', 'not connected', st.lastHandshake && !st.lastHandshake.startsWith('0001') ? `last handshake ${ago(st.lastHandshake)}` : 'never seen'];
-    tdState.innerHTML = `<span class="badge ${badge[0]}">${esc(badge[1])}</span>`;
-    tdState.title = badge[2];
-    cell(st ? `${fmtBytes(st.rxBytes)} in, ${fmtBytes(st.txBytes)} out${st.connections ? ', ' + st.connections + ' open' : ''}` : '-', 'hs-muted');
-    const tdOn = cell('');
-    const sw = document.createElement('input');
-    sw.type = 'checkbox';
-    sw.checked = d.enabled;
-    sw.title = d.enabled ? 'Switch the device off for now' : 'Switch the device on again';
-    sw.addEventListener('change', async () => {
-      try { await api('PUT', `/api/wg/devices/${d.id}/enabled`, { enabled: sw.checked }); } catch (err) { alert(err.message); }
-      refreshVPN();
-    });
-    const wrap = document.createElement('span');
-    wrap.className = 'switch';
-    wrap.innerHTML = '<span class="switch__slot"></span><span class="switch__knob"></span>';
-    wrap.prepend(sw);
-    tdOn.append(wrap);
-    const tdAct = document.createElement('td');
-    tdAct.className = 'actions';
-    const del = document.createElement('button');
-    del.className = 'btn btn--ghost btn--sm btn--danger-hover';
-    del.textContent = 'Revoke';
-    del.addEventListener('click', async () => {
-      if (!confirm(`Revoke ${d.name}? Its configuration stops working at once and can never be used again.`)) return;
-      try { await api('DELETE', `/api/wg/devices/${d.id}`); refreshVPN(); } catch (err) { alert(err.message); }
-    });
-    tdAct.append(del);
-    tr.appendChild(tdAct);
-    body.appendChild(tr);
   }
-
-  // People.
-  // Nothing on this page hides because it is not in use yet: a part that is
-  // not set up says what it is for and what it needs.
-  const vpnOnlyHosts = hosts.filter((h) => h.options && h.options.vpnOnly).length;
-  const vm = (id, text, on, blocked) => {
-    $(id).textContent = text;
-    $(id).parentElement.classList.toggle('is-on', !!on);
-    $(id).parentElement.classList.toggle('is-blocked', !!blocked);
-  };
-  const off = !status.enabled;
-  vm('vm-endpoint', off ? 'Off.' : (status.running ? `On, UDP ${status.port}${status.endpoint ? '' : '. No public address yet: devices need one.'}` : 'On, but not running.'), status.running);
-  vm('vm-sites', off ? 'Needs the endpoint.' : plural(wgSites.length, 'site', 'sites') + '.', wgSites.length > 0, off);
-  vm('vm-devices', off ? 'Needs the endpoint.' : `${plural(shownDevices.length, 'device', 'devices')}, ${plural(vpnOnlyHosts, 'VPN-only host', 'VPN-only hosts')}.`, shownDevices.length > 0, off);
-  let peopleLine = 'Needs the endpoint.';
-  if (!off) {
-    if (!oidcProviders.length) peopleLine = 'Needs an identity provider first (Access lists page).';
-    else if (!portals.length) peopleLine = 'No portal host yet.';
-    else peopleLine = `Portal at ${portals[0].domains[0]}. ${plural(vpnSessions.length, 'person', 'people')}. LAN access ${lan ? 'on' : 'off'}, ${plural(vpnPolicies.length, 'policy', 'policies')}.`;
-  }
-  vm('vm-people', peopleLine, portals.length > 0, off);
-  $('vm-add-portal').hidden = portals.length > 0;
-  for (const id of ['vpn-people-card', 'vpn-lease-form', 'vpn-policies-card']) $(id).classList.toggle('is-waiting', off);
-  const sessionsEmpty = $('vpnsessions-empty');
-  sessionsEmpty.hidden = vpnSessions.length > 0;
-  sessionsEmpty.textContent = portals.length
-    ? `Nobody has logged in yet. People log in at https://${portals[0].domains[0]}/ and add their own devices there.`
-    : 'Nobody can log in yet: there is no VPN portal. A portal is a host of type "VPN portal" (step 4 above adds one). People log in there with single sign-on and add their own devices; quicgate then checks with the identity provider every few minutes whether they may still be on the VPN.';
-  const sbody = $('vpnsessions-body');
-  sbody.innerHTML = '';
-  const isBlocked = (s) => vpnBlocked.some((b) => b.provider === s.provider && b.sub === s.sub);
-  for (const s of vpnSessions) {
-    const tr = document.createElement('tr');
-    const cell = (text, cls) => { const td = document.createElement('td'); if (cls) td.className = cls; td.textContent = text; tr.appendChild(td); return td; };
-    cell(s.email || s.sub, 'domain').title = `${providerName(s.provider)}, subject ${s.sub}`;
-    cell((s.groups || []).join(', ') || '-', 'hs-muted');
-    const tdState = cell('');
-    const until = new Date(s.transient && new Date(s.graceUntil) > new Date(s.leaseUntil) ? s.graceUntil : s.leaseUntil);
-    const hard = new Date(s.hardUntil);
-    const liveNow = s.state === 'active' && until > new Date() && hard > new Date();
-    let badge = ['badge--muted', s.state === 'ended' ? 'ended by an admin' : 'ran out', 'A login at the portal starts a new one.'];
-    if (isBlocked(s)) badge = ['badge--danger', 'blocked', 'A login does not bring the devices back until the block is lifted.'];
-    else if (liveNow && s.transient) badge = ['badge--danger', 'provider unreachable', `The last check failed without an answer about the account. Access lasts until ${until.toLocaleTimeString()}.`];
-    else if (liveNow) badge = ['badge--success', 'active', `checked ${ago(s.renewedAt)}, good until ${until.toLocaleTimeString()}`];
-    tdState.innerHTML = `<span class="badge ${badge[0]}">${esc(badge[1])}</span>`;
-    tdState.title = badge[2];
-    cell(liveNow ? hard.toLocaleDateString() : '-', 'hs-muted');
-    const tdAct = document.createElement('td');
-    tdAct.className = 'actions';
-    if (liveNow) {
-      const end = document.createElement('button');
-      end.className = 'btn btn--secondary btn--sm';
-      end.textContent = 'End';
-      end.addEventListener('click', async () => {
-        if (!confirm(`End the login of ${s.email}? Their devices stop until they log in at the portal again.`)) return;
-        try { await api('POST', `/api/wg/sessions/${s.id}/end`); refreshVPN(); } catch (err) { alert(err.message); }
-      });
-      tdAct.append(end, ' ');
-    }
-    if (!isBlocked(s)) {
-      const block = document.createElement('button');
-      block.className = 'btn btn--ghost btn--sm btn--danger-hover';
-      block.textContent = 'Block';
-      block.addEventListener('click', async () => {
-        if (!confirm(`Block ${s.email} from the VPN? Their devices stop now and stay off, whatever the identity provider says, until you lift the block.`)) return;
-        try { await api('POST', '/api/wg/owners/block', { provider: s.provider, sub: s.sub, email: s.email }); refreshVPN(); } catch (err) { alert(err.message); }
-      });
-      tdAct.append(block);
-    }
-    tr.appendChild(tdAct);
-    sbody.appendChild(tr);
-  }
-  $('vpnsessions-table').hidden = vpnSessions.length === 0;
-  const blockedBox = $('vpnblocked');
-  blockedBox.hidden = vpnBlocked.length === 0;
-  blockedBox.textContent = '';
-  if (vpnBlocked.length) {
-    blockedBox.append('Blocked: ');
-    vpnBlocked.forEach((b, i) => {
-      if (i) blockedBox.append(', ');
-      blockedBox.append(`${b.email || b.sub} `);
-      const un = document.createElement('button');
-      un.className = 'btn btn--ghost btn--sm';
-      un.textContent = 'lift';
-      un.addEventListener('click', async () => {
-        try { await api('POST', '/api/wg/owners/unblock', { provider: b.provider, sub: b.sub }); refreshVPN(); } catch (err) { alert(err.message); }
-      });
-      blockedBox.append(un);
-    });
-  }
-  $('vl-lease').value = settings.wg_lease_minutes || '';
-  $('vl-grace').value = settings.wg_outage_grace_minutes || '';
-  $('vl-days').value = settings.wg_session_days || '';
-  $('vl-maxage').value = settings.wg_auth_max_age || '';
-  $('vl-devices').value = settings.wg_devices_per_user || '';
-
-  // LAN access and its policies.
-  for (const el of $('vpn-lan-form').querySelectorAll('input, textarea, button')) el.disabled = off;
-  $('vlan-enabled').checked = lan;
-  $('vlan-config').hidden = !lan;
-  $('vlan-protected').value = (settings.wg_protected_endpoints || '').split(/[\s,]+/).filter(Boolean).join('\n');
-  $('vlan-waive').checked = settings.wg_no_published_aliases === '1';
-  $('vpn-lan-line').textContent = lan
-    ? 'On. People reach what their policies name; everything else, and this machine itself, is refused. Every flow is written to logs/vpn-flows.log.'
-    : (off ? 'Off, and it needs the endpoint first. Devices would reach quicgate\'s own hosts and nothing else.' : 'Off. Devices reach quicgate\'s own hosts and nothing else.');
-  $('btn-add-vpnpolicy').disabled = off;
-  $('vpnpolicies-empty').textContent = lan
-    ? 'No policies: nobody reaches anything on the LAN. A policy gives a group, a person or everybody from one identity provider a list of destinations.'
-    : 'No policies. They take effect once LAN access is on: a policy gives a group, a person or everybody from one identity provider a list of destinations on this network.';
-  const pbody = $('vpnpolicies-body');
-  pbody.innerHTML = '';
-  $('vpnpolicies-empty').hidden = vpnPolicies.length > 0;
-  $('vpnpolicies-table').hidden = vpnPolicies.length === 0;
-  for (const p of vpnPolicies) {
-    const tr = document.createElement('tr');
-    const cell = (text, cls) => { const td = document.createElement('td'); if (cls) td.className = cls; td.textContent = text; tr.appendChild(td); return td; };
-    cell(p.name, 'domain');
-    cell(describeSubject(p.subject));
-    cell((p.routes || []).map(describeRoute).join('\n'), 'mono').style.whiteSpace = 'pre';
-    const tdAct = document.createElement('td');
-    tdAct.className = 'actions';
-    const edit = document.createElement('button');
-    edit.className = 'btn btn--secondary btn--sm';
-    edit.textContent = 'Edit';
-    edit.addEventListener('click', () => openPolicyModal(p));
-    const del = document.createElement('button');
-    del.className = 'btn btn--ghost btn--sm btn--danger-hover';
-    del.textContent = 'Delete';
-    del.addEventListener('click', async () => {
-      if (!confirm(`Delete policy ${p.name}? Open connections that only it allowed are closed.`)) return;
-      try { await api('DELETE', `/api/wg/policies/${p.id}`); refreshVPN(); } catch (err) { alert(err.message); }
-    });
-    tdAct.append(edit, ' ', del);
-    tr.appendChild(tdAct);
-    pbody.appendChild(tr);
+  if (run !== destCheckRun[outId]) return; // an older answer came in late
+  const out = $(outId);
+  out.textContent = '';
+  for (const [ok, text] of lines) {
+    const p = node('p', 'checkline' + (ok ? '' : ' is-bad'));
+    p.append(node('span', '', ok ? '✓' : '✗'), node('span', '', text));
+    out.append(p);
   }
 }
 
-$('vpn-lease-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  await saveSettings($('vpn-lease-form'), {
-    wg_lease_minutes: $('vl-lease').value, wg_outage_grace_minutes: $('vl-grace').value, wg_session_days: $('vl-days').value,
-    wg_auth_max_age: $('vl-maxage').value, wg_devices_per_user: $('vl-devices').value,
-  });
-  refreshVPN();
-});
+/* devices: add one, or change what one may reach */
+let wgDeviceEditing = null;
 
-$('vlan-enabled').addEventListener('change', () => { $('vlan-config').hidden = !$('vlan-enabled').checked; });
-$('vpn-lan-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const on = $('vlan-enabled').checked;
-  if (on && !confirm('Switch LAN access on? People who log in can then reach the addresses their policies name. The tunnel restarts, which drops open VPN connections for a moment.')) return;
-  await saveSettings($('vpn-lan-form'), {
-    wg_lan_access: on ? '1' : '0',
-    wg_protected_endpoints: $('vlan-protected').value.split(/[\s,]+/).filter(Boolean).join(', '),
-    wg_no_published_aliases: $('vlan-waive').checked ? '1' : '0',
-  });
-  refreshVPN();
-});
-
-/* devices: the admin's own, and break-glass */
 function syncWGDeviceKeyMode() { $('wd-pubkey-field').hidden = !$('wd-key-paste').checked; }
 $('wd-key-generate').addEventListener('change', syncWGDeviceKeyMode);
 $('wd-key-paste').addEventListener('change', syncWGDeviceKeyMode);
 
-async function openWGDeviceModal(mode) {
-  wgDeviceMode = mode;
-  const bg = mode === 'breakglass';
-  $('wgdevice-modal-title').textContent = bg ? 'Add break-glass device' : 'Add device';
-  $('wd-intro').textContent = bg
-    ? 'A break-glass device reaches the LAN without anybody logging in: it is the way back in when the identity provider itself is what broke. Keep its configuration offline, in a safe. There can be two.'
-    : 'This device reaches the hosts quicgate serves in the tunnel. It gets no LAN access.';
-  $('wd-breakglass').hidden = !bg;
+const checkDeviceDests = () => checkDests('wd-routes', 'wd-check');
+
+function syncWGDeviceReach() {
+  const local = $('wd-reach-local').checked;
+  const editing = !!wgDeviceEditing;
+  $('wd-choice-private').classList.toggle('is-picked', !local);
+  $('wd-choice-local').classList.toggle('is-picked', local);
+  $('wd-local').hidden = !local;
+  // Giving local addresses costs a confirmation, and so does every later
+  // change, also one that takes them away.
+  const confirmIt = local || editing;
+  $('wd-confirm').hidden = !confirmIt;
+  $('wd-confirm-why').textContent = editing
+    ? 'Asked for every change to what a device of yours may reach, because nobody logs in behind such a device.'
+    : 'Asked because this device gets into your local network without anybody logging in.';
+  $('wd-lan-off').hidden = !local || vpnSettings.wg_lan_access === '1';
+  $('wd-no-2fa').hidden = !confirmIt || vpnTwoFactor;
+  $('wgdevice-btn-save').textContent = editing ? 'Save' : 'Add device';
+  if (local && !$('wd-routes').children.length) addDestRow('wd-routes', null, checkDeviceDests);
+}
+$('wd-reach-private').addEventListener('change', syncWGDeviceReach);
+$('wd-reach-local').addEventListener('change', syncWGDeviceReach);
+$('wd-add-route').addEventListener('click', () => addDestRow('wd-routes', null, checkDeviceDests));
+$('wd-never').addEventListener('change', () => { $('wd-expires').disabled = $('wd-never').checked; });
+$('wd-lan-on').addEventListener('click', async () => { if (await switchLocalAccessOn()) syncWGDeviceReach(); });
+$('wd-open-2fa').addEventListener('click', () => { closeWGDeviceModal(); switchPage('account', 'security'); });
+
+// openWGDeviceModal adds a device, or with {device} changes what an existing
+// device of the admin's may reach. {local: true} starts on the choice with
+// addresses on the local network.
+async function openWGDeviceModal({ device = null, local = false } = {}) {
+  wgDeviceEditing = device;
+  const routes = (device && device.routes) || [];
+  $('wgdevice-modal-title').textContent = device ? `What may ${device.name} reach?` : 'Add a device';
   setError('wgdevice-error', null);
+  $('wgdevice-form').reset();
   $('wgdevice-form').hidden = false;
   $('wgdevice-created').hidden = true;
-  $('wgdevice-form').reset();
+  $('wgdevice-changed').hidden = true;
+  $('wd-steps').hidden = !!device;
+  $('wd-step-1').classList.add('is-now');
+  $('wd-step-2').classList.remove('is-now');
+  $('wd-name-field').hidden = !!device;
+  $('wd-name').required = !device;
+  $('wd-technical').hidden = !!device;
+  $('wd-technical').open = false;
   $('wd-routes').textContent = '';
-  if (bg) {
-    addRouteRow('wd-routes');
-    const d = new Date(Date.now() + 365 * 86400 * 1000);
-    $('wd-expires').value = d.toISOString().slice(0, 10);
+  $('wd-check').textContent = '';
+  for (const r of routes) addDestRow('wd-routes', r, checkDeviceDests);
+  $('wd-reach-local').checked = device ? routes.length > 0 : local;
+  $('wd-reach-private').checked = !$('wd-reach-local').checked;
+  // An end date is offered by default: a year from now.
+  const end = device && device.expiresAt ? new Date(device.expiresAt) : new Date(Date.now() + 365 * 86400 * 1000);
+  $('wd-expires').value = end.toISOString().slice(0, 10);
+  $('wd-never').checked = !!device && routes.length > 0 && !device.expiresAt;
+  $('wd-expires').disabled = $('wd-never').checked;
+  syncWGDeviceReach();
+  if (!device) {
+    const can = await canMakeKeys();
+    $('wd-key-generate').disabled = !can;
+    $('wd-key-unsupported').hidden = can;
+    $('wd-key-generate').checked = can;
+    $('wd-key-paste').checked = !can;
+    // Without a key made here the person has to paste one: show where.
+    $('wd-technical').open = !can;
+    syncWGDeviceKeyMode();
   }
-  const can = await canMakeKeys();
-  $('wd-key-generate').disabled = !can;
-  $('wd-key-unsupported').hidden = can;
-  $('wd-key-generate').checked = can;
-  $('wd-key-paste').checked = !can;
-  syncWGDeviceKeyMode();
   $('wgdevice-modal').hidden = false;
+  if (routes.length) checkDeviceDests();
 }
 
 function closeWGDeviceModal() {
-  // The configuration holds keys, and the form a password: neither stays.
+  // The setup text holds keys, and the form a password: neither stays.
   $('wd-config').value = '';
+  $('wd-allowed').value = '';
   $('wgdevice-form').reset();
   $('wgdevice-modal').hidden = true;
+  wgDeviceEditing = null;
   refreshVPN();
 }
-$('btn-add-wgdevice').addEventListener('click', () => openWGDeviceModal('admin'));
-$('btn-add-breakglass').addEventListener('click', () => openWGDeviceModal('breakglass'));
-$('wd-add-route').addEventListener('click', () => addRouteRow('wd-routes'));
-$('wd-never').addEventListener('change', () => { $('wd-expires').disabled = $('wd-never').checked; });
+$('btn-add-wgdevice').addEventListener('click', () => openWGDeviceModal({}));
 $('wgdevice-modal-close').addEventListener('click', closeWGDeviceModal);
 $('wgdevice-btn-cancel').addEventListener('click', closeWGDeviceModal);
 $('wgdevice-btn-done').addEventListener('click', closeWGDeviceModal);
-$('wgdevice-btn-copy').addEventListener('click', async () => {
-  const ta = $('wd-config');
-  try { await navigator.clipboard.writeText(ta.value); } catch (err) { ta.select(); document.execCommand('copy'); }
-  $('wgdevice-btn-copy').textContent = 'Copied';
-  setTimeout(() => { $('wgdevice-btn-copy').textContent = 'Copy'; }, 1500);
-});
+$('wgdevice-btn-changed-done').addEventListener('click', closeWGDeviceModal);
+
+async function copyFrom(field, button, label) {
+  try { await navigator.clipboard.writeText(field.value); } catch (err) { field.select(); document.execCommand('copy'); }
+  button.textContent = 'Copied';
+  setTimeout(() => { button.textContent = label; }, 1500);
+}
+$('wgdevice-btn-copy').addEventListener('click', () => copyFrom($('wd-config'), $('wgdevice-btn-copy'), 'Copy as text'));
+$('wd-allowed-copy').addEventListener('click', () => copyFrom($('wd-allowed'), $('wd-allowed-copy'), 'Copy'));
 $('wgdevice-btn-download').addEventListener('click', () => {
   const url = URL.createObjectURL(new Blob([$('wd-config').value], { type: 'text/plain' }));
   const a = document.createElement('a');
@@ -3514,10 +3961,44 @@ $('wgdevice-btn-download').addEventListener('click', () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
+// allowedIPs is the line of a device's setup file that says what goes into
+// the VPN: quicgate itself, and the local addresses the device was given.
+function allowedIPs(status, routes) {
+  return [...new Set([`${status.address}/32`, ...(routes || []).map((r) => r.cidr)])].join(', ');
+}
+
 $('wgdevice-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   setError('wgdevice-error', null);
+  const editing = wgDeviceEditing;
   try {
+    const local = $('wd-reach-local').checked;
+    const routes = local ? readDests('wd-routes') : [];
+    if (local && !routes.length) throw new Error('Name at least one address on your local network, or pick "Private hosts only".');
+    const never = $('wd-never').checked;
+    const access = routes.length ? {
+      routes, neverExpires: never,
+      expiresAt: never || !$('wd-expires').value ? '' : new Date($('wd-expires').value + 'T23:59:59').toISOString(),
+    } : {};
+    const confirmation = { password: $('wd-password').value, code: $('wd-code').value.trim() };
+
+    if (editing) {
+      const changed = await api('PUT', `/api/wg/devices/${editing.id}/access`, { routes: [], ...access, ...confirmation });
+      $('wd-password').value = '';
+      $('wd-code').value = '';
+      const status = await api('GET', '/api/wg/status');
+      const before = allowedIPs(status, editing.routes);
+      const after = allowedIPs(status, changed.routes);
+      $('wd-allowed').value = `AllowedIPs = ${after}`;
+      const same = before === after;
+      $('wd-changed-todo').textContent = same
+        ? 'Nothing is left to do on the device: the addresses it sends into the VPN did not change. For reference, this is its line in the WireGuard app:'
+        : 'One thing is left to do on the device itself. quicgate cannot make its setup file again, because it never had the device\'s private key. In the WireGuard app, edit the tunnel and replace the line that starts with AllowedIPs with this one:';
+      $('wgdevice-form').hidden = true;
+      $('wgdevice-changed').hidden = false;
+      return;
+    }
+
     let privateKey = '';
     let publicKey = $('wd-pubkey').value.trim();
     if ($('wd-key-generate').checked) {
@@ -3526,21 +4007,10 @@ $('wgdevice-form').addEventListener('submit', async (e) => {
       publicKey = kp.publicKey;
     }
     const name = $('wd-name').value.trim();
-    let created;
-    if (wgDeviceMode === 'breakglass') {
-      const never = $('wd-never').checked;
-      created = await api('POST', '/api/wg/breakglass', {
-        name, publicKey, routes: readRoutes('wd-routes'), neverExpires: never,
-        expiresAt: never || !$('wd-expires').value ? '' : new Date($('wd-expires').value + 'T23:59:59').toISOString(),
-        password: $('wd-password').value, code: $('wd-code').value.trim(),
-      });
-    } else {
-      created = await api('POST', '/api/wg/devices', { name, publicKey });
-    }
+    const created = await api('POST', '/api/wg/devices', { name, publicKey, ...access, ...(routes.length ? confirmation : {}) });
     $('wd-password').value = '';
     $('wd-code').value = '';
     const status = await api('GET', '/api/wg/status');
-    const allowed = [`${status.address}/32`, ...(created.routes || []).map((r) => r.cidr)];
     $('wd-config').value = [
       '[Interface]',
       `PrivateKey = ${privateKey || '(keep the private key that is in the WireGuard app)'}`,
@@ -3551,12 +4021,19 @@ $('wgdevice-form').addEventListener('submit', async (e) => {
       '# quicgate',
       `PublicKey = ${status.publicKey}`,
       `PresharedKey = ${created.presharedKey}`,
-      ...(status.endpoint ? [`Endpoint = ${status.endpoint}`] : ['# Endpoint = (set "Public address" on the VPN page first)']),
-      `AllowedIPs = ${[...new Set(allowed)].join(', ')}`,
+      ...(status.endpoint ? [`Endpoint = ${status.endpoint}`] : ['# Endpoint = (fill in "Address devices connect to" under VPN settings first)']),
+      `AllowedIPs = ${allowedIPs(status, created.routes)}`,
       'PersistentKeepalive = 25',
       '',
     ].join('\n');
     $('wgdevice-btn-download').dataset.name = name.replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 15) || 'vpn';
+    const first = (created.routes || [])[0];
+    $('wd-try-line').textContent = first
+      ? `Try it: reach ${first.name ? first.name + ' at ' : ''}${destAddress(first)} from the device.${vpnSettings.wg_lan_access === '1' ? '' : ' (Local network access is still switched off: switch it on under VPN settings first.)'}`
+      : 'Try it: open one of your private hosts from the device.';
+    $('wgdevice-modal-title').textContent = `Set up ${name}`;
+    $('wd-step-1').classList.remove('is-now');
+    $('wd-step-2').classList.add('is-now');
     $('wgdevice-form').hidden = true;
     $('wgdevice-created').hidden = false;
   } catch (err) {
@@ -3564,35 +4041,36 @@ $('wgdevice-form').addEventListener('submit', async (e) => {
   }
 });
 
-/* LAN policies */
+/* rules: what people who log in may reach on the local network */
 let readPolicySubject = null;
+const checkPolicyDests = () => checkDests('vp-routes', 'vp-check');
 
 function openPolicyModal(p) {
   editingPolicyId = p ? p.id : null;
-  $('vpnpolicy-modal-title').textContent = p ? `Edit policy ${p.name}` : 'Add policy';
+  $('vpnpolicy-modal-title').textContent = p ? `Change the rule "${p.name}"` : 'Add a rule';
   setError('vpnpolicy-error', null);
   $('vp-name').value = p ? p.name : '';
   readPolicySubject = makeSubjectPicker($('vp-subject'), p ? p.subject : null, true);
   $('vp-routes').textContent = '';
-  for (const r of (p && p.routes) || [null]) addRouteRow('vp-routes', r);
+  $('vp-check').textContent = '';
+  for (const r of (p && p.routes) || [null]) addDestRow('vp-routes', r, checkPolicyDests);
   $('vp-try-dest').value = '';
   $('vp-try-answer').hidden = true;
   $('vpnpolicy-modal').hidden = false;
+  if (p) checkPolicyDests();
 }
-$('btn-add-vpnpolicy').addEventListener('click', () => {
-  if (!oidcProviders.length) { alert('A policy is about people from an identity provider: add one on the Access Lists page first.'); return; }
-  openPolicyModal(null);
-});
-$('vp-add-route').addEventListener('click', () => addRouteRow('vp-routes'));
+$('btn-add-vpnpolicy').addEventListener('click', () => openPolicyModal(null));
+$('vp-add-route').addEventListener('click', () => addDestRow('vp-routes', null, checkPolicyDests));
 $('vpnpolicy-modal-close').addEventListener('click', () => { $('vpnpolicy-modal').hidden = true; });
 $('vpnpolicy-btn-cancel').addEventListener('click', () => { $('vpnpolicy-modal').hidden = true; });
 $('vp-try').addEventListener('click', async () => {
   const out = $('vp-try-answer');
   out.hidden = false;
   try {
-    const r = await api('POST', '/api/wg/explain', { routes: readRoutes('vp-routes'), proto: $('vp-try-proto').value, dest: $('vp-try-dest').value.trim() });
-    out.textContent = r.answer;
-    out.classList.toggle('form-error', r.answer.startsWith('refused'));
+    const r = await api('POST', '/api/wg/explain', { routes: readDests('vp-routes'), proto: $('vp-try-proto').value, dest: $('vp-try-dest').value.trim() });
+    const refused = r.answer.startsWith('refused');
+    out.textContent = refused ? `No: ${r.answer.replace(/^refused:\s*/, '')}.` : 'Yes, this rule lets it through.';
+    out.classList.toggle('form-error', refused);
   } catch (err) {
     out.textContent = err.message;
     out.classList.add('form-error');
@@ -3601,7 +4079,7 @@ $('vp-try').addEventListener('click', async () => {
 $('vpnpolicy-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   setError('vpnpolicy-error', null);
-  const policy = { name: $('vp-name').value.trim(), subject: readPolicySubject(), routes: readRoutes('vp-routes') };
+  const policy = { name: $('vp-name').value.trim(), subject: readPolicySubject(), routes: readDests('vp-routes') };
   try {
     if (editingPolicyId) await api('PUT', `/api/wg/policies/${editingPolicyId}`, policy);
     else await api('POST', '/api/wg/policies', policy);
@@ -3653,31 +4131,8 @@ function readPortalOptions() {
   };
 }
 
-/* the VPN page's map */
-$('vpnmap').addEventListener('click', (e) => {
-  const a = e.target.closest('a');
-  if (!a) return;
-  e.preventDefault();
-  if (a.dataset.scroll) $(a.dataset.scroll).scrollIntoView({ behavior: 'smooth', block: 'start' });
-  else if (a.dataset.gotoPage) switchPage(a.dataset.gotoPage);
-});
-$('vm-guide').addEventListener('click', async (e) => { e.preventDefault(); switchPage('help'); await openGuide('vpn'); });
-$('vm-add-portal').addEventListener('click', async (e) => {
-  e.preventDefault();
-  if (!oidcProviders.length) {
-    alert('A portal logs people in through an identity provider. Add one first: Access lists page, Identity providers.');
-    switchPage('access');
-    return;
-  }
-  switchPage('hosts');
-  await refresh();
-  openModal(null);
-  $('f-type').value = 'vpn-portal';
-  syncHostType();
-});
-
 $('wg-reset-key').addEventListener('click', async () => {
-  if (!confirm('Reset the server key? Do this only when the original sealing key (secret.key) is lost. Every site and every device has to be set up again: their configurations name the old key.')) return;
+  if (!confirm('Make a new server key? Do this only when the original secret key (secret.key) is lost. Every device and every other network has to be set up again: their setup files name the old key.')) return;
   const password = prompt('Confirm with your password');
   if (!password) return;
   try { await api('POST', '/api/wg/server-key/reset', { password }); refreshVPN(); } catch (err) { alert(err.message); }

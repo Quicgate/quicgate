@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // SPEC-wireguard.md parts 2 and 3: devices, who may use them for what, and
@@ -71,6 +73,9 @@ func (s *VPNSubject) Validate(identityOnly bool) error {
 // VPNRoute is one LAN destination a policy grants: an IPv4 prefix in private
 // address space, a protocol and ports ("" = all, else "22,80-90").
 type VPNRoute struct {
+	// Name is what a person calls the destination ("NAS"). It is for people
+	// reading the rule and is never part of a decision.
+	Name  string `json:"name,omitempty"`
 	CIDR  string `json:"cidr"`
 	Proto string `json:"proto"` // tcp | udp | any
 	Ports string `json:"ports,omitempty"`
@@ -108,9 +113,23 @@ func ParsePorts(s string) ([][2]uint16, error) {
 // Validate checks one route (S26): IPv4, private address space only, so the
 // forwarder can never be an exit node or an open relay.
 func (r *VPNRoute) Validate() error {
-	p, err := netip.ParsePrefix(strings.TrimSpace(r.CIDR))
+	r.Name = strings.TrimSpace(r.Name)
+	if utf8.RuneCountInString(r.Name) > 64 {
+		return errors.New("the name of a destination is at most 64 characters")
+	}
+	for _, c := range r.Name {
+		if !unicode.IsPrint(c) {
+			return errors.New("the name of a destination has a character that cannot be shown")
+		}
+	}
+	// A single address is a prefix of one: "192.168.1.10" means /32.
+	cidr := strings.TrimSpace(r.CIDR)
+	if a, err := netip.ParseAddr(cidr); err == nil && a.Is4() {
+		cidr = a.String() + "/32"
+	}
+	p, err := netip.ParsePrefix(cidr)
 	if err != nil || !p.Addr().Is4() {
-		return fmt.Errorf("route %q: want an IPv4 prefix like 192.168.1.0/24", r.CIDR)
+		return fmt.Errorf("route %q: want an IPv4 address or prefix like 192.168.1.10 or 192.168.1.0/24", r.CIDR)
 	}
 	p = p.Masked()
 	inside := false
@@ -138,9 +157,11 @@ func (r *VPNRoute) Validate() error {
 }
 
 // WGDevice is a phone or a laptop. Kind says who issued it: the admin (it
-// reaches quicgate's hosts in the tunnel, nothing else), a person through the
-// portal (sso: what it may reach follows from the owner's groups and lease),
-// or the admin as a break-glass device with its own routes (S33).
+// reaches quicgate's hosts in the tunnel, and the local addresses in its own
+// Routes if it has any), or a person through the portal (sso: what it may
+// reach follows from the owner's groups and lease). "breakglass" is the older
+// name of an admin's device with routes (S33): such rows stay valid and are
+// treated exactly like kind admin.
 type WGDevice struct {
 	ID           int64      `json:"id"`
 	Name         string     `json:"name"`
@@ -153,8 +174,8 @@ type WGDevice struct {
 	Provider     int64      `json:"provider,omitempty"`
 	Sub          string     `json:"sub,omitempty"`
 	Email        string     `json:"email,omitempty"`
-	Routes       []VPNRoute `json:"routes,omitempty"`    // breakglass only
-	ExpiresAt    string     `json:"expiresAt,omitempty"` // breakglass
+	Routes       []VPNRoute `json:"routes,omitempty"`    // admin and breakglass: local addresses of its own
+	ExpiresAt    string     `json:"expiresAt,omitempty"` // admin and breakglass: the device stops working then
 	CreatedAt    string     `json:"createdAt,omitempty"`
 }
 
@@ -354,6 +375,32 @@ func publicKeyTaken(q dbtx, key string) (bool, error) {
 	var n int
 	err := q.QueryRow("SELECT (SELECT COUNT(*) FROM wg_sites WHERE public_key=?) + (SELECT COUNT(*) FROM wg_devices WHERE public_key=?)", key, key).Scan(&n)
 	return n > 0, err
+}
+
+// SetWGDeviceAccess replaces the local addresses an admin's device carries,
+// and its end date. A person's device has none of its own and a revoked
+// device stays as it was: both answer sql.ErrNoRows.
+func (s *Store) SetWGDeviceAccess(id int64, routes []VPNRoute, expiresAt string) error {
+	for i := range routes {
+		if err := routes[i].Validate(); err != nil {
+			return err
+		}
+	}
+	if routes == nil {
+		routes = []VPNRoute{}
+	}
+	raw, err := json.Marshal(routes)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.Exec("UPDATE wg_devices SET routes=?, expires_at=? WHERE id=? AND revoked_at='' AND kind IN ('admin','breakglass')", string(raw), expiresAt, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // ErrDeviceLimit is returned when an owner has as many devices as allowed.

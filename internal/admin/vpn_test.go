@@ -11,6 +11,7 @@ import (
 
 	"github.com/pquerna/otp/totp"
 
+	"quicgate/internal/engine"
 	"quicgate/internal/store"
 )
 
@@ -76,11 +77,22 @@ func TestWireGuardDevicesAPI(t *testing.T) {
 		"not a key":                       {"name": "x", "publicKey": "AAAA"},
 		"no name":                         {"name": " ", "publicKey": randomKey(t)},
 		"a chosen kind":                   {"name": "x", "publicKey": randomKey(t), "kind": "breakglass"},
-		"chosen routes":                   {"name": "x", "publicKey": randomKey(t), "routes": []map[string]string{{"cidr": "192.168.1.0/24", "proto": "any"}}},
+		"an end date without addresses":   {"name": "x", "publicKey": randomKey(t), "expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
+		"no end date without addresses":   {"name": "x", "publicKey": randomKey(t), "neverExpires": true},
 	} {
 		if rr := call(t, s, http.MethodPost, "/api/wg/devices", sess, bad); rr.Code != http.StatusBadRequest {
 			t.Errorf("%s: %d %s, want 400", name, rr.Code, rr.Body.String())
 		}
+	}
+	// Addresses on the local network are never had for the asking: without the
+	// password and the second factor the request is refused and leaves nothing.
+	withRoutes := map[string]any{"name": "x", "publicKey": randomKey(t), "routes": []map[string]string{{"cidr": "192.168.1.0/24", "proto": "any"}},
+		"expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}
+	if rr := call(t, s, http.MethodPost, "/api/wg/devices", sess, withRoutes); rr.Code != http.StatusUnauthorized {
+		t.Errorf("routes without a password: %d %s, want 401", rr.Code, rr.Body.String())
+	}
+	if devices, _ := s.store.ListWGDevices(); len(devices) != 1 {
+		t.Fatalf("a refused request left a device behind: %d devices, want 1", len(devices))
 	}
 	// A device's key cannot become a site's either.
 	site2 := map[string]any{"name": "shed", "publicKey": key, "networks": []string{"192.168.60.0/24"}, "enabled": true}
@@ -119,8 +131,9 @@ func TestWireGuardDevicesAPI(t *testing.T) {
 	}
 }
 
-// Break-glass devices are the one way to LAN routes without a login, so they
-// cost the most to make: password, a second factor, a cap and an expiry.
+// The older call for a device with local addresses and no login behind it. It
+// is the same thing as POST /api/wg/devices with routes now: it costs the
+// password, a second factor and an end date, and there is no cap of two.
 func TestBreakGlassAPI(t *testing.T) {
 	s, sess := vpnServer(t)
 	routes := []map[string]string{{"cidr": "192.168.178.0/24", "proto": "tcp", "ports": "22"}}
@@ -193,7 +206,7 @@ func TestBreakGlassAPI(t *testing.T) {
 		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
 	}
 	var first store.WGDevice
-	if err := json.Unmarshal(rr.Body.Bytes(), &first); err != nil || first.Kind != "breakglass" || first.ExpiresAt == "" || len(first.Routes) != 1 || first.PresharedKey == "" {
+	if err := json.Unmarshal(rr.Body.Bytes(), &first); err != nil || first.Kind != "admin" || first.ExpiresAt == "" || len(first.Routes) != 1 || first.PresharedKey == "" {
 		t.Fatalf("created = %s", rr.Body.String())
 	}
 	// The code that made the first device is spent.
@@ -206,15 +219,229 @@ func TestBreakGlassAPI(t *testing.T) {
 		t.Fatalf("never expires, said explicitly: %d %s", rr.Code, rr.Body.String())
 	}
 	step++
-	if rr := call(t, s, http.MethodPost, "/api/wg/breakglass", sess, body(code())); rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "two break-glass") {
-		t.Fatalf("a third: %d %s, want 400", rr.Code, rr.Body.String())
+	// There is no cap of two any more.
+	if rr := call(t, s, http.MethodPost, "/api/wg/breakglass", sess, body(code())); rr.Code != http.StatusCreated {
+		t.Fatalf("a third: %d %s, want 201", rr.Code, rr.Body.String())
 	}
-	// A revoked one makes room.
-	if rr := call(t, s, http.MethodDelete, fmt.Sprintf("/api/wg/devices/%d", first.ID), sess, nil); rr.Code != http.StatusNoContent {
+}
+
+// withTOTP switches two-factor on for the test admin and puts the clock the
+// server checks codes against under the test's control: a code is good once,
+// so the test moves on one step (next) before it needs a fresh one.
+func withTOTP(t *testing.T, s *Server) (code, wrong func() string, next func()) {
+	t.Helper()
+	u, err := s.store.GetUserByEmail("admin@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otp, err := totp.Generate(totp.GenerateOpts{Issuer: "quicgate", AccountName: u.Email})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.SetTOTPSecret(u.ID, otp.Secret()); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now()
+	step := 0
+	totpNow = func() time.Time { return base.Add(time.Duration(step) * totpPeriod * time.Second) }
+	t.Cleanup(func() { totpNow = time.Now })
+	code = func() string {
+		c, err := totp.GenerateCode(otp.Secret(), totpNow())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	wrong = func() string {
+		c := code()
+		if c[0] == '9' {
+			return "0" + c[1:]
+		}
+		return "9" + c[1:]
+	}
+	return code, wrong, func() { step++ }
+}
+
+// A device the admin adds can carry addresses on the local network of its
+// own. Nobody logs in behind such a device, so every way to give it addresses
+// costs the password and a second factor, an end date unless waived in so
+// many words, and only private address space can be named.
+func TestDeviceLocalAccessOnCreate(t *testing.T) {
+	s, sess := vpnServer(t)
+	routes := []map[string]string{{"name": "NAS", "cidr": "192.168.1.10/32", "proto": "tcp", "ports": "445"}}
+	expiry := time.Now().Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	body := func(code string) map[string]any {
+		return map[string]any{"name": "phone", "publicKey": randomKey(t), "password": "password-123", "code": code, "routes": routes, "expiresAt": expiry}
+	}
+	// No second factor on the account: no local addresses.
+	if rr := call(t, s, http.MethodPost, "/api/wg/devices", sess, body("000000")); rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "two-factor") {
+		t.Fatalf("without 2FA on the account: %d %s", rr.Code, rr.Body.String())
+	}
+	code, wrong, next := withTOTP(t, s)
+	mutate := func(fn func(map[string]any)) map[string]any { b := body(code()); fn(b); return b }
+	for name, tc := range map[string]struct {
+		body map[string]any
+		want int
+	}{
+		"a wrong password": {mutate(func(b map[string]any) { b["password"] = "nope-nope-nope" }), http.StatusUnauthorized},
+		"no password":      {mutate(func(b map[string]any) { delete(b, "password") }), http.StatusUnauthorized},
+		"a wrong code":     {body(wrong()), http.StatusUnauthorized},
+		"no code":          {body(""), http.StatusUnauthorized},
+		"no end date":      {mutate(func(b map[string]any) { delete(b, "expiresAt") }), http.StatusBadRequest},
+		"an end date gone": {mutate(func(b map[string]any) { b["expiresAt"] = "2020-01-01T00:00:00Z" }), http.StatusBadRequest},
+		"a public address": {mutate(func(b map[string]any) { b["routes"] = []map[string]string{{"cidr": "8.8.8.8/32", "proto": "any"}} }), http.StatusBadRequest},
+		"everything":       {mutate(func(b map[string]any) { b["routes"] = []map[string]string{{"cidr": "0.0.0.0/0", "proto": "any"}} }), http.StatusBadRequest},
+		"a name with a tab": {mutate(func(b map[string]any) {
+			b["routes"] = []map[string]string{{"name": "N\tAS", "cidr": "192.168.1.10/32"}}
+		}), http.StatusBadRequest},
+		"a name too long": {mutate(func(b map[string]any) {
+			b["routes"] = []map[string]string{{"name": strings.Repeat("n", 65), "cidr": "192.168.1.10/32"}}
+		}), http.StatusBadRequest},
+		"a chosen kind": {mutate(func(b map[string]any) { b["kind"] = "sso" }), http.StatusBadRequest},
+	} {
+		if rr := call(t, s, http.MethodPost, "/api/wg/devices", sess, tc.body); rr.Code != tc.want {
+			t.Errorf("%s: %d %s, want %d", name, rr.Code, rr.Body.String(), tc.want)
+		}
+	}
+	if devices, _ := s.store.ListWGDevices(); len(devices) != 0 {
+		t.Fatalf("a refused request left %d devices behind", len(devices))
+	}
+
+	used := code()
+	rr := call(t, s, http.MethodPost, "/api/wg/devices", sess, body(used))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	var dev store.WGDevice
+	if err := json.Unmarshal(rr.Body.Bytes(), &dev); err != nil || dev.Kind != "admin" || dev.ExpiresAt == "" || dev.PresharedKey == "" ||
+		len(dev.Routes) != 1 || dev.Routes[0].Name != "NAS" || dev.Routes[0].CIDR != "192.168.1.10/32" || dev.Routes[0].Ports != "445" {
+		t.Fatalf("created = %s", rr.Body.String())
+	}
+	// The list shows what the device may reach, name included.
+	var listed []store.WGDevice
+	_ = json.Unmarshal(call(t, s, http.MethodGet, "/api/wg/devices", sess, nil).Body.Bytes(), &listed)
+	if len(listed) != 1 || len(listed[0].Routes) != 1 || listed[0].Routes[0].Name != "NAS" || listed[0].ExpiresAt != dev.ExpiresAt {
+		t.Fatalf("listed = %+v", listed)
+	}
+	// The code that made the device is spent.
+	if rr := call(t, s, http.MethodPost, "/api/wg/devices", sess, body(used)); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("the same code again: %d %s, want 401", rr.Code, rr.Body.String())
+	}
+	// No end date, said in so many words, and no cap on how many there are.
+	for i := 0; i < 3; i++ {
+		next()
+		never := mutate(func(b map[string]any) { delete(b, "expiresAt"); b["neverExpires"] = true })
+		if rr := call(t, s, http.MethodPost, "/api/wg/devices", sess, never); rr.Code != http.StatusCreated {
+			t.Fatalf("device %d without an end date: %d %s", i+2, rr.Code, rr.Body.String())
+		}
+	}
+	// The overview counts them: they reach the local network without a login.
+	ov := s.vpnOverview()
+	if ov["localAccessDevices"] != 4 || ov["localAccessNoExpiry"] != 3 {
+		t.Fatalf("overview = %v, want 4 devices with local access, 3 of them without an end date", ov)
+	}
+}
+
+// Changing what a device may reach later costs the same as giving it at the
+// start, also when the change takes addresses away: the call is one, and a
+// stolen session must not be able to widen a device by "editing" it.
+func TestDeviceLocalAccessChange(t *testing.T) {
+	s, sess := vpnServer(t)
+	rr := call(t, s, http.MethodPost, "/api/wg/devices", sess, map[string]any{"name": "laptop", "publicKey": randomKey(t)})
+	var dev store.WGDevice
+	if err := json.Unmarshal(rr.Body.Bytes(), &dev); err != nil || rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	path := fmt.Sprintf("/api/wg/devices/%d/access", dev.ID)
+	routes := []map[string]string{{"name": "NAS", "cidr": "192.168.1.10", "proto": "tcp", "ports": "445"}}
+	expiry := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	body := func(code string) map[string]any {
+		return map[string]any{"password": "password-123", "code": code, "routes": routes, "expiresAt": expiry}
+	}
+	if rr := call(t, s, http.MethodPut, path, "", body("000000")); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("without a session: %d, want 401", rr.Code)
+	}
+	if rr := call(t, s, http.MethodPut, path, sess, body("000000")); rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "two-factor") {
+		t.Fatalf("without 2FA on the account: %d %s", rr.Code, rr.Body.String())
+	}
+	code, wrong, next := withTOTP(t, s)
+	mutate := func(fn func(map[string]any)) map[string]any { b := body(code()); fn(b); return b }
+	for name, tc := range map[string]struct {
+		body map[string]any
+		want int
+	}{
+		"a wrong password":       {mutate(func(b map[string]any) { b["password"] = "nope-nope-nope" }), http.StatusUnauthorized},
+		"no password":            {mutate(func(b map[string]any) { delete(b, "password") }), http.StatusUnauthorized},
+		"a wrong code":           {body(wrong()), http.StatusUnauthorized},
+		"no code":                {body(""), http.StatusUnauthorized},
+		"no end date":            {mutate(func(b map[string]any) { delete(b, "expiresAt") }), http.StatusBadRequest},
+		"a public address":       {mutate(func(b map[string]any) { b["routes"] = []map[string]string{{"cidr": "1.1.1.1/32"}} }), http.StatusBadRequest},
+		"taking away, no code":   {map[string]any{"password": "password-123", "routes": []any{}}, http.StatusUnauthorized},
+		"an end date, no routes": {mutate(func(b map[string]any) { b["routes"] = []any{} }), http.StatusBadRequest},
+	} {
+		if rr := call(t, s, http.MethodPut, path, sess, tc.body); rr.Code != tc.want {
+			t.Errorf("%s: %d %s, want %d", name, rr.Code, rr.Body.String(), tc.want)
+		}
+	}
+	if got, _ := s.store.GetWGDevice(dev.ID); len(got.Routes) != 0 || got.ExpiresAt != "" {
+		t.Fatalf("a refused change left its mark: %+v", got)
+	}
+	if rr := call(t, s, http.MethodPut, "/api/wg/devices/999/access", sess, body(code())); rr.Code != http.StatusNotFound {
+		t.Fatalf("a device that does not exist: %d %s, want 404", rr.Code, rr.Body.String())
+	}
+
+	next()
+	used := code()
+	rr = call(t, s, http.MethodPut, path, sess, body(used))
+	var changed store.WGDevice
+	if err := json.Unmarshal(rr.Body.Bytes(), &changed); err != nil || rr.Code != http.StatusOK {
+		t.Fatalf("change: %d %s", rr.Code, rr.Body.String())
+	}
+	if len(changed.Routes) != 1 || changed.Routes[0].CIDR != "192.168.1.10/32" || changed.Routes[0].Name != "NAS" || changed.ExpiresAt == "" || changed.PresharedKey != "" || changed.Kind != "admin" {
+		t.Fatalf("changed = %s", rr.Body.String())
+	}
+	if got, _ := s.store.GetWGDevice(dev.ID); len(got.Routes) != 1 || got.ExpiresAt != changed.ExpiresAt {
+		t.Fatalf("stored = %+v", got)
+	}
+	if rr := call(t, s, http.MethodPut, path, sess, body(used)); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("the same code again: %d, want 401", rr.Code)
+	}
+	// Back to private hosts only: the addresses and the end date go.
+	next()
+	if rr := call(t, s, http.MethodPut, path, sess, map[string]any{"password": "password-123", "code": code(), "routes": []any{}}); rr.Code != http.StatusOK {
+		t.Fatalf("taking the addresses away: %d %s", rr.Code, rr.Body.String())
+	}
+	if got, _ := s.store.GetWGDevice(dev.ID); len(got.Routes) != 0 || got.ExpiresAt != "" {
+		t.Fatalf("after taking the addresses away: %+v", got)
+	}
+
+	// What a person's device may reach follows from the rules for the person:
+	// it has no addresses of its own, whatever the admin's second factor says.
+	_, tunnel, _, err := engine.WGSettings(s.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	person := store.WGDevice{Name: "anna", Kind: "sso", PublicKey: randomKey(t), Provider: 1, Sub: "anna", Enabled: true}
+	if err := s.store.CreateWGDevice(&person, tunnel, randomKey(t), 0); err != nil {
+		t.Fatal(err)
+	}
+	next()
+	if rr := call(t, s, http.MethodPut, fmt.Sprintf("/api/wg/devices/%d/access", person.ID), sess, body(code())); rr.Code != http.StatusBadRequest {
+		t.Fatalf("a person's device: %d %s, want 400", rr.Code, rr.Body.String())
+	}
+	if got, _ := s.store.GetWGDevice(person.ID); len(got.Routes) != 0 {
+		t.Fatalf("a person's device got routes of its own: %+v", got)
+	}
+	// A removed device stays removed.
+	if rr := call(t, s, http.MethodDelete, fmt.Sprintf("/api/wg/devices/%d", dev.ID), sess, nil); rr.Code != http.StatusNoContent {
 		t.Fatalf("revoke: %d", rr.Code)
 	}
-	if rr := call(t, s, http.MethodPost, "/api/wg/breakglass", sess, body(code())); rr.Code != http.StatusCreated {
-		t.Fatalf("after a revoke: %d %s", rr.Code, rr.Body.String())
+	next()
+	if rr := call(t, s, http.MethodPut, path, sess, body(code())); rr.Code != http.StatusNotFound {
+		t.Fatalf("a revoked device: %d %s, want 404", rr.Code, rr.Body.String())
+	}
+	if got, _ := s.store.GetWGDevice(dev.ID); len(got.Routes) != 0 {
+		t.Fatalf("a revoked device got routes: %+v", got)
 	}
 }
 
@@ -380,4 +607,36 @@ func loosePadding(key string) string {
 	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 	i := strings.IndexByte(alphabet, key[42])
 	return key[:42] + string(alphabet[i|1]) + key[43:]
+}
+
+// An API token has no password and no second factor, so it can add a plain
+// device and nothing more: not one with local addresses, and no change of
+// what a device may reach.
+func TestAnAPITokenCannotGiveADeviceLocalAccess(t *testing.T) {
+	s, _ := vpnServer(t)
+	withTOTP(t, s)
+	tok := mustToken(t, s, store.TokenFull)
+	rr := bearer(t, s, http.MethodPost, "/api/wg/devices", tok, map[string]any{"name": "plain", "publicKey": randomKey(t)})
+	var dev store.WGDevice
+	if err := json.Unmarshal(rr.Body.Bytes(), &dev); err != nil || rr.Code != http.StatusCreated {
+		t.Fatalf("a plain device with a full token: %d %s", rr.Code, rr.Body.String())
+	}
+	routes := []map[string]string{{"cidr": "192.168.1.10/32"}}
+	withRoutes := map[string]any{"name": "x", "publicKey": randomKey(t), "routes": routes, "neverExpires": true, "password": "password-123", "code": "000000"}
+	if rr := bearer(t, s, http.MethodPost, "/api/wg/devices", tok, withRoutes); rr.Code < 400 {
+		t.Fatalf("a device with local addresses with a token: %d %s", rr.Code, rr.Body.String())
+	}
+	change := map[string]any{"routes": routes, "neverExpires": true, "password": "password-123", "code": "000000"}
+	if rr := bearer(t, s, http.MethodPut, fmt.Sprintf("/api/wg/devices/%d/access", dev.ID), tok, change); rr.Code < 400 {
+		t.Fatalf("changing access with a token: %d %s", rr.Code, rr.Body.String())
+	}
+	for _, access := range []string{store.TokenMonitor, store.TokenSwitch} {
+		if rr := bearer(t, s, http.MethodPut, fmt.Sprintf("/api/wg/devices/%d/access", dev.ID), mustToken(t, s, access), change); rr.Code != http.StatusForbidden {
+			t.Fatalf("changing access with a %s token: %d, want 403", access, rr.Code)
+		}
+	}
+	devices, _ := s.store.ListWGDevices()
+	if len(devices) != 1 || len(devices[0].Routes) != 0 {
+		t.Fatalf("devices = %+v, want the one plain device without routes", devices)
+	}
 }

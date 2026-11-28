@@ -492,10 +492,15 @@ func (e *Engine) wgDevices(now time.Time, lanAccess bool) ([]wg.Device, map[int6
 		}
 		dev := wg.Device{ID: d.ID, Name: d.Name, Owner: d.Email, PublicKey: d.PublicKey, PresharedKey: d.PresharedKey, Address: addr}
 		switch d.Kind {
-		case "admin":
+		case "admin", "breakglass":
+			// A device the admin added. It may carry local addresses of its
+			// own (nobody logs in behind it), and an end date after which it
+			// is no longer configured at all. "breakglass" is the older name
+			// of such a device with routes and is the same thing.
 			dev.Owner = "admin"
-		case "breakglass":
-			dev.Owner = "break-glass"
+			if d.Kind == "breakglass" {
+				dev.Owner = "break-glass"
+			}
 			if d.ExpiresAt != "" {
 				until, err := time.Parse(time.RFC3339, d.ExpiresAt)
 				if err != nil || !now.Before(until) {

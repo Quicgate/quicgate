@@ -30,7 +30,8 @@ components:
     VPNRoute:
       type: object
       properties:
-        cidr: { type: string, description: IPv4 prefix in private address space }
+        name: { type: string, description: 'What a person calls the destination, like NAS. At most 64 characters. For reading only: it is never part of a decision.' }
+        cidr: { type: string, description: 'IPv4 address or prefix in private address space. A single address means /32.' }
         proto: { type: string, enum: [tcp, udp, any] }
         ports: { type: string, description: '"" = all, else like 22,443,8000-8100' }
     VPNPolicy:
@@ -308,16 +309,23 @@ paths:
   /api/wg/devices:
     get: { summary: "List VPN devices, revoked ones included (without preshared keys)", responses: { "200": { description: OK } } }
     post:
-      summary: Add a device that reaches quicgate's hosts in the tunnel. The response carries the preshared key, this once.
-      requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string}, publicKey: {type: string} } } } } }
-      responses: { "201": { description: created } }
+      summary: "Add a device. Without routes it reaches quicgate's hosts in the tunnel and nothing else. With routes it also reaches those addresses on the local network, with no login behind it: that needs the admin's password, a two-factor code (two-factor must be on for the account) and an end date, or neverExpires. An API token cannot do that part. The response carries the preshared key, this once."
+      requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string}, publicKey: {type: string}, routes: {type: array, items: { $ref: '#/components/schemas/VPNRoute' }}, expiresAt: {type: string, format: date-time, description: 'With routes: the moment the device stops working'}, neverExpires: {type: boolean}, password: {type: string}, code: {type: string} } } } } }
+      responses: { "201": { description: created }, "400": { description: 'refused by validation, or two-factor is off for the account' }, "401": { description: wrong password or code } }
   /api/wg/devices/{id}/enabled:
     put: { summary: Switch a device off or on, parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], requestBody: { content: { application/json: { schema: { type: object, properties: { enabled: {type: boolean} } } } } }, responses: { "204": { description: ok } } }
+  /api/wg/devices/{id}/access:
+    put:
+      summary: "Change which addresses on the local network a device of the admin's may reach, and its end date. An empty routes list takes them all away. Always needs the admin's password and a two-factor code, also when it only takes addresses away. Not for a device a person added at the portal (400). Connections the device may no longer have are closed. The device's own setup file is not changed: its AllowedIPs line has to be edited on the device."
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
+      requestBody: { content: { application/json: { schema: { type: object, properties: { routes: {type: array, items: { $ref: '#/components/schemas/VPNRoute' }}, expiresAt: {type: string, format: date-time}, neverExpires: {type: boolean}, password: {type: string}, code: {type: string} } } } } }
+      responses: { "200": { description: the device as it is now }, "400": { description: refused by validation }, "401": { description: wrong password or code }, "404": { description: no such device, or revoked } }
   /api/wg/devices/{id}:
     delete: { summary: "Revoke a device. Final: the key can never be registered again.", parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], responses: { "204": { description: revoked } } }
   /api/wg/breakglass:
     post:
-      summary: Add a break-glass device (LAN routes without a login). Needs the admin's password and a TOTP code; at most two exist.
+      summary: "Older name for POST /api/wg/devices with routes, kept for existing callers. Same checks, same device (kind admin); routes may not be left out. The limit of two is gone."
+      deprecated: true
       requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string}, publicKey: {type: string}, password: {type: string}, code: {type: string}, routes: {type: array, items: { $ref: '#/components/schemas/VPNRoute' }}, expiresAt: {type: string, format: date-time}, neverExpires: {type: boolean} } } } } }
       responses: { "201": { description: created }, "401": { description: wrong password or code } }
   /api/wg/policies:
