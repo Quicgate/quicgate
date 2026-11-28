@@ -6,9 +6,9 @@ built around four things you may want, and each one is off until you ask for it:
 
 | What you want | What it takes | Section on the page |
 |---|---|---|
-| Use my own phone or laptop away from home | a device, and a host marked "VPN only" | People and devices |
-| Let one device reach something on my local network | a device with the addresses you name | People and devices |
-| Let other people log in and add their own devices | a login provider and a login page | People and devices, Rules for the local network |
+| Use my own phone or laptop away from home | a device, and a host marked "VPN only" | People, devices and rules |
+| Let one device reach something on my local network | a device with the addresses you name | People, devices and rules |
+| Let other people log in and add their own devices | a login provider and a login page | People, devices and rules |
 | Have quicgate use a service on another network | a router or small machine there | Other networks |
 
 The page opens with these four as a list. Each line says where it stands and has one button
@@ -16,7 +16,7 @@ for the next step.
 
 ## People, and their devices
 
-A device always belongs to somebody, so the page lists people. **People and devices** has one
+A device always belongs to somebody, so the page lists people. **People, devices and rules** has one
 row per person who logged in at the login page, and one row called **Added here** for the
 devices an admin added on this page. A row says how many devices there are, whether one is
 connected now or when one was last seen, what they may reach in short, and how the login is
@@ -85,7 +85,7 @@ The second step of the dialog lists what to do on the device: install the WireGu
 download the **setup file** and open it in the app, switch the tunnel on. The setup file is
 shown **once** and is not stored anywhere: when it is lost, remove the device and add it again.
 
-The device appears under **Added here** in "People and devices". The "Allowed" switch on its
+The device appears under **Added here** in "People, devices and rules". The "Allowed" switch on its
 row pauses it.
 
 **Removing a device is final.** Its key cannot be registered again, open connections are
@@ -120,7 +120,7 @@ it off. That is why it costs more than a plain device:
 - the Overview page keeps reminding you that such devices exist;
 - an API token cannot do it.
 
-**Changing it later.** Open the device (People and devices, Added here, the device). "Change
+**Changing it later.** Open the device (People, devices and rules, Added here, the device). "Change
 access" there opens the same choices and asks for
 the same confirmation, also when you only take addresses away. On quicgate's side the change is
 in force at once. The device itself still has its old setup file, and quicgate cannot make a
@@ -162,7 +162,7 @@ Requests from inside the VPN are not counted toward automatic bans.
 ## People who log in
 
 For family or colleagues: they sign in with their own account and add their own devices. You
-do not hand out files. Until it is set up, "People and devices" shows what it takes:
+do not hand out files. Until it is set up, "People, devices and rules" shows what it takes:
 
 1. **A login provider.** The service people sign in with, such as Keycloak or Authentik. Add
    it on the Access control page, where it is called an identity provider.
@@ -181,7 +181,7 @@ proxy has to be listed under trusted proxies and send `X-Forwarded-Proto: https`
 
 What a person sees: log in, name a device, download the setup file. What quicgate does with
 that login is stricter than an ordinary web login, because a setup file outlives a browser
-session. The settings named here are under **Login rules** in "People and devices":
+session. The settings named here are under **Login rules** in "People, devices and rules":
 
 - **The login has to be fresh.** quicgate asks the provider to authenticate the person now
   (`max_age`) and checks the `auth_time` the provider states. A browser that was still logged in
@@ -206,15 +206,23 @@ session. The settings named here are under **Login rules** in "People and device
 - A device keeps its setup file across all of this. After a lapse the person logs in at the
   login page and the same device works again.
 
-Each person who logged in has a row in "People and devices", and a page of their own behind
+Each person who logged in has a row in "People, devices and rules", and a page of their own behind
 it. **End login** there takes a person's devices off until they log in again. **Block** keeps
 them off whatever the provider says, until you lift it on the same page.
 
 ### Rules: what people may reach on your local network
 
-Rules have a section of their own, **Rules for the local network**, because a rule can name a
-group and so belongs to no single person. Its "Applies to" column says how many people and
-devices a rule reaches today, and a person's page lists the rules that apply to them.
+Rules live with the people they are for, in the same card. **Add a rule** is at the top of
+"People, devices and rules".
+
+- A rule for **one person** shows on that person's row (the addresses under "May reach", with
+  the rule's name in small print) and is changed or removed on their page, under "Rules that
+  apply". "Add a rule for this person" is there too.
+- A rule for **a group or for everybody** is listed at the bottom of the card, with how many
+  people and devices it covers today. Each person it covers also shows it on their page, with
+  the reason ("through the group family").
+- A rule for a person who has not logged in yet has no row to live on, so it is listed at the
+  bottom of the card as well. No rule is ever out of sight.
 
 A rule says *for whom* (a group, a person, everybody from one login provider) and *may reach*
 (the same lines as for a device: name, address, what for). A person gets what every rule that

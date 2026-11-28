@@ -3075,12 +3075,18 @@ function loginBadge(p) {
 }
 
 // reachChips shows "Private hosts" and up to max destinations.
-function reachChips(routes, max) {
+// from, when given, says per route which rule it comes from: the chip then
+// says so when the mouse rests on it.
+function reachChips(routes, max, from) {
   const reach = node('div', 'reach');
   reach.append(node('span', 'reach__item', 'Private hosts'));
   const seen = new Set();
   const unique = routes.filter((r) => { const k = `${r.cidr}|${r.proto}|${r.ports}`; if (seen.has(k)) return false; seen.add(k); return true; });
-  for (const r of unique.slice(0, max)) reach.append(destChip(r));
+  for (const r of unique.slice(0, max)) {
+    const chip = destChip(r);
+    if (from && from.get(r)) chip.title = `From the rule "${from.get(r)}". ${chip.title}`;
+    reach.append(chip);
+  }
   if (unique.length > max) reach.append(node('span', 'reach__more', `and ${unique.length - max} more`));
   return reach;
 }
@@ -3209,7 +3215,15 @@ function renderVPNPeopleList(data) {
       const withRoutes = p.devices.filter((d) => (d.routes || []).length);
       tdReach.append(reachChips(withRoutes.flatMap((d) => d.routes), 2));
       if (withRoutes.length && withRoutes.length < p.devices.length) tdReach.append(node('span', 'cell-sub', `local addresses for ${withRoutes.map((d) => d.name).slice(0, 2).join(', ')}${withRoutes.length > 2 ? ' and more' : ''} only`));
-    } else tdReach.append(reachChips(p.routes, 2));
+    } else {
+      // The rules behind the chips, said quietly: the chip's own hint names
+      // its rule, and one small line names the rules.
+      const from = new Map();
+      for (const { rule } of p.rules) for (const r of rule.routes || []) from.set(r, rule.name);
+      tdReach.append(reachChips(p.routes, 2, from));
+      const names = p.rules.map((r) => `"${r.rule.name}"`);
+      if (names.length) tdReach.append(node('span', 'cell-sub', `from the ${names.length === 1 ? 'rule' : 'rules'} ${names.slice(0, 2).join(' and ')}${names.length > 2 ? ` and ${names.length - 2} more` : ''}`));
+    }
     if (!lan && (p.own ? p.devices.some((d) => (d.routes || []).length) : p.routes.length)) tdReach.append(node('span', 'cell-sub', 'Local network access is switched off: only private hosts work now.'));
 
     const tdLogin = cell();
@@ -3226,8 +3240,8 @@ function renderVPNPeopleList(data) {
   if (!all.length) {
     empty.hidden = false;
     empty.append(node('b', '', 'Nobody yet. '), off
-      ? 'Devices and the people who log in appear here. Needs the VPN switched on, at the top of this page.'
-      : 'Add a device for yourself with "Add a device": it appears here under "Added here". Other people appear with their own name once they log in.');
+      ? 'Devices, the people who log in and the rules for what they may reach appear here. Needs the VPN switched on, at the top of this page.'
+      : 'Add a device for yourself with "Add a device": it appears here under "Added here". Other people appear with their own name once they log in. They reach your private hosts; a rule lets a person or a group reach addresses on your local network too.');
   } else if (!rows.length) {
     empty.hidden = false;
     empty.append(node('b', '', 'Nobody matches. '), 'Change the search or the filter to see the others.');
@@ -3291,27 +3305,33 @@ function renderVPNRules(data) {
   const off = !vpnStatus.enabled;
   const lan = vpnSettings.wg_lan_access === '1';
   const haveProvider = oidcProviders.length > 0;
-  $('vpn-rules-card').classList.toggle('is-waiting', off);
   const addRule = $('btn-add-vpnpolicy');
   addRule.disabled = off || !haveProvider;
-  addRule.title = off ? 'Switch on the VPN first' : (haveProvider ? '' : 'A rule is about people from a login provider: add one first');
+  addRule.title = off ? 'Switch on the VPN first' : (haveProvider ? 'Let a person, a group or everybody who logs in reach addresses on your local network' : 'A rule is about people from a login provider: add one first');
+
+  // A rule for one person lives with that person: on their row and on their
+  // page. Listed here are the rules that have no such home: for a group, for
+  // everybody, and for a person who has no row (never logged in, or the login
+  // is gone), so that every rule can always be reached from this page.
+  const hasRow = (v) => data.people.some((x) => x.provider === v.provider && x.sub === v.sub);
+  const listed = vpnPolicies.filter((p) => p.subject.kind !== 'user' || !hasRow(p.subject));
+  const strays = listed.some((p) => p.subject.kind === 'user');
+  $('vpn-rules-sub').hidden = listed.length === 0;
+  $('vpn-rules-sub-title').textContent = strays
+    ? 'Rules for groups, everybody, and people who have not logged in yet'
+    : 'Rules for groups and everybody';
+  const note = $('vpnpolicies-empty');
+  note.textContent = '';
+  note.hidden = !(vpnPolicies.length && !lan);
+  if (!note.hidden) note.append(node('b', '', 'The rules do nothing yet. '), 'Local network access is switched off: switch it on under VPN settings.');
 
   const body = $('vpnpolicies-body');
   body.textContent = '';
-  $('vpnpolicies-table').hidden = vpnPolicies.length === 0;
-  const note = $('vpnpolicies-empty');
-  note.textContent = '';
-  note.hidden = false;
-  if (vpnPolicies.length && !lan) note.append(node('b', '', 'These rules do nothing yet. '), 'Local network access is switched off: switch it on under VPN settings.');
-  else if (vpnPolicies.length) note.hidden = true;
-  else if (!haveProvider) note.append(node('b', '', 'No rules, and nobody to make one for. '), 'A rule lets a group or a person who logs in reach addresses on your local network. Needs a login provider first. A device you add yourself gets its addresses when you add it, without a rule.');
-  else note.append(node('b', '', 'No rules yet. '), 'People who log in reach your private hosts only. Add a rule to let a group or a person reach addresses on your local network.');
-
-  for (const p of vpnPolicies) {
+  for (const p of listed) {
     const tr = document.createElement('tr');
     const cell = () => tr.appendChild(document.createElement('td'));
     const who = describeSubject(p.subject);
-    twoLines(cell(), who.charAt(0).toUpperCase() + who.slice(1), `rule "${p.name}"`);
+    twoLines(cell(), p.subject.kind === 'user' ? who : who.charAt(0).toUpperCase() + who.slice(1), `rule "${p.name}"${p.subject.kind === 'user' ? ', for a person who has not logged in yet' : ''}`);
     const reach = node('div', 'reach');
     for (const r of p.routes || []) reach.append(destChip(r));
     cell().append(reach);
@@ -3489,10 +3509,19 @@ function renderVPNPerson(box, p, data, openDevice) {
         const edit = node('button', 'linkbtn', 'Change');
         edit.type = 'button';
         edit.addEventListener('click', () => openPolicyModal(rule));
-        td.append(edit);
+        const del = node('button', 'btn btn--ghost btn--sm btn--danger-hover', 'Remove');
+        del.type = 'button';
+        del.addEventListener('click', async () => {
+          const wide = rule.subject.kind === 'user' ? '' : ` It is for ${describeSubject(rule.subject)}, not only for this person.`;
+          if (!confirm(`Remove the rule "${rule.name}"?${wide} Open connections that only this rule allowed are closed.`)) return;
+          try { await api('DELETE', `/api/wg/policies/${rule.id}`); refreshVPN(); } catch (err) { alert(err.message); }
+        });
+        const acts = node('span', 'rowactions');
+        acts.append(edit, del);
+        td.append(acts);
       }
       rcard.append(table);
-      rcard.append(node('div', 'tablenote', 'Changing a rule changes it for everybody it names, not only for this person.'));
+      if (p.rules.some((r) => r.rule.subject.kind !== 'user')) rcard.append(node('div', 'tablenote', 'A rule for a group or for everybody changes for all of them when you change or remove it, not only for this person.'));
     }
     box.append(rcard);
   }
@@ -3801,7 +3830,11 @@ function renderVPNMap() {
     setGoal('vg-people', 'next', `Nobody has logged in yet. Send people to ${url}`, 'Copy the address', async (e) => {
       try { await navigator.clipboard.writeText(url); e.currentTarget.textContent = 'Copied'; } catch (err) { prompt('The address of the login page', url); }
     });
-  } else setGoal('vg-people', 'done', `${plural(vpnSessions.length, 'person has', 'people have')} logged in at ${portal.domains[0]}. ${plural(vpnPolicies.length, 'rule', 'rules')} for the local network.`, 'Add a rule', () => openPolicyModal(null));
+  } else {
+    // How many of them a rule lets onto the local network.
+    const local = vpnSessions.filter((x) => rulesFor(x.provider, x.sub, x.groups).length).length;
+    setGoal('vg-people', 'done', `${plural(vpnSessions.length, 'person has', 'people have')} logged in at ${portal.domains[0]}. ${local ? `${local === vpnSessions.length ? (local === 1 ? 'A rule lets them' : 'Rules let them all') : `Rules let ${local} of them`} reach addresses on your local network.` : 'No rule yet: they reach your private hosts only.'}`, 'Add a rule', () => openPolicyModal(null));
+  }
 
   // 4. Another network.
   if (!wgSites.length) setGoal('vg-networks', 'idle', 'No other network connected. Only needed when a service lives somewhere else.', 'Connect a network', canAdd && (() => openWGSiteModal(null)));

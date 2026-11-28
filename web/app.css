@@ -721,3 +721,4 @@ label.choice, .choice > label { cursor: pointer; }
   .why li { grid-template-columns: 1fr; gap: 2px; }
   .vpnstate { justify-content: flex-start; }
 }
+#vpn-rules-sub .table th { background: transparent; }

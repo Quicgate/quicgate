@@ -4,6 +4,23 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.21.1] - 2026-11-28
+
+### Changed
+- **Rules now live with the people they are for.** The VPN page had one card for people and
+  devices and a second one for rules, although a rule is about a person. There is one card
+  now, "People, devices and rules", and "Add a rule" sits at its top next to "Add a device".
+  - A rule for one person no longer has a row of its own. What it gives already shows on that
+    person's row under "May reach", now with the rule's name in small print. You change or
+    remove it on the person's page, under "Rules that apply", where "Remove" is new.
+  - Rules for a group or for everybody are a short list at the bottom of the same card, with
+    how many people and devices each covers. The list is only there when such a rule exists.
+  - A rule for a person who has not logged in yet is in that list too, so that no rule is ever
+    out of sight.
+- The line "Let other people log in" at the top of the page now says how many of the people
+  who logged in a rule lets onto the local network.
+- Nothing changed in what a rule does or in the API.
+
 ## [1.21.0] - 2026-11-28
 
 ### Changed

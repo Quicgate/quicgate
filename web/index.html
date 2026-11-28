@@ -298,8 +298,8 @@
       </div>
 
       <div class="card card--flush" id="vpn-people-card">
-        <div class="sectionhead"><h2>People and devices <span class="sectionhead__hint">who is on the VPN, and with what. Click a row for the devices.</span></h2>
-          <button id="btn-add-wgdevice" class="btn btn--secondary btn--sm">Add a device</button></div>
+        <div class="sectionhead"><h2>People, devices and rules <span class="sectionhead__hint">who is on the VPN, with what, and what they may reach. Click a row for the details.</span></h2>
+          <span class="rowactions"><button id="btn-add-vpnpolicy" class="btn btn--secondary btn--sm">Add a rule</button><button id="btn-add-wgdevice" class="btn btn--secondary btn--sm">Add a device</button></span></div>
         <div class="toolbar toolbar--inset" id="vpn-people-tools" hidden>
           <input type="search" class="search" id="vpn-people-search" placeholder="Search a name, a group or a device" autocomplete="off" spellcheck="false" aria-label="Search people and devices">
           <div class="segmented" id="vpn-people-filter" role="group" aria-label="Show">
@@ -336,6 +336,14 @@
             <button type="button" class="btn btn--ghost btn--sm" id="vpn-people-next">Next</button>
           </div>
         </div>
+        <div id="vpn-rules-sub" hidden>
+          <p class="subhead" id="vpn-rules-sub-title">Rules for groups and everybody</p>
+          <table class="table table--stack" id="vpnpolicies-table">
+            <thead><tr><th>For</th><th>May reach on the local network</th><th>Covers</th><th></th></tr></thead>
+            <tbody id="vpnpolicies-body"></tbody>
+          </table>
+        </div>
+        <div id="vpnpolicies-empty" class="emptyline" hidden></div>
         <div id="vpn-people-note" class="tablenote" hidden></div>
         <details class="fold" id="vpn-lease-fold">
           <summary>Login rules <span class="fold__sum" id="vpn-lease-summary"></span></summary>
@@ -364,7 +372,7 @@
           </form>
         </details>
         <details class="fold fold--info" id="vpn-people-info">
-          <summary><span class="fold__info">i</span>What a device can reach, what the login provider has to support, and what "End login" and "Block" do</summary>
+          <summary><span class="fold__info">i</span>What a device can reach, how rules work, what the login provider has to support, and what "End login" and "Block" do</summary>
           <div class="fold__body">
             <ul>
               <li><b>Private hosts</b> are the proxy hosts you marked "VPN only". Every device reaches them by their normal name. To the rest of the world those names do not exist.</li>
@@ -375,28 +383,10 @@
               <li><b>The login provider</b> has to let quicgate ask again later whether the account still exists (in Keycloak: the scope <code>offline_access</code>), make the person sign in again when quicgate asks for a fresh login and say when they did (<code>max_age</code> and <code>auth_time</code>), and send the person's groups for rules by group (in Keycloak: a Group Membership mapper).</li>
               <li><b>The login page</b> has to be reachable without the VPN, over HTTPS: it is where people go to get the VPN back.</li>
               <li><b>"End login"</b> stops a person's devices until they log in again. <b>"Block"</b> keeps them off whatever the login provider says, until you lift it.</li>
-              <li><b>Last seen</b> is the last time the device and quicgate shook hands. quicgate writes it down about once a minute, so it survives a restart. Traffic counts start again at every restart.</li>
-            </ul>
-          </div>
-        </details>
-      </div>
-
-      <div class="card card--flush" style="margin-top:var(--sp-5)" id="vpn-rules-card">
-        <div class="sectionhead"><h2>Rules for the local network <span class="sectionhead__hint">what people who log in may reach there, on top of private hosts</span></h2>
-          <button id="btn-add-vpnpolicy" class="btn btn--secondary btn--sm">Add a rule</button></div>
-        <table class="table table--stack" id="vpnpolicies-table">
-          <thead><tr><th>Who</th><th>May reach on the local network</th><th>Applies to</th><th></th></tr></thead>
-          <tbody id="vpnpolicies-body"></tbody>
-        </table>
-        <div id="vpnpolicies-empty" class="emptyline" hidden></div>
-        <details class="fold fold--info">
-          <summary><span class="fold__info">i</span>How rules work</summary>
-          <div class="fold__body">
-            <ul>
-              <li>A rule names a group, one person, or everybody from a login provider. So a rule belongs to no single person; each person's page shows the rules that apply to them, and why.</li>
-              <li>A person gets what every rule that names them allows. There are no "deny" rules: what no rule allows is refused.</li>
-              <li>A device added here gets its addresses on the device itself, not from a rule.</li>
+              <li><b>A rule</b> lets people who log in reach addresses on your local network, on top of private hosts. It names one person, a group, or everybody from a login provider. A rule for one person shows on that person's row and is changed on their page. A rule for a group or for everybody is listed at the bottom of this card, with whom it covers.</li>
+              <li>A person gets what every rule that names them allows. There are no "deny" rules: what no rule allows is refused. A device added here gets its addresses on the device itself, not from a rule.</li>
               <li>A device that was set up before a rule existed needs its setup file again, or the new address added by hand in the WireGuard app: the allowed addresses are written into the file when it is made.</li>
+              <li><b>Last seen</b> is the last time the device and quicgate shook hands. quicgate writes it down about once a minute, so it survives a restart. Traffic counts start again at every restart.</li>
             </ul>
           </div>
         </details>
