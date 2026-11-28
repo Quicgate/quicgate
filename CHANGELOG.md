@@ -4,6 +4,58 @@ All notable changes to quicgate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.21.0] - 2026-11-28
+
+### Changed
+- **The VPN page lists people, and a person opens into their devices.** In 1.20.0 the same
+  devices stood in two cards. Now there is one card, "People and devices", with one row per
+  person who logged in, and one row "Added here" for the devices an admin added on the page
+  (the former break-glass devices among them). A row says how many devices, whether one is
+  connected now or when one was last seen, what they may reach in short, and how the login is
+  doing.
+- **A person has a page of their own.** Click a row: the login with End login and Block, the
+  devices, and the rules that apply to this person, each with the reason ("names this person",
+  "through the group family"). Click a device to open it in place: last contact, first seen,
+  traffic, where it connects from, its address inside the VPN, what it may reach and why, and
+  Remove (for a device added here also Change access and its end date).
+- **The address follows along**: `#/vpn/person/...` and `.../device/...`. The Back button works,
+  a reload opens the same view, and an address that names nobody says so with a way back.
+- **Rules have their own section**, "Rules for the local network", because a rule can name a
+  group and so belongs to no single person. A new column says how many people and devices a
+  rule reaches today.
+- **For long lists**: with more than ten rows a search box (name, group or device name), three
+  filters (Connected now, Login ended, Blocked) and a page size appear. Connected people come
+  first.
+
+### Added
+- **"Last seen" survives a restart.** quicgate now writes down when each device was last seen
+  and first seen, about once a minute and only when it changed. Until now this lived in memory
+  and was gone after every restart.
+- **A device's latest connections to the local network** are shown when you open the device:
+  when, where to, and whether it was allowed, refused (with the reason) or ended (with how much
+  was sent and received). They come from `logs/vpn-flows.log`, which until now no page read.
+  Only the latest 4 MB of the current log file is read, and at most 200 records are returned.
+  Visits to private hosts are not in this log; they are in the normal request log.
+- **Who added a device** is recorded for devices added on the page: the admin's account, or
+  "an API token". Devices that exist already have no such record, and the page says so
+  instead of guessing.
+- `GET /api/wg/devices/{id}/flows` in the API. A monitoring token or a switch token cannot
+  call it. `addedBy`, `firstSeenAt` and `lastSeenAt` on devices, `seenSince` on
+  `GET /api/wg/status`.
+
+### Fixed
+- **"Never connected" was said about devices that had been in use for months.** The time of the
+  last contact was lost at every restart, and the page then called that "never". A device now
+  shows "Never connected" only when it was added after quicgate began to keep these times and
+  has none. An older device without one shows "Not seen yet since" that day.
+
+### Upgrade notes
+- Nothing to do. The database gains three columns on VPN devices and one setting
+  (`wg_seen_since`, the moment this version first started); existing rows are not rewritten.
+- After the upgrade every existing device shows "Not seen yet since (today)" until it connects
+  once. That is the honest state: what was seen before was never stored.
+- Traffic counts per device still start again at every restart.
+
 ## [1.20.0] - 2026-11-28
 
 ### Changed

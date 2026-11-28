@@ -57,6 +57,10 @@ type WGStatus struct {
 	// KeyUnreadable: a server key is stored and does not open (QG-04). Only an
 	// explicit reset replaces it.
 	KeyUnreadable bool `json:"keyUnreadable,omitempty"`
+	// SeenSince is from when quicgate keeps "last seen" of devices. A device
+	// older than this without a time on record was not necessarily never
+	// connected: it is not known.
+	SeenSince string `json:"seenSince,omitempty"`
 }
 
 // WGSettings reads the WireGuard settings with their defaults.
@@ -228,6 +232,7 @@ func (e *Engine) WGStatus() WGStatus {
 		out.Devices = e.wg.DeviceStatus()
 	}
 	out.LANAccess = e.store.GetSetting("wg_lan_access", "") == "1"
+	out.SeenSince = e.store.GetSetting("wg_seen_since", "")
 	_, keyState := e.store.SecretSetting("wg_private_key")
 	out.KeyUnreadable = keyState == store.SecretUnreadable
 	out.Resets = e.wg.Resets()

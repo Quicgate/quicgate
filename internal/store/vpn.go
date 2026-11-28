@@ -177,6 +177,15 @@ type WGDevice struct {
 	Routes       []VPNRoute `json:"routes,omitempty"`    // admin and breakglass: local addresses of its own
 	ExpiresAt    string     `json:"expiresAt,omitempty"` // admin and breakglass: the device stops working then
 	CreatedAt    string     `json:"createdAt,omitempty"`
+	// AddedBy is the admin account that added the device, or "token" for an
+	// API token. Empty for a device from before this was recorded, and for a
+	// device a person added at the portal (its owner is in Email).
+	AddedBy string `json:"addedBy,omitempty"`
+	// FirstSeenAt and LastSeenAt are the first and the latest WireGuard
+	// handshake quicgate has written down for the device. Empty until one was
+	// written: a device from before this was recorded starts empty too.
+	FirstSeenAt string `json:"firstSeenAt,omitempty"`
+	LastSeenAt  string `json:"lastSeenAt,omitempty"`
 }
 
 func wgDevicePSKAAD(id int64) string { return aad("wg_devices", "psk", id) }
@@ -306,18 +315,37 @@ CREATE TABLE IF NOT EXISTS vpn_blocked (
   blocked_at TEXT NOT NULL,
   PRIMARY KEY (provider, sub)
 );`)
+	if err != nil {
+		return err
+	}
+	// Columns of later versions. Additive only: an existing row keeps what it
+	// has and gets the empty default, and a duplicate-column error means the
+	// column is there already.
+	for _, stmt := range []string{
+		"ALTER TABLE wg_devices ADD COLUMN added_by TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE wg_devices ADD COLUMN first_seen_at TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE wg_devices ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''",
+	} {
+		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	// From when "last seen" is kept. Written once, by the first start that
+	// keeps it, and never again: a device older than this with no time on
+	// record is "not known", not "never connected".
+	_, err = s.db.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('wg_seen_since', ?)", now())
 	return err
 }
 
 // ---- devices ----
 
-const wgDeviceCols = "id, name, kind, public_key, psk, COALESCE(address,''), enabled, revoked_at, provider, sub, email, routes, expires_at, created_at"
+const wgDeviceCols = "id, name, kind, public_key, psk, COALESCE(address,''), enabled, revoked_at, provider, sub, email, routes, expires_at, created_at, added_by, first_seen_at, last_seen_at"
 
 func (s *Store) scanWGDevice(row interface{ Scan(...any) error }) (WGDevice, error) {
 	var d WGDevice
 	var psk, routes string
 	var enabled int
-	if err := row.Scan(&d.ID, &d.Name, &d.Kind, &d.PublicKey, &psk, &d.Address, &enabled, &d.RevokedAt, &d.Provider, &d.Sub, &d.Email, &routes, &d.ExpiresAt, &d.CreatedAt); err != nil {
+	if err := row.Scan(&d.ID, &d.Name, &d.Kind, &d.PublicKey, &psk, &d.Address, &enabled, &d.RevokedAt, &d.Provider, &d.Sub, &d.Email, &routes, &d.ExpiresAt, &d.CreatedAt, &d.AddedBy, &d.FirstSeenAt, &d.LastSeenAt); err != nil {
 		return d, err
 	}
 	d.Enabled = enabled == 1
@@ -375,6 +403,18 @@ func publicKeyTaken(q dbtx, key string) (bool, error) {
 	var n int
 	err := q.QueryRow("SELECT (SELECT COUNT(*) FROM wg_sites WHERE public_key=?) + (SELECT COUNT(*) FROM wg_devices WHERE public_key=?)", key, key).Scan(&n)
 	return n > 0, err
+}
+
+// MarkWGDeviceSeen writes down that a device was seen at t (its latest
+// WireGuard handshake). The time only ever moves forward, and the first one
+// written stays as "first seen". A zero time changes nothing.
+func (s *Store) MarkWGDeviceSeen(id int64, t time.Time) error {
+	if t.IsZero() {
+		return nil
+	}
+	ts := t.UTC().Format(time.RFC3339)
+	_, err := s.db.Exec("UPDATE wg_devices SET last_seen_at=?, first_seen_at=CASE WHEN first_seen_at='' THEN ? ELSE first_seen_at END WHERE id=? AND last_seen_at < ?", ts, ts, id, ts)
+	return err
 }
 
 // SetWGDeviceAccess replaces the local addresses an admin's device carries,
@@ -454,8 +494,9 @@ func (s *Store) CreateWGDevice(d *WGDevice, tunnel netip.Prefix, psk string, lim
 	}
 	routes, _ := json.Marshal(d.Routes)
 	ts := now()
-	res, err := tx.Exec("INSERT INTO wg_devices (name, kind, public_key, psk, address, enabled, provider, sub, email, routes, expires_at, created_at) VALUES (?,?,?,'',?,?,?,?,?,?,?,?)",
-		d.Name, d.Kind, d.PublicKey, addr.String(), b2i(d.Enabled), d.Provider, d.Sub, d.Email, string(routes), d.ExpiresAt, ts)
+	d.FirstSeenAt, d.LastSeenAt = "", ""
+	res, err := tx.Exec("INSERT INTO wg_devices (name, kind, public_key, psk, address, enabled, provider, sub, email, routes, expires_at, created_at, added_by) VALUES (?,?,?,'',?,?,?,?,?,?,?,?,?)",
+		d.Name, d.Kind, d.PublicKey, addr.String(), b2i(d.Enabled), d.Provider, d.Sub, d.Email, string(routes), d.ExpiresAt, ts, d.AddedBy)
 	if err != nil {
 		return err
 	}

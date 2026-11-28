@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -638,5 +641,197 @@ func TestAnAPITokenCannotGiveADeviceLocalAccess(t *testing.T) {
 	devices, _ := s.store.ListWGDevices()
 	if len(devices) != 1 || len(devices[0].Routes) != 0 {
 		t.Fatalf("devices = %+v, want the one plain device without routes", devices)
+	}
+}
+
+// flowLine writes one record the way the forwarder's log has it.
+func flowLine(t *testing.T, rec map[string]any) string {
+	t.Helper()
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw) + "\n"
+}
+
+func writeFlowLog(t *testing.T, s *Server, content string) {
+	t.Helper()
+	dir := filepath.Join(s.dataDir, "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "vpn-flows.log"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type flowsAnswer struct {
+	Flows []struct {
+		Time    string `json:"ts"`
+		Peer    string `json:"peer"`
+		Device  string `json:"device"`
+		Dest    string `json:"dst"`
+		Verdict string `json:"verdict"`
+		Reason  string `json:"reason"`
+	} `json:"flows"`
+	Truncated bool `json:"truncated"`
+}
+
+func getFlows(t *testing.T, s *Server, sess, path string) flowsAnswer {
+	t.Helper()
+	rr := call(t, s, http.MethodGet, path, sess, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET %s: %d %s", path, rr.Code, rr.Body.String())
+	}
+	var out flowsAnswer
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("GET %s: %v in %s", path, err, rr.Body.String())
+	}
+	return out
+}
+
+// The connections of one device, read from the connection log. Only that
+// device's lines come back, newest first, and the read is bounded: a line
+// count, a window at the end of the file, and a cap on one line.
+func TestDeviceFlowsAPI(t *testing.T) {
+	s, sess := vpnServer(t)
+	var ids []int64
+	for _, name := range []string{"phone", "laptop"} {
+		rr := call(t, s, http.MethodPost, "/api/wg/devices", sess, map[string]any{"name": name, "publicKey": randomKey(t)})
+		var d store.WGDevice
+		if err := json.Unmarshal(rr.Body.Bytes(), &d); err != nil || rr.Code != http.StatusCreated {
+			t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+		}
+		ids = append(ids, d.ID)
+	}
+	phone, laptop := ids[0], ids[1]
+	path := fmt.Sprintf("/api/wg/devices/%d/flows", phone)
+
+	if rr := call(t, s, http.MethodGet, path, "", nil); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("without a session: %d, want 401", rr.Code)
+	}
+	// No log yet: an empty list, not an error.
+	if got := getFlows(t, s, sess, path); len(got.Flows) != 0 || got.Truncated {
+		t.Fatalf("without a log file: %+v", got)
+	}
+	if rr := call(t, s, http.MethodGet, "/api/wg/devices/999/flows", sess, nil); rr.Code != http.StatusNotFound {
+		t.Fatalf("a device that does not exist: %d, want 404", rr.Code)
+	}
+
+	peer := func(id int64) string { return fmt.Sprintf("device:%d", id) }
+	var log strings.Builder
+	log.WriteString(flowLine(t, map[string]any{"ts": "2026-11-28T10:00:00Z", "peer": peer(phone), "device": "phone", "src": "10.77.0.2:50000", "dst": "192.168.1.10:445", "proto": "tcp", "verdict": "allow"}))
+	log.WriteString(flowLine(t, map[string]any{"ts": "2026-11-28T10:00:01Z", "peer": peer(laptop), "device": "laptop", "src": "10.77.0.3:50000", "dst": "192.168.1.20:22", "proto": "tcp", "verdict": "allow"}))
+	log.WriteString("this is not a record\n")
+	// The name in a record is what the device was called, not who it is: a
+	// laptop renamed to look like the phone is still the laptop.
+	log.WriteString(flowLine(t, map[string]any{"ts": "2026-11-28T10:00:02Z", "peer": peer(laptop), "device": "phone", "dst": "192.168.1.30:80", "proto": "tcp", "verdict": "allow"}))
+	// "device:1" must not match "device:12".
+	log.WriteString(flowLine(t, map[string]any{"ts": "2026-11-28T10:00:03Z", "peer": peer(phone) + "2", "device": "other", "dst": "192.168.1.31:80", "proto": "tcp", "verdict": "allow"}))
+	log.WriteString(flowLine(t, map[string]any{"ts": "2026-11-28T10:00:04Z", "peer": "site:" + fmt.Sprint(phone), "device": "a site", "dst": "192.168.1.32:80", "proto": "tcp", "verdict": "allow"}))
+	// One line far longer than any record: skipped, and what follows is read.
+	log.WriteString(`{"ts":"2026-11-28T10:00:05Z","peer":"` + peer(phone) + `","dst":"` + strings.Repeat("x", maxFlowLine) + `"}` + "\n")
+	log.WriteString(flowLine(t, map[string]any{"ts": "2026-11-28T10:00:06Z", "peer": peer(phone), "device": "phone", "dst": "192.168.1.2:81", "proto": "tcp", "verdict": "deny", "reason": "<script>alert(1)</script>"}))
+	log.WriteString(flowLine(t, map[string]any{"ts": "2026-11-28T10:00:07Z", "peer": peer(phone), "device": "phone", "dst": "192.168.1.10:445", "proto": "tcp", "verdict": "end", "bytesUp": 10, "bytesDown": 20, "seconds": 1.5}))
+	writeFlowLog(t, s, log.String())
+
+	got := getFlows(t, s, sess, path)
+	if len(got.Flows) != 3 || got.Truncated {
+		t.Fatalf("flows = %+v, want the phone's three records", got)
+	}
+	for _, f := range got.Flows {
+		if f.Peer != peer(phone) {
+			t.Fatalf("a record of %q among the phone's: %+v", f.Peer, got.Flows)
+		}
+	}
+	if got.Flows[0].Verdict != "end" || got.Flows[1].Verdict != "deny" || got.Flows[2].Time != "2026-11-28T10:00:00Z" {
+		t.Fatalf("order = %+v, want newest first", got.Flows)
+	}
+	// What a record says is passed on as text, as it is.
+	if got.Flows[1].Reason != "<script>alert(1)</script>" {
+		t.Fatalf("reason = %q", got.Flows[1].Reason)
+	}
+	// n bounds the answer, and n itself is bounded.
+	if two := getFlows(t, s, sess, path+"?n=2"); len(two.Flows) != 2 || two.Flows[0].Verdict != "end" {
+		t.Fatalf("n=2: %+v", two)
+	}
+	var many strings.Builder
+	for i := 0; i < maxFlowLines+50; i++ {
+		many.WriteString(flowLine(t, map[string]any{"ts": "2026-11-28T11:00:00Z", "peer": peer(phone), "dst": fmt.Sprintf("192.168.1.10:%d", 1000+i), "proto": "tcp", "verdict": "allow"}))
+	}
+	writeFlowLog(t, s, many.String())
+	if all := getFlows(t, s, sess, path+"?n=100000"); len(all.Flows) != maxFlowLines || all.Flows[0].Dest != fmt.Sprintf("192.168.1.10:%d", 1000+maxFlowLines+49) {
+		t.Fatalf("n=100000 gave %d records, want %d, newest first", len(all.Flows), maxFlowLines)
+	}
+	// Only the end of a large file is read: a record before that window is
+	// not found, and the answer says that it looked at a part only.
+	var big strings.Builder
+	big.WriteString(flowLine(t, map[string]any{"ts": "2026-11-27T00:00:00Z", "peer": peer(phone), "dst": "192.168.1.99:1", "proto": "tcp", "verdict": "allow"}))
+	filler := flowLine(t, map[string]any{"ts": "2026-11-28T00:00:00Z", "peer": peer(laptop), "dst": "192.168.1.20:22", "proto": "tcp", "verdict": "allow", "reason": strings.Repeat("f", 900)})
+	for big.Len() < maxFlowWindow+4096 {
+		big.WriteString(filler)
+	}
+	big.WriteString(flowLine(t, map[string]any{"ts": "2026-11-28T12:00:00Z", "peer": peer(phone), "dst": "192.168.1.10:445", "proto": "tcp", "verdict": "allow"}))
+	writeFlowLog(t, s, big.String())
+	tail := getFlows(t, s, sess, path)
+	if len(tail.Flows) != 1 || tail.Flows[0].Time != "2026-11-28T12:00:00Z" || !tail.Truncated {
+		t.Fatalf("a large log: %d records, truncated %v, want the one recent record and truncated", len(tail.Flows), tail.Truncated)
+	}
+
+	// A removed device keeps its history.
+	if rr := call(t, s, http.MethodDelete, fmt.Sprintf("/api/wg/devices/%d", phone), sess, nil); rr.Code != http.StatusNoContent {
+		t.Fatalf("revoke: %d", rr.Code)
+	}
+	if after := getFlows(t, s, sess, path); len(after.Flows) != 1 {
+		t.Fatalf("after removing the device: %+v", after)
+	}
+
+	// The log says where people connect to: not for a token that only reads
+	// status or switches hosts.
+	for _, access := range []string{store.TokenMonitor, store.TokenSwitch} {
+		if rr := bearer(t, s, http.MethodGet, path, mustToken(t, s, access), nil); rr.Code != http.StatusForbidden {
+			t.Fatalf("with a %s token: %d, want 403", access, rr.Code)
+		}
+	}
+	if rr := bearer(t, s, http.MethodGet, path, mustToken(t, s, store.TokenFull), nil); rr.Code != http.StatusOK {
+		t.Fatalf("with a full token: %d, want 200", rr.Code)
+	}
+}
+
+// Who added a device is written down when it is added: the admin's account,
+// or "token" for an API token. Nobody can say it for themselves, and a device
+// a person added at the login page has its owner instead.
+func TestDeviceRecordsWhoAddedIt(t *testing.T) {
+	s, sess := vpnServer(t)
+	create := func(rr *httptest.ResponseRecorder) store.WGDevice {
+		t.Helper()
+		var d store.WGDevice
+		if err := json.Unmarshal(rr.Body.Bytes(), &d); err != nil || rr.Code != http.StatusCreated {
+			t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+		}
+		return d
+	}
+	byAdmin := create(call(t, s, http.MethodPost, "/api/wg/devices", sess, map[string]any{"name": "phone", "publicKey": randomKey(t)}))
+	if byAdmin.AddedBy != "admin@example.com" {
+		t.Fatalf("added by %q, want the admin's account", byAdmin.AddedBy)
+	}
+	byToken := create(bearer(t, s, http.MethodPost, "/api/wg/devices", mustToken(t, s, store.TokenFull), map[string]any{"name": "script", "publicKey": randomKey(t)}))
+	if byToken.AddedBy != "token" {
+		t.Fatalf("added by %q, want token", byToken.AddedBy)
+	}
+	if rr := call(t, s, http.MethodPost, "/api/wg/devices", sess, map[string]any{"name": "x", "publicKey": randomKey(t), "addedBy": "somebody@else.example"}); rr.Code != http.StatusBadRequest {
+		t.Fatalf("a chosen addedBy: %d %s, want 400", rr.Code, rr.Body.String())
+	}
+	// The older call does not read unknown fields, and does not believe them.
+	code, _, _ := withTOTP(t, s)
+	old := create(call(t, s, http.MethodPost, "/api/wg/breakglass", sess, map[string]any{"name": "safe", "publicKey": randomKey(t), "addedBy": "somebody@else.example",
+		"password": "password-123", "code": code(), "neverExpires": true, "routes": []map[string]string{{"cidr": "192.168.1.10"}}}))
+	if old.AddedBy != "admin@example.com" {
+		t.Fatalf("the older call recorded %q", old.AddedBy)
+	}
+	var listed []store.WGDevice
+	_ = json.Unmarshal(call(t, s, http.MethodGet, "/api/wg/devices", sess, nil).Body.Bytes(), &listed)
+	if len(listed) != 3 || listed[0].AddedBy != "admin@example.com" || listed[1].AddedBy != "token" {
+		t.Fatalf("listed = %+v", listed)
 	}
 }

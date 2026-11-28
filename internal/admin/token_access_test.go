@@ -82,6 +82,8 @@ var everythingElse = []struct{ method, path string }{
 	{http.MethodPost, "/api/logout"},
 	{http.MethodPost, "/api/geoip/reload"},
 	{http.MethodPut, "/api/wg/devices/1/enabled"},
+	{http.MethodGet, "/api/wg/devices/1/flows"},
+	{http.MethodPut, "/api/wg/devices/1/access"},
 }
 
 // A monitoring token reads status and nothing else: not a host's

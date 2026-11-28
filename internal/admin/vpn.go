@@ -1,10 +1,14 @@
 package admin
 
 import (
+	"bufio"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +29,7 @@ func (s *Server) registerVPN(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/wg/devices/{id}/enabled", s.auth(s.handleEnableWGDevice))
 	mux.HandleFunc("DELETE /api/wg/devices/{id}", s.auth(s.handleRevokeWGDevice))
 	mux.HandleFunc("PUT /api/wg/devices/{id}/access", s.auth(s.handleSetWGDeviceAccess))
+	mux.HandleFunc("GET /api/wg/devices/{id}/flows", s.auth(s.handleWGDeviceFlows))
 	mux.HandleFunc("POST /api/wg/breakglass", s.auth(s.handleCreateBreakGlass))
 	mux.HandleFunc("GET /api/wg/policies", s.auth(s.handleListVPNPolicies))
 	mux.HandleFunc("POST /api/wg/policies", s.auth(s.handleSaveVPNPolicy))
@@ -185,7 +190,113 @@ func (s *Server) createAdminDevice(w http.ResponseWriter, r *http.Request, name,
 	if len(a.Routes) > 0 && !s.confirmLocalAccess(w, r, a.Password, a.Code) {
 		return
 	}
-	s.createDevice(w, r, &store.WGDevice{Name: name, Kind: "admin", PublicKey: publicKey, Routes: a.Routes, ExpiresAt: expires})
+	s.createDevice(w, r, &store.WGDevice{Name: name, Kind: "admin", PublicKey: publicKey, Routes: a.Routes, ExpiresAt: expires, AddedBy: addedBy(r)})
+}
+
+// addedBy names who is adding a device, for the record: the account of the
+// session, or "token" for an API token. It comes from the session alone and
+// never from the request body.
+func addedBy(r *http.Request) string {
+	sess, _ := r.Context().Value(sessionKey).(session)
+	if sess.tokenAccess != "" {
+		return "token"
+	}
+	return sess.email
+}
+
+// The connection log is read from its end, within fixed bounds, so that a
+// large log costs a bounded amount of work and memory per request: at most
+// maxFlowWindow bytes of the current file, lines of at most maxFlowLine
+// bytes, and at most maxFlowLines records in the answer. Rotated files are
+// not read.
+const (
+	maxFlowWindow = 4 << 20
+	maxFlowLine   = 16 << 10
+	maxFlowLines  = 200
+)
+
+// handleWGDeviceFlows returns the latest records of one device from the
+// connection log (logs/vpn-flows.log): where it connected to on the local
+// network, whether that was allowed, and why not. It only reads; the log's
+// writer is not held up by it. A record belongs to the device by its peer id,
+// which is never given to another device, not by the name in the record.
+func (s *Server) handleWGDeviceFlows(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if _, err := s.store.GetWGDevice(id); errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "device not found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	n := 50
+	if v, err := strconv.Atoi(r.URL.Query().Get("n")); err == nil && v > 0 {
+		n = v
+	}
+	if n > maxFlowLines {
+		n = maxFlowLines
+	}
+	flows, truncated := readDeviceFlows(filepath.Join(s.dataDir, "logs", "vpn-flows.log"), "device:"+strconv.FormatInt(id, 10), n)
+	writeJSON(w, http.StatusOK, map[string]any{"flows": flows, "truncated": truncated})
+}
+
+// readDeviceFlows returns the last n records of peer in the log at path,
+// newest first. truncated reports that the file is larger than the window
+// that was read, so older records may exist.
+func readDeviceFlows(path, peer string, n int) (flows []json.RawMessage, truncated bool) {
+	flows = []json.RawMessage{}
+	f, err := os.Open(path)
+	if err != nil {
+		return flows, false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return flows, false
+	}
+	br := bufio.NewReaderSize(f, 64*1024)
+	if info.Size() > maxFlowWindow {
+		truncated = true
+		if _, err := f.Seek(info.Size()-maxFlowWindow, io.SeekStart); err != nil {
+			return flows, true
+		}
+		br.Reset(f)
+		// The window starts in the middle of a line: that one is not a record.
+		if _, _, err := nextLogLine(br, maxFlowLine); err != nil {
+			return flows, true
+		}
+	}
+	ring := make([]json.RawMessage, 0, n)
+	for {
+		raw, ok, err := nextLogLine(br, maxFlowLine)
+		if err != nil {
+			break
+		}
+		if !ok {
+			continue
+		}
+		var rec struct {
+			Peer string `json:"peer"`
+		}
+		if json.Unmarshal(raw, &rec) != nil || rec.Peer != peer {
+			continue
+		}
+		line := append([]byte(nil), raw...)
+		if len(ring) < n {
+			ring = append(ring, line)
+		} else {
+			copy(ring, ring[1:])
+			ring[len(ring)-1] = line
+		}
+	}
+	for i := len(ring) - 1; i >= 0; i-- {
+		flows = append(flows, ring[i])
+	}
+	return flows, truncated
 }
 
 // handleSetWGDeviceAccess changes which local addresses a device of the

@@ -125,7 +125,8 @@ function switchPage(name, section, { replace = false } = {}) {
   for (const b of $('pagenav').children) b.classList.toggle('is-active', b.dataset.page === name);
   for (const p of Object.keys(pageLoaders)) $(`page-${p}`).hidden = p !== name;
   if (sectionNavs[name]) showSection(name, section);
-  setRoute(`#/${name}${sectionNavs[name] ? '/' + currentSection[name] : ''}`, replace);
+  if (name === 'vpn') vpnPath = section || '';
+  setRoute(`#/${name}${sectionNavs[name] ? '/' + currentSection[name] : (name === 'vpn' && vpnPath ? '/' + vpnPath : '')}`, replace);
   window.scrollTo(0, 0);
   pageLoaders[name]();
 }
@@ -152,8 +153,9 @@ $('pagenav').addEventListener('click', (e) => {
 $('btn-help').addEventListener('click', () => switchPage('help'));
 
 function routeFromHash() {
-  const [page, section] = location.hash.replace(/^#\/?/, '').split('/');
-  return { page: page || 'overview', section };
+  const [page, ...rest] = location.hash.replace(/^#\/?/, '').split('/');
+  // The VPN page keeps a whole path after its name (a person, a device).
+  return { page: page || 'overview', section: page === 'vpn' ? rest.join('/') : rest[0] };
 }
 
 // initials is the avatar text: the first letters of the account name.
@@ -2936,146 +2938,309 @@ async function refreshVPN() {
     ? 'Off. Nothing listens.'
     : `${status.running ? 'On' : 'Not running'}. Port ${status.port || settings.wg_port || 51820}${status.endpoint ? `, devices connect to ${status.endpoint}` : ''}. Local network access ${lan ? 'on' : 'off'}.`;
 
-  renderVPNDevices();
-  renderVPNPeople();
+  renderVPNView();
   renderVPNNetworks();
   renderVPNMap();
 }
 
-// peopleRoutes lists what a person's device may reach on the local network:
-// the destinations of every rule that names its owner.
-function peopleRoutes(d) {
-  const s = vpnSessions.find((x) => x.provider === d.provider && x.sub === d.sub);
-  const groups = (s && s.groups) || [];
+// rulesFor lists the rules that apply to a person, each with the reason.
+function rulesFor(provider, sub, groups) {
   const out = [];
   for (const p of vpnPolicies) {
     const v = p.subject || {};
-    if (v.provider !== d.provider) continue;
-    if (v.kind === 'any-user' || (v.kind === 'user' && v.sub === d.sub) || (v.kind === 'group' && groups.includes(v.group))) out.push(...(p.routes || []));
+    if (v.provider !== provider) continue;
+    if (v.kind === 'user' && v.sub === sub) out.push({ rule: p, why: 'names this person' });
+    else if (v.kind === 'group' && (groups || []).includes(v.group)) out.push({ rule: p, why: `through the group ${v.group}` });
+    else if (v.kind === 'any-user') out.push({ rule: p, why: `everybody from ${providerName(provider)}` });
   }
   return out;
 }
 
 const isOwnDevice = (d) => d.kind === 'admin' || d.kind === 'breakglass';
 
-function renderVPNDevices() {
+// agoLong says how long ago something was, in the unit a person would use.
+function agoLong(ts) {
+  const sec = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 1000));
+  if (sec < 90) return `${sec} s ago`;
+  if (sec < 5400) return `${Math.round(sec / 60)} min ago`;
+  if (sec < 36 * 3600) return `${Math.round(sec / 3600)} h ago`;
+  if (sec < 60 * 86400) return `${Math.round(sec / 86400)} days ago`;
+  return `on ${dayText(ts)}`;
+}
+
+/* People first. A device always belongs to somebody: a person who logged in
+   at the login page, or "Added here" for the devices an admin added on this
+   page. The list shows people; a person opens into a page with their devices,
+   and a device opens in place on that page. Where you are is in the address:
+   #/vpn, #/vpn/person/<key>, #/vpn/person/<key>/device/<id>. The key is a
+   short opaque one (never a name or an address). */
+let vpnPath = '';
+let vpnPeopleQuery = '';
+let vpnPeopleFilter = '';
+let vpnPeoplePage = 0;
+const ADDED_HERE = 'added-here';
+
+// vpnPeople builds the list: everybody who logged in, everybody who is
+// blocked, the owners of devices, and "Added here".
+function vpnPeople() {
+  const live = {};
+  for (const st of vpnStatus.devices || []) live[st.id] = st;
+  const devices = wgDevices.filter((d) => !d.revokedAt);
+  const people = [];
+  const byOwner = new Map();
+  const ownerOf = (provider, sub) => `${provider}/${sub}`;
+  const person = (key, provider, sub, name) => {
+    const p = { key, provider, sub, name, groups: [], session: null, blocked: false, devices: [], own: false };
+    byOwner.set(ownerOf(provider, sub), p);
+    people.push(p);
+    return p;
+  };
+  for (const s of vpnSessions) {
+    const p = person(`p${s.id}`, s.provider, s.sub, s.email || s.sub);
+    p.session = s;
+    p.groups = s.groups || [];
+  }
+  for (const d of devices.filter((x) => x.kind === 'sso')) {
+    // A device whose owner has no login on record any more still has an owner.
+    const p = byOwner.get(ownerOf(d.provider, d.sub)) || person(`d${d.id}`, d.provider, d.sub, d.email || d.sub);
+    p.devices.push(d);
+  }
+  vpnBlocked.forEach((b, i) => {
+    const p = byOwner.get(ownerOf(b.provider, b.sub)) || person(`b${b.provider}-${i}`, b.provider, b.sub, b.email || b.sub);
+    p.blocked = true;
+  });
+  for (const p of people) {
+    p.rules = rulesFor(p.provider, p.sub, p.groups);
+    p.routes = p.rules.flatMap((r) => r.rule.routes || []);
+    const s = p.session;
+    if (s) {
+      const until = new Date(s.transient && new Date(s.graceUntil) > new Date(s.leaseUntil) ? s.graceUntil : s.leaseUntil);
+      p.until = until;
+      p.live = s.state === 'active' && until > new Date() && new Date(s.hardUntil) > new Date();
+    }
+  }
+  const own = { key: ADDED_HERE, name: 'Added here', own: true, groups: [], devices: devices.filter(isOwnDevice), rules: [], routes: [], blocked: false };
+  for (const p of [...people, own]) {
+    p.up = p.devices.filter((d) => d.enabled && live[d.id] && live[d.id].up);
+    p.lastSeen = p.devices.map((d) => ({ d, t: deviceLastSeen(d, live[d.id]) })).filter((x) => x.t).sort((a, b) => new Date(b.t) - new Date(a.t))[0] || null;
+  }
+  // Connected people first, then by name.
+  people.sort((a, b) => (b.up.length > 0) - (a.up.length > 0) || a.name.localeCompare(b.name));
+  return { own, people, live };
+}
+
+// deviceLastSeen is the latest contact known for a device: what the running
+// VPN has, or else what quicgate wrote down before its last restart.
+function deviceLastSeen(d, st) {
+  if (hadContact(st)) return st.lastHandshake;
+  return d.lastSeenAt || '';
+}
+
+// deviceState says in two lines how a device is doing right now.
+function deviceState(d, st) {
+  const seen = deviceLastSeen(d, st);
+  const last = seen ? `last seen ${agoLong(seen)}` : '';
+  if (!d.enabled) return { on: false, main: 'Paused', sub: 'switched off under "Allowed"' };
+  if (!vpnStatus.running) return { on: false, main: 'VPN not running', sub: last };
+  if (!st) {
+    const why = isOwnDevice(d) ? 'its end date has passed' : 'the login ran out, was ended or is blocked: logging in again brings it back';
+    return { on: false, main: 'No access', sub: why };
+  }
+  if (st.up) return { on: true, main: 'Connected', sub: `last contact ${ago(st.lastHandshake)}${st.endpoint ? ', from ' + st.endpoint : ''}` };
+  if (seen) return { on: false, main: 'Not connected', sub: last };
+  // Nothing on record. Only a device that was added after quicgate began to
+  // keep these times was really never connected; for an older one it is
+  // simply not known.
+  const since = vpnStatus.seenSince;
+  if (since && d.createdAt && new Date(d.createdAt) < new Date(since)) {
+    return { on: false, main: 'Not seen yet', sub: `since ${dayText(since)}, when quicgate began to keep this` };
+  }
+  return { on: false, main: 'Never connected', sub: d.createdAt ? `added ${dayText(d.createdAt)}` : '' };
+}
+
+function stateCell(td, state) {
+  const main = node('span', 'cell-main' + (state.on ? '' : ' cell-main--muted'));
+  main.append(node('span', 'dot' + (state.on ? ' dot--on' : '')), state.main);
+  return twoLines(td, main, state.sub);
+}
+
+function loginBadge(p) {
+  if (p.own) return null;
+  const s = p.session;
+  if (p.blocked) return ['badge--danger', 'Blocked', 'stays off until you lift the block'];
+  if (!s) return ['badge--muted', 'No login', 'has to log in'];
+  if (p.live && s.transient) return ['badge--danger', 'Provider unreachable', `keeps working until ${p.until.toLocaleTimeString()}`];
+  if (p.live) return ['badge--success', 'Good', `log in again by ${dayText(s.hardUntil)}`];
+  return ['badge--muted', s.state === 'ended' ? 'Ended' : 'Ran out', 'has to log in again'];
+}
+
+// reachChips shows "Private hosts" and up to max destinations.
+function reachChips(routes, max) {
+  const reach = node('div', 'reach');
+  reach.append(node('span', 'reach__item', 'Private hosts'));
+  const seen = new Set();
+  const unique = routes.filter((r) => { const k = `${r.cidr}|${r.proto}|${r.ports}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  for (const r of unique.slice(0, max)) reach.append(destChip(r));
+  if (unique.length > max) reach.append(node('span', 'reach__more', `and ${unique.length - max} more`));
+  return reach;
+}
+
+function goVPN(path, { replace = false, top = true } = {}) {
+  vpnPath = path || '';
+  setRoute(`#/vpn${vpnPath ? '/' + vpnPath : ''}`, replace);
+  if (top) window.scrollTo(0, 0);
+  renderVPNView();
+}
+
+// renderVPNView shows the main page or a person, as the address says.
+function renderVPNView() {
+  const data = vpnPeople();
+  const m = /^person\/([A-Za-z0-9-]+)(?:\/device\/(\d+))?$/.exec(vpnPath);
+  const person = m && [data.own, ...data.people].find((p) => p.key === m[1]);
+  $('vpn-main').hidden = !!vpnPath;
+  $('vpn-person').hidden = !vpnPath;
+  if (!vpnPath) {
+    renderVPNPeopleList(data);
+    renderVPNRules(data);
+    return;
+  }
+  const box = $('vpn-person');
+  box.textContent = '';
+  if (!person) {
+    // An address that names nobody: say so, with a way back.
+    box.append(vpnCrumbs([['VPN', '']]));
+    const card = node('div', 'card card--flush');
+    const line = node('div', 'emptyline');
+    line.append(node('b', '', 'Nobody here. '), 'This address names a person who is not on the VPN page (any more): the login may have been removed, or the address was mistyped. ');
+    const back = node('button', 'linkbtn', 'Back to the VPN page');
+    back.type = 'button';
+    back.addEventListener('click', () => goVPN(''));
+    line.append(back);
+    card.append(line);
+    box.append(card);
+    return;
+  }
+  renderVPNPerson(box, person, data, m[2] ? parseInt(m[2], 10) : 0);
+}
+
+function vpnCrumbs(parts) {
+  const nav = node('nav', 'crumbs');
+  nav.setAttribute('aria-label', 'Where you are');
+  parts.forEach(([label, path], i) => {
+    if (i) nav.append(node('span', 'crumbs__sep', '/'));
+    if (path === null) { nav.append(node('span', '', label)); return; }
+    const a = node('a', '', label);
+    a.href = `#/vpn${path ? '/' + path : ''}`;
+    a.addEventListener('click', (e) => { e.preventDefault(); goVPN(path); });
+    nav.append(a);
+  });
+  return nav;
+}
+
+function renderVPNPeopleList(data) {
   const status = vpnStatus;
   const off = !status.enabled;
   const lan = vpnSettings.wg_lan_access === '1';
-  const shown = wgDevices.filter((d) => !d.revokedAt);
+  const portal = hosts.find((h) => h.type === 'vpn-portal');
+  const haveProvider = oidcProviders.length > 0;
   $('btn-add-wgdevice').disabled = !status.running;
   $('btn-add-wgdevice').title = status.running ? '' : 'Switch on the VPN first';
-  $('vpn-devices-card').classList.toggle('is-waiting', off);
-
-  const live = {};
-  for (const st of status.devices || []) live[st.id] = st;
-  const body = $('wgdevices-body');
-  body.textContent = '';
-  const empty = $('wgdevices-empty');
-  empty.hidden = shown.length > 0;
-  empty.textContent = '';
-  empty.append(node('b', '', 'No devices yet. '), 'A device gets a setup file for the WireGuard app and then reaches your private hosts, and the local addresses you name for it. '
-    + (off ? 'Needs the VPN switched on, at the top of this page.' : 'Start with "Add a device".'));
-  $('wgdevices-table').hidden = shown.length === 0;
-
-  for (const d of shown) {
-    const st = live[d.id];
-    const own = isOwnDevice(d);
-    const tr = document.createElement('tr');
-    const cell = () => tr.appendChild(document.createElement('td'));
-
-    const tdName = twoLines(cell(), d.name);
-    tdName.title = `Address inside the VPN: ${d.address}`;
-
-    const tdBy = cell();
-    if (own) tdBy.textContent = 'You';
-    else { tdBy.textContent = d.email || d.sub; tdBy.title = `Logged in with ${providerName(d.provider)}`; }
-
-    // What it may reach: private hosts always, local addresses when named.
-    const tdReach = cell();
-    const reach = node('div', 'reach');
-    reach.append(node('span', 'reach__item', 'Private hosts'));
-    const routes = own ? (d.routes || []) : peopleRoutes(d);
-    for (const r of routes) reach.append(destChip(r));
-    tdReach.append(reach);
-    const expired = d.expiresAt && new Date(d.expiresAt) < new Date();
-    const notes = [];
-    if (routes.length && !lan) notes.push('Local network access is switched off: only private hosts work now.');
-    if (own && routes.length) notes.push(d.expiresAt ? `${expired ? 'Stopped working on' : 'Stops working on'} ${dayText(d.expiresAt)}.` : 'No end date, and no login behind it.');
-    if (notes.length) tdReach.append(node('span', 'cell-sub', notes.join(' ')));
-
-    const tdSeen = cell();
-    const traffic = st ? `${fmtBytes(st.rxBytes)} in, ${fmtBytes(st.txBytes)} out${st.connections ? ', ' + st.connections + ' open' : ''}` : '';
-    if (!d.enabled) twoLines(tdSeen, node('span', 'cell-main cell-main--muted', 'Paused'), 'switched off under "Allowed"');
-    else if (!status.running) twoLines(tdSeen, node('span', 'cell-main cell-main--muted', 'VPN not running'));
-    else if (!st) twoLines(tdSeen, node('span', 'cell-main cell-main--muted', 'No access'), own ? 'its end date has passed' : 'the login ran out or was ended: logging in again brings it back');
-    else if (st.up) twoLines(tdSeen, 'Connected', `${ago(st.lastHandshake)}${st.endpoint ? ', from ' + st.endpoint : ''}`);
-    else if (hadContact(st)) twoLines(tdSeen, node('span', 'cell-main cell-main--muted', 'Not connected'), `last seen ${ago(st.lastHandshake)}`);
-    else twoLines(tdSeen, node('span', 'cell-main cell-main--muted', 'Never connected'), d.createdAt ? `added ${dayText(d.createdAt)}` : '');
-    tdSeen.title = traffic;
-
-    const tdOn = cell();
-    const sw = document.createElement('input');
-    sw.type = 'checkbox';
-    sw.checked = d.enabled;
-    sw.title = d.enabled ? 'Pause this device' : 'Let this device connect again';
-    sw.setAttribute('aria-label', `${d.name} is allowed to connect`);
-    sw.addEventListener('change', async () => {
-      try { await api('PUT', `/api/wg/devices/${d.id}/enabled`, { enabled: sw.checked }); } catch (err) { alert(err.message); }
-      refreshVPN();
-    });
-    const wrap = node('span', 'switch switch--sm');
-    wrap.append(sw, node('span', 'switch__slot'), node('span', 'switch__knob'));
-    tdOn.append(wrap);
-
-    const tdAct = cell();
-    tdAct.className = 'actions';
-    const acts = node('span', 'rowactions');
-    if (own) {
-      const change = node('button', 'linkbtn', 'Change access');
-      change.type = 'button';
-      change.addEventListener('click', () => openWGDeviceModal({ device: d }));
-      acts.append(change);
-    }
-    const del = node('button', 'btn btn--ghost btn--sm btn--danger-hover', 'Remove');
-    del.type = 'button';
-    del.addEventListener('click', async () => {
-      if (!confirm(`Remove ${d.name}? Its setup file stops working at once and can never be used again.`)) return;
-      try { await api('DELETE', `/api/wg/devices/${d.id}`); refreshVPN(); } catch (err) { alert(err.message); }
-    });
-    acts.append(del);
-    tdAct.append(acts);
-    body.appendChild(tr);
-  }
-}
-
-function renderVPNPeople() {
-  const off = !vpnStatus.enabled;
-  const lan = vpnSettings.wg_lan_access === '1';
-  const settings = vpnSettings;
-  const portals = hosts.filter((h) => h.type === 'vpn-portal');
-  const portal = portals[0];
-  const portalURL = portal ? `https://${portal.domains[0]}` : '';
-  const haveProvider = oidcProviders.length > 0;
   $('vpn-people-card').classList.toggle('is-waiting', off);
 
-  const hint = $('vpn-people-hint');
-  hint.textContent = portal
-    ? `at ${portalURL}${portal.options && portal.options.portal ? ' with ' + providerName(portal.options.portal.providerId) : ''}`
-    : 'family or colleagues add their own devices';
-  $('vpn-people-intro').hidden = vpnSessions.length > 0;
+  // "Added here" stays on top; people follow, connected ones first.
+  const all = [...(data.own.devices.length ? [data.own] : []), ...data.people];
+  const q = vpnPeopleQuery.trim().toLowerCase();
+  const rows = all.filter((p) => {
+    if (vpnPeopleFilter === 'connected' && !p.up.length) return false;
+    if (vpnPeopleFilter === 'ended' && (p.own || p.live || p.blocked)) return false;
+    if (vpnPeopleFilter === 'blocked' && !p.blocked) return false;
+    if (!q) return true;
+    return [p.name, ...p.groups, ...p.devices.map((d) => d.name)].some((t) => String(t).toLowerCase().includes(q));
+  });
+  // Search, filters and paging are for long lists: a household never sees them.
+  const long = all.length > 10;
+  $('vpn-people-tools').hidden = !long;
+  const size = parseInt($('vpn-people-pagesize').value, 10) || 25;
+  const pages = Math.max(1, Math.ceil(rows.length / size));
+  vpnPeoplePage = Math.min(vpnPeoplePage, pages - 1);
+  $('vpn-people-pager').hidden = !long;
+  $('vpn-people-page').textContent = `${vpnPeoplePage + 1} / ${pages}`;
+  $('vpn-people-prev').disabled = vpnPeoplePage === 0;
+  $('vpn-people-next').disabled = vpnPeoplePage >= pages - 1;
+  for (const b of $('vpn-people-filter').children) b.classList.toggle('is-active', b.dataset.filter === vpnPeopleFilter);
 
-  const addRule = $('btn-add-vpnpolicy');
-  addRule.disabled = off || !haveProvider;
-  addRule.title = off ? 'Switch on the VPN first' : (haveProvider ? '' : 'A rule is about people from a login provider: add one first');
+  const body = $('vpn-people-body');
+  body.textContent = '';
+  $('vpn-people-table').hidden = all.length === 0;
+  for (const p of rows.slice(vpnPeoplePage * size, (vpnPeoplePage + 1) * size)) {
+    const tr = document.createElement('tr');
+    tr.className = 'rowlink';
+    tr.tabIndex = 0;
+    tr.setAttribute('role', 'link');
+    tr.setAttribute('aria-label', `${p.name}: open the devices`);
+    const open = () => goVPN(`person/${p.key}`);
+    tr.addEventListener('click', open);
+    tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    const cell = (cls) => { const td = tr.appendChild(document.createElement('td')); if (cls) td.className = cls; return td; };
 
-  // The three steps, shown until people can log in.
+    const who = node('div', 'who');
+    who.append(node('span', 'who__mark', p.own ? '+' : initials(p.name)));
+    const names = node('span');
+    names.append(node('span', 'cell-main', p.name), node('span', 'cell-sub', p.own ? 'devices an admin added on this page' : p.groups.join(', ')));
+    who.append(names);
+    cell().append(who);
+
+    twoLines(cell('col-wide'), p.devices.length ? plural(p.devices.length, 'device', 'devices') : node('span', 'cell-main cell-main--muted', 'No devices yet'),
+      p.devices.slice(0, 3).map((d) => d.name).join(', ') + (p.devices.length > 3 ? ` and ${p.devices.length - 3} more` : ''));
+
+    const tdConn = cell();
+    if (p.up.length) stateCell(tdConn, { on: true, main: p.devices.length > 1 ? `${p.up.length} of ${p.devices.length} now` : 'Connected', sub: p.up.map((d) => d.name).slice(0, 2).join(', ') });
+    else if (!p.devices.length) twoLines(tdConn, node('span', 'cell-main cell-main--muted', ''));
+    else if (p.lastSeen) stateCell(tdConn, { on: false, main: 'Not connected', sub: `last seen ${agoLong(p.lastSeen.t)}${p.devices.length > 1 ? ', ' + p.lastSeen.d.name : ''}` });
+    else {
+      // The quietest state any of the devices is in.
+      const states = p.devices.map((d) => deviceState(d, data.live[d.id]));
+      const s = states.find((x) => x.main === 'Not seen yet') || states[0];
+      stateCell(tdConn, p.devices.length > 1 ? { on: false, main: s.main, sub: s.main === 'Not seen yet' ? s.sub : '' } : s);
+    }
+
+    const tdReach = cell('col-wide');
+    if (p.own) {
+      const withRoutes = p.devices.filter((d) => (d.routes || []).length);
+      tdReach.append(reachChips(withRoutes.flatMap((d) => d.routes), 2));
+      if (withRoutes.length && withRoutes.length < p.devices.length) tdReach.append(node('span', 'cell-sub', `local addresses for ${withRoutes.map((d) => d.name).slice(0, 2).join(', ')}${withRoutes.length > 2 ? ' and more' : ''} only`));
+    } else tdReach.append(reachChips(p.routes, 2));
+    if (!lan && (p.own ? p.devices.some((d) => (d.routes || []).length) : p.routes.length)) tdReach.append(node('span', 'cell-sub', 'Local network access is switched off: only private hosts work now.'));
+
+    const tdLogin = cell();
+    const lb = loginBadge(p);
+    if (lb) twoLines(tdLogin, node('span', `badge ${lb[0]}`, lb[1]), lb[2]);
+    else twoLines(tdLogin, node('span', 'cell-main cell-main--muted', 'No login behind them'));
+
+    cell('rowlink__go').textContent = '>';
+    body.appendChild(tr);
+  }
+
+  const empty = $('vpn-people-empty');
+  empty.textContent = '';
+  if (!all.length) {
+    empty.hidden = false;
+    empty.append(node('b', '', 'Nobody yet. '), off
+      ? 'Devices and the people who log in appear here. Needs the VPN switched on, at the top of this page.'
+      : 'Add a device for yourself with "Add a device": it appears here under "Added here". Other people appear with their own name once they log in.');
+  } else if (!rows.length) {
+    empty.hidden = false;
+    empty.append(node('b', '', 'Nobody matches. '), 'Change the search or the filter to see the others.');
+  } else empty.hidden = true;
+
+  // What it takes before other people can log in, shown until they can.
   const step = (id, done, desc, where, enabled) => {
     const li = $(id);
     li.classList.toggle('is-done', done);
     li.classList.toggle('is-waiting', !done && !enabled);
     li.classList.toggle('is-next', !done && enabled);
-    li.querySelector('.goal__mark').textContent = done ? '✓' : li.dataset.n || (li.dataset.n = li.querySelector('.goal__mark').textContent);
+    if (!li.dataset.n) li.dataset.n = li.querySelector('.goal__mark').textContent;
+    li.querySelector('.goal__mark').textContent = done ? '✓' : li.dataset.n;
     li.querySelector('.needs__d').textContent = desc;
     li.querySelector('.goal__where').textContent = done ? '' : where;
     const btn = li.querySelector('button');
@@ -3089,34 +3254,88 @@ function renderVPNPeople() {
   step('vp-step-portal', false,
     'A proxy host of the type "VPN portal", for example vpn.example.com. People go there to sign in and get their setup file. It has to be reachable without the VPN.',
     off ? 'needs the VPN switched on' : (haveProvider ? 'on Proxy hosts' : 'needs step 1'), haveProvider && !off);
-  // A rule only needs a login provider, so it can be made before the login
-  // page exists; it is optional, and done once there is one.
-  step('vp-step-rules', vpnPolicies.length > 0,
-    vpnPolicies.length
-      ? `${vpnPolicies.length === 1 ? 'One rule' : vpnPolicies.length + ' rules'}, listed below.`
-      : 'Private hosts straight away. For addresses on your local network, add a rule for a group or for one person.',
-    off ? 'needs the VPN switched on' : (haveProvider ? 'optional' : 'needs step 1'), haveProvider && !off);
 
-  // Rules: who may reach what on the local network.
-  const pbody = $('vpnpolicies-body');
-  pbody.textContent = '';
+  const note = $('vpn-people-note');
+  note.hidden = !portal;
+  note.textContent = '';
+  if (portal) {
+    const url = `https://${portal.domains[0]}`;
+    note.append(`People log in at ${url}${portal.options && portal.options.portal ? ' with ' + providerName(portal.options.portal.providerId) : ''} and add their own devices there.`);
+    if (!vpnSessions.length) note.append(' Nobody has logged in yet.');
+  }
+
+  const settings = vpnSettings;
+  $('vl-lease').value = settings.wg_lease_minutes || '';
+  $('vl-grace').value = settings.wg_outage_grace_minutes || '';
+  $('vl-days').value = settings.wg_session_days || '';
+  $('vl-maxage').value = settings.wg_auth_max_age || '';
+  $('vl-devices').value = settings.wg_devices_per_user || '';
+  $('vpn-lease-summary').textContent = `checked every ${settings.wg_lease_minutes || 10} minutes, log in again after ${settings.wg_session_days || 30} days, ${settings.wg_devices_per_user || 5} devices per person`;
+}
+
+$('vpn-people-search').addEventListener('input', () => { vpnPeopleQuery = $('vpn-people-search').value; vpnPeoplePage = 0; renderVPNView(); });
+$('vpn-people-filter').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  vpnPeopleFilter = b.dataset.filter;
+  vpnPeoplePage = 0;
+  renderVPNView();
+});
+$('vpn-people-pagesize').addEventListener('change', () => { vpnPeoplePage = 0; renderVPNView(); });
+$('vpn-people-prev').addEventListener('click', () => { vpnPeoplePage = Math.max(0, vpnPeoplePage - 1); renderVPNView(); });
+$('vpn-people-next').addEventListener('click', () => { vpnPeoplePage += 1; renderVPNView(); });
+
+// Rules: who may reach what on the local network. A rule can name a group,
+// a person or everybody, so it has a place of its own.
+function renderVPNRules(data) {
+  const off = !vpnStatus.enabled;
+  const lan = vpnSettings.wg_lan_access === '1';
+  const haveProvider = oidcProviders.length > 0;
+  $('vpn-rules-card').classList.toggle('is-waiting', off);
+  const addRule = $('btn-add-vpnpolicy');
+  addRule.disabled = off || !haveProvider;
+  addRule.title = off ? 'Switch on the VPN first' : (haveProvider ? '' : 'A rule is about people from a login provider: add one first');
+
+  const body = $('vpnpolicies-body');
+  body.textContent = '';
   $('vpnpolicies-table').hidden = vpnPolicies.length === 0;
-  const pnote = $('vpnpolicies-empty');
-  pnote.textContent = '';
-  if (vpnPolicies.length && !lan) {
-    pnote.hidden = false;
-    pnote.append(node('b', '', 'These rules do nothing yet. '), 'Local network access is switched off: switch it on under VPN settings.');
-  } else if (!vpnPolicies.length && portal) {
-    pnote.hidden = false;
-    pnote.append(node('b', '', 'No rules yet. '), 'People who log in reach your private hosts only. Add a rule to let a group or a person reach addresses on your local network.');
-  } else pnote.hidden = true;
+  const note = $('vpnpolicies-empty');
+  note.textContent = '';
+  note.hidden = false;
+  if (vpnPolicies.length && !lan) note.append(node('b', '', 'These rules do nothing yet. '), 'Local network access is switched off: switch it on under VPN settings.');
+  else if (vpnPolicies.length) note.hidden = true;
+  else if (!haveProvider) note.append(node('b', '', 'No rules, and nobody to make one for. '), 'A rule lets a group or a person who logs in reach addresses on your local network. Needs a login provider first. A device you add yourself gets its addresses when you add it, without a rule.');
+  else note.append(node('b', '', 'No rules yet. '), 'People who log in reach your private hosts only. Add a rule to let a group or a person reach addresses on your local network.');
+
   for (const p of vpnPolicies) {
     const tr = document.createElement('tr');
     const cell = () => tr.appendChild(document.createElement('td'));
-    twoLines(cell(), describeSubject(p.subject), `rule "${p.name}"`);
+    const who = describeSubject(p.subject);
+    twoLines(cell(), who.charAt(0).toUpperCase() + who.slice(1), `rule "${p.name}"`);
     const reach = node('div', 'reach');
     for (const r of p.routes || []) reach.append(destChip(r));
     cell().append(reach);
+    // Whom it reaches today, among the people who logged in.
+    const applies = data.people.filter((x) => x.rules.some((r) => r.rule.id === p.id));
+    const tdApplies = cell();
+    const devices = applies.reduce((n, x) => n + x.devices.length, 0);
+    if (!applies.length) tdApplies.append(node('span', 'cell-main cell-main--muted', 'Nobody who logged in'));
+    else {
+      const link = node('button', 'linkbtn', `${plural(applies.length, 'person', 'people')}, ${plural(devices, 'device', 'devices')}`);
+      link.type = 'button';
+      link.title = applies.map((x) => x.name).slice(0, 12).join(', ');
+      link.addEventListener('click', () => {
+        if (applies.length === 1) { goVPN(`person/${applies[0].key}`); return; }
+        // Several people: show them in the list above.
+        vpnPeopleQuery = p.subject.kind === 'group' ? p.subject.group : '';
+        vpnPeopleFilter = '';
+        vpnPeoplePage = 0;
+        $('vpn-people-search').value = vpnPeopleQuery;
+        renderVPNView();
+        $('vpn-people-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      tdApplies.append(link);
+    }
     const tdAct = cell();
     tdAct.className = 'actions';
     const acts = node('span', 'rowactions');
@@ -3131,85 +3350,285 @@ function renderVPNPeople() {
     });
     acts.append(edit, del);
     tdAct.append(acts);
-    pbody.appendChild(tr);
+    body.appendChild(tr);
   }
+}
 
-  // People and the state of their login.
-  const sbody = $('vpnsessions-body');
-  sbody.textContent = '';
-  $('vpnsessions-table').hidden = vpnSessions.length === 0;
-  const snote = $('vpnsessions-empty');
-  snote.hidden = !portal || vpnSessions.length > 0;
-  snote.textContent = '';
-  if (portal) snote.append(node('b', '', 'Nobody has logged in yet. '), `People go to ${portalURL}/, sign in and add their own devices there.`);
-  const isBlocked = (s) => vpnBlocked.some((b) => b.provider === s.provider && b.sub === s.sub);
-  for (const s of vpnSessions) {
-    const tr = document.createElement('tr');
-    const cell = () => tr.appendChild(document.createElement('td'));
-    twoLines(cell(), s.email || s.sub, (s.groups || []).join(', ')).title = `Logged in with ${providerName(s.provider)}`;
-    const theirs = wgDevices.filter((d) => d.kind === 'sso' && !d.revokedAt && d.provider === s.provider && d.sub === s.sub);
-    const tdDev = cell();
-    tdDev.textContent = theirs.map((d) => d.name).join(', ') || 'none yet';
-    if (!theirs.length) tdDev.className = 'hs-muted';
-    const until = new Date(s.transient && new Date(s.graceUntil) > new Date(s.leaseUntil) ? s.graceUntil : s.leaseUntil);
-    const hard = new Date(s.hardUntil);
-    const liveNow = s.state === 'active' && until > new Date() && hard > new Date();
-    let state = ['badge--muted', s.state === 'ended' ? 'Ended' : 'Ran out', 'has to log in again'];
-    if (isBlocked(s)) state = ['badge--danger', 'Blocked', 'stays off until you lift the block'];
-    else if (liveNow && s.transient) state = ['badge--danger', 'Provider unreachable', `keeps working until ${until.toLocaleTimeString()}`];
-    else if (liveNow) state = ['badge--success', 'Good', `checked ${ago(s.renewedAt)}`];
-    twoLines(cell(), node('span', `badge ${state[0]}`, state[1]), state[2]);
-    const tdAgain = cell();
-    tdAgain.textContent = liveNow ? dayText(s.hardUntil) : '';
-    const tdAct = cell();
-    tdAct.className = 'actions';
-    const acts = node('span', 'rowactions');
-    if (liveNow) {
-      const end = node('button', 'linkbtn', 'End login');
+function facts(items) {
+  const dl = node('dl', 'facts');
+  for (const [term, value, small, mono] of items) {
+    const div = node('div');
+    div.append(node('dt', '', term));
+    const dd = node('dd', mono ? 'mono' : '', value);
+    if (small) dd.append(node('small', '', small));
+    div.append(dd);
+    dl.append(div);
+  }
+  return dl;
+}
+
+// A person's page: their login, their devices, the rules that apply to them.
+function renderVPNPerson(box, p, data, openDevice) {
+  const device = openDevice ? p.devices.find((d) => d.id === openDevice) : null;
+  box.append(vpnCrumbs(device ? [['VPN', ''], [p.name, `person/${p.key}`], [device.name, null]] : [['VPN', ''], [p.name, null]]));
+
+  const head = node('div', 'personhead');
+  const title = node('div');
+  title.append(node('h1', '', p.name));
+  title.append(node('p', '', p.own
+    ? 'Devices an admin added on the VPN page. Nobody logs in behind them: whoever holds a setup file can use it until the device is removed or its end date passes.'
+    : `Logs in with ${providerName(p.provider)}.${p.groups.length ? ` In ${p.groups.length === 1 ? 'the group' : 'the groups'} ${p.groups.join(', ')}.` : ' In no group.'}`));
+  head.append(title);
+  const acts = node('div', 'rowactions');
+  if (p.own) {
+    const add = node('button', 'btn btn--secondary btn--sm', 'Add a device');
+    add.type = 'button';
+    add.disabled = !vpnStatus.running;
+    add.addEventListener('click', () => openWGDeviceModal({}));
+    acts.append(add);
+  } else {
+    if (p.live && !p.blocked) {
+      const end = node('button', 'btn btn--secondary btn--sm', 'End login');
       end.type = 'button';
-      end.title = 'Their devices stop until they log in again';
+      end.title = 'The devices stop until this person logs in again';
       end.addEventListener('click', async () => {
-        if (!confirm(`End the login of ${s.email}? Their devices stop until they log in again.`)) return;
-        try { await api('POST', `/api/wg/sessions/${s.id}/end`); refreshVPN(); } catch (err) { alert(err.message); }
+        if (!confirm(`End the login of ${p.name}? Their devices stop until they log in again.`)) return;
+        try { await api('POST', `/api/wg/sessions/${p.session.id}/end`); refreshVPN(); } catch (err) { alert(err.message); }
       });
       acts.append(end);
     }
-    if (!isBlocked(s)) {
-      const block = node('button', 'btn btn--ghost btn--sm btn--danger-hover', 'Block');
-      block.type = 'button';
-      block.title = 'Their devices stay off whatever the login provider says';
-      block.addEventListener('click', async () => {
-        if (!confirm(`Block ${s.email} from the VPN? Their devices stop now and stay off, whatever the login provider says, until you lift the block.`)) return;
-        try { await api('POST', '/api/wg/owners/block', { provider: s.provider, sub: s.sub, email: s.email }); refreshVPN(); } catch (err) { alert(err.message); }
-      });
-      acts.append(block);
-    }
-    tdAct.append(acts);
-    sbody.appendChild(tr);
-  }
-  const blockedBox = $('vpnblocked');
-  blockedBox.hidden = vpnBlocked.length === 0;
-  blockedBox.textContent = '';
-  if (vpnBlocked.length) {
-    blockedBox.append('Blocked: ');
-    vpnBlocked.forEach((b, i) => {
-      if (i) blockedBox.append(', ');
-      blockedBox.append(`${b.email || b.sub} `);
-      const un = node('button', 'linkbtn', 'lift the block');
-      un.type = 'button';
-      un.addEventListener('click', async () => {
-        try { await api('POST', '/api/wg/owners/unblock', { provider: b.provider, sub: b.sub }); refreshVPN(); } catch (err) { alert(err.message); }
-      });
-      blockedBox.append(un);
+    const block = node('button', 'btn btn--ghost btn--sm' + (p.blocked ? '' : ' btn--danger-hover'), p.blocked ? 'Lift the block' : 'Block');
+    block.type = 'button';
+    block.title = p.blocked ? 'Let this person use the VPN again, after a new login' : 'The devices stay off whatever the login provider says';
+    block.addEventListener('click', async () => {
+      try {
+        if (p.blocked) await api('POST', '/api/wg/owners/unblock', { provider: p.provider, sub: p.sub });
+        else {
+          if (!confirm(`Block ${p.name} from the VPN? Their devices stop now and stay off, whatever the login provider says, until you lift the block.`)) return;
+          await api('POST', '/api/wg/owners/block', { provider: p.provider, sub: p.sub, email: p.name });
+        }
+        refreshVPN();
+      } catch (err) { alert(err.message); }
     });
+    acts.append(block);
+  }
+  head.append(acts);
+  box.append(head);
+
+  if (!p.own) {
+    const card = node('div', 'card card--flush');
+    const sh = node('div', 'sectionhead');
+    sh.append(node('h2', '', 'Login'));
+    const lb = loginBadge(p);
+    sh.append(node('span', `badge ${lb[0]}`, lb[1]));
+    card.append(sh);
+    const s = p.session;
+    const limit = vpnSettings.wg_devices_per_user || 5;
+    card.append(facts(s ? [
+      ['Last checked', p.live ? agoLong(s.renewedAt) : lb[2], `with ${providerName(p.provider)}, every ${vpnSettings.wg_lease_minutes || 10} minutes`],
+      ['Logged in', dayText(s.loginAt), 'at the login page'],
+      ['Log in again by', p.live ? dayText(s.hardUntil) : 'now', p.live ? 'the devices stop then until this person does' : 'the devices are off until this person does'],
+      ['Devices', `${p.devices.length} of ${limit}`, 'added and removed by the person, at the login page'],
+    ] : [
+      ['Login', 'None on record', p.blocked ? 'blocked: a login does not bring the devices back' : 'the devices are off until this person logs in'],
+      ['Devices', `${p.devices.length} of ${limit}`, 'added and removed by the person, at the login page'],
+    ]));
+    box.append(card);
   }
 
-  $('vl-lease').value = settings.wg_lease_minutes || '';
-  $('vl-grace').value = settings.wg_outage_grace_minutes || '';
-  $('vl-days').value = settings.wg_session_days || '';
-  $('vl-maxage').value = settings.wg_auth_max_age || '';
-  $('vl-devices').value = settings.wg_devices_per_user || '';
-  $('vpn-lease-summary').textContent = `checked every ${settings.wg_lease_minutes || 10} minutes, log in again after ${settings.wg_session_days || 30} days, ${settings.wg_devices_per_user || 5} devices per person`;
+  // Devices: a row each, one opened in place.
+  const dcard = node('div', 'card card--flush');
+  dcard.style.marginTop = p.own ? '0' : 'var(--sp-5)';
+  const dh = node('div', 'sectionhead');
+  const h2 = node('h2', '', 'Devices ');
+  h2.append(node('span', 'sectionhead__hint', p.devices.length ? 'click one for the details' : ''));
+  dh.append(h2);
+  dcard.append(dh);
+  if (openDevice && !device) {
+    const gone = node('div', 'emptyline');
+    gone.append(node('b', '', 'That device is not here. '), 'It may have been removed, or the address was mistyped. These are the devices there are:');
+    dcard.append(gone);
+  }
+  if (!p.devices.length) {
+    const none = node('div', 'emptyline');
+    none.append(node('b', '', 'No devices yet. '), p.own ? 'Add one with "Add a device": it gets a setup file for the WireGuard app.' : 'People add their own devices at the login page, after logging in.');
+    dcard.append(none);
+  }
+  for (const d of p.devices) dcard.append(deviceRow(d, p, data, device && device.id === d.id));
+  box.append(dcard);
+
+  if (!p.own) {
+    const rcard = node('div', 'card card--flush');
+    rcard.style.marginTop = 'var(--sp-5)';
+    const rh = node('div', 'sectionhead');
+    const rt = node('h2', '', 'Rules that apply ');
+    rt.append(node('span', 'sectionhead__hint', 'every device of this person gets these'));
+    rh.append(rt);
+    const add = node('button', 'btn btn--secondary btn--sm', 'Add a rule for this person');
+    add.type = 'button';
+    add.disabled = !vpnStatus.enabled;
+    add.addEventListener('click', () => openPolicyModal(null, { kind: 'user', provider: p.provider, sub: p.sub }));
+    rh.append(add);
+    rcard.append(rh);
+    if (!p.rules.length) {
+      const none = node('div', 'emptyline');
+      none.append(node('b', '', 'No rule names this person. '), 'Their devices reach your private hosts and nothing on the local network.');
+      rcard.append(none);
+    } else {
+      const table = node('table', 'table table--stack');
+      table.innerHTML = '<thead><tr><th>Rule</th><th>Because</th><th>May reach on the local network</th><th></th></tr></thead>';
+      const tb = table.appendChild(document.createElement('tbody'));
+      for (const { rule, why } of p.rules) {
+        const tr = tb.appendChild(document.createElement('tr'));
+        tr.appendChild(document.createElement('td')).textContent = rule.name;
+        tr.appendChild(node('td', 'hs-muted', why));
+        const reach = node('div', 'reach');
+        for (const r of rule.routes || []) reach.append(destChip(r));
+        tr.appendChild(document.createElement('td')).append(reach);
+        const td = tr.appendChild(node('td', 'actions'));
+        const edit = node('button', 'linkbtn', 'Change');
+        edit.type = 'button';
+        edit.addEventListener('click', () => openPolicyModal(rule));
+        td.append(edit);
+      }
+      rcard.append(table);
+      rcard.append(node('div', 'tablenote', 'Changing a rule changes it for everybody it names, not only for this person.'));
+    }
+    box.append(rcard);
+  }
+}
+
+// deviceRow is one device on a person's page; opened, it shows everything
+// there is to know about it.
+function deviceRow(d, p, data, open) {
+  const st = data.live[d.id];
+  const row = node('div', 'device' + (open ? ' is-open' : ''));
+  const head = node('div', 'device__head');
+  head.tabIndex = 0;
+  head.setAttribute('role', 'button');
+  head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  const toggle = () => goVPN(open ? `person/${p.key}` : `person/${p.key}/device/${d.id}`, { top: false });
+  head.addEventListener('click', toggle);
+  head.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target === head) toggle(); });
+  head.append(twoLines(node('span'), d.name, d.createdAt ? `added ${dayText(d.createdAt)}` : ''));
+  head.append(stateCell(node('span'), deviceState(d, st)));
+  const sw = document.createElement('input');
+  sw.type = 'checkbox';
+  sw.checked = d.enabled;
+  sw.setAttribute('aria-label', `${d.name} is allowed to connect`);
+  sw.addEventListener('click', (e) => e.stopPropagation());
+  sw.addEventListener('change', async () => {
+    try { await api('PUT', `/api/wg/devices/${d.id}/enabled`, { enabled: sw.checked }); } catch (err) { alert(err.message); }
+    refreshVPN();
+  });
+  const wrap = node('span', 'switch switch--sm');
+  wrap.title = d.enabled ? 'Allowed. Switch off to pause this device' : 'Paused. Switch on to let it connect again';
+  wrap.addEventListener('click', (e) => e.stopPropagation());
+  wrap.append(sw, node('span', 'switch__slot'), node('span', 'switch__knob'));
+  head.append(wrap, node('span', 'device__chev', open ? '-' : '+'));
+  row.append(head);
+  if (!open) return row;
+
+  const body = node('div', 'device__body');
+  const own = isOwnDevice(d);
+  const seen = deviceLastSeen(d, st);
+  const state = deviceState(d, st);
+  const items = [
+    ['Last contact', seen ? agoLong(seen) : state.main, seen ? new Date(seen).toLocaleString() : state.sub],
+    ['First seen', d.firstSeenAt ? dayText(d.firstSeenAt) : 'Not on record', d.firstSeenAt ? '' : (vpnStatus.seenSince ? `quicgate keeps this since ${dayText(vpnStatus.seenSince)}` : '')],
+    ['Traffic', st ? `${fmtBytes(st.rxBytes)} in, ${fmtBytes(st.txBytes)} out` : 'None', st ? `since quicgate last started${st.connections ? `, ${st.connections} open now` : ''}` : 'the device is not on the VPN now'],
+    ['Connects from', st && st.endpoint ? st.endpoint : 'Not known', st && st.endpoint ? 'an address you do not know? Remove the device' : 'known once it connects', !!(st && st.endpoint)],
+    ['Address inside the VPN', d.address, '', true],
+    ['Added', d.createdAt ? dayText(d.createdAt) : '', own ? (d.addedBy ? `by ${d.addedBy === 'token' ? 'an API token' : d.addedBy.replace(/^(oidc|ldap):/, '')}` : 'by whom was not recorded before 1.21.0') : 'by the person, at the login page'],
+  ];
+  if (own && (d.routes || []).length) {
+    const expired = d.expiresAt && new Date(d.expiresAt) < new Date();
+    items.push([expired ? 'Stopped working on' : 'Stops working on', d.expiresAt ? dayText(d.expiresAt) : 'No end date', 'no login behind it']);
+  }
+  body.append(facts(items));
+
+  body.append(node('p', 'subhead', 'What it may reach, and why'));
+  const why = node('ul', 'why');
+  const line = (chip, because) => { const li = node('li'); li.append(node('span', '', ''), node('span', 'why__because', because)); li.firstChild.append(chip); why.append(li); };
+  line(node('span', 'reach__item', 'Private hosts'), 'every device on the VPN reaches these');
+  if (own) for (const r of d.routes || []) line(destChip(r), 'given to this device itself');
+  else for (const { rule, why: because } of p.rules) for (const r of rule.routes || []) line(destChip(r), `from the rule "${rule.name}", ${because}`);
+  body.append(why);
+  const lan = vpnSettings.wg_lan_access === '1';
+  const hasLocal = own ? (d.routes || []).length > 0 : p.routes.length > 0;
+  if (hasLocal && !lan) body.append(node('p', 'devnote', 'Local network access is switched off under VPN settings: only private hosts work now.'));
+  if (hasLocal && !own) body.append(node('p', 'devnote', 'A device that was set up before a rule existed needs its setup file again, or the new address in its WireGuard app.'));
+
+  // Its latest connections to the local network, from the connection log.
+  body.append(node('p', 'subhead', 'Latest connections to the local network'));
+  const flows = node('div', 'flows');
+  flows.append(node('p', 'devnote', 'Reading the connection log...'));
+  body.append(flows);
+  loadDeviceFlows(d, flows);
+
+  const bar = node('div', 'barrow');
+  bar.append(node('span', 'cell-sub', own ? 'Changing the addresses asks for your password and a two-factor code.' : 'What this device may reach follows from the rules for the person.'));
+  const acts = node('span', 'rowactions');
+  if (own) {
+    const change = node('button', 'linkbtn', 'Change access');
+    change.type = 'button';
+    change.addEventListener('click', () => openWGDeviceModal({ device: d }));
+    acts.append(change);
+  }
+  const del = node('button', 'btn btn--ghost btn--sm btn--danger-hover', 'Remove');
+  del.type = 'button';
+  del.addEventListener('click', async () => {
+    if (!confirm(`Remove ${d.name}? Its setup file stops working at once and can never be used again.`)) return;
+    try {
+      await api('DELETE', `/api/wg/devices/${d.id}`);
+      vpnPath = `person/${p.key}`;
+      setRoute(`#/vpn/${vpnPath}`, true);
+      refreshVPN();
+    } catch (err) { alert(err.message); }
+  });
+  acts.append(del);
+  bar.append(acts);
+  body.append(bar);
+  row.append(body);
+  return row;
+}
+
+// loadDeviceFlows fills in what the connection log has about one device.
+// Everything a record says is shown as text: it is data from the log, and
+// part of it (the reason) is free text.
+async function loadDeviceFlows(d, box) {
+  let answer;
+  try {
+    answer = await api('GET', `/api/wg/devices/${d.id}/flows?n=25`);
+  } catch (err) {
+    box.textContent = '';
+    box.append(node('p', 'devnote', `The connection log could not be read: ${err.message}`));
+    return;
+  }
+  box.textContent = '';
+  const records = answer.flows || [];
+  if (!records.length) {
+    box.append(node('p', 'devnote', answer.truncated
+      ? 'None in the latest part of the connection log. Older ones are in logs/vpn-flows.log on the machine.'
+      : 'None on record. Only connections to addresses on the local network are logged, not visits to private hosts.'));
+    return;
+  }
+  const table = node('table', 'table table--flows table--stack');
+  table.innerHTML = '<thead><tr><th>When</th><th>To</th><th>What happened</th></tr></thead>';
+  const tb = table.appendChild(document.createElement('tbody'));
+  for (const f of records) {
+    const tr = tb.appendChild(document.createElement('tr'));
+    const when = new Date(f.ts);
+    tr.appendChild(node('td', 'hs-muted', isNaN(when) ? String(f.ts || '') : when.toLocaleString()));
+    tr.appendChild(node('td', 'mono', `${f.dst || ''} ${String(f.proto || '').toUpperCase()}`.trim()));
+    const td = tr.appendChild(document.createElement('td'));
+    if (f.verdict === 'allow') td.append(node('span', 'flow flow--ok', 'Allowed'));
+    else if (f.verdict === 'deny') td.append(node('span', 'flow flow--bad', 'Refused'), f.reason ? `: ${f.reason}` : '');
+    else if (f.verdict === 'end') td.append(node('span', 'flow', 'Ended'), `: ${fmtBytes(f.bytesUp || 0)} sent, ${fmtBytes(f.bytesDown || 0)} received${f.seconds ? `, open for ${f.seconds < 90 ? Math.round(f.seconds) + ' s' : Math.round(f.seconds / 60) + ' min'}` : ''}`);
+    else td.textContent = String(f.verdict || '');
+  }
+  box.append(table);
+  box.append(node('p', 'devnote', `The latest ${records.length} from logs/vpn-flows.log${answer.truncated ? ' (only its latest part is read)' : ''}. Visits to private hosts are in the normal request log.`));
 }
 
 // networkUsers lists the hosts and streams that send traffic through one of
@@ -3399,7 +3818,6 @@ $('vpn-open-settings').addEventListener('click', () => openVPNFold('vpn-settings
 $('vm-guide').addEventListener('click', async (e) => { e.preventDefault(); switchPage('help'); await openGuide('vpn'); });
 $('vp-step-provider').querySelector('button').addEventListener('click', () => switchPage('access'));
 $('vp-step-portal').querySelector('button').addEventListener('click', () => addPortalHost());
-$('vp-step-rules').querySelector('button').addEventListener('click', () => openPolicyModal(null));
 
 // withPort adds the port to an address that was typed without one.
 function withPort(address, port) {
@@ -4045,12 +4463,14 @@ $('wgdevice-form').addEventListener('submit', async (e) => {
 let readPolicySubject = null;
 const checkPolicyDests = () => checkDests('vp-routes', 'vp-check');
 
-function openPolicyModal(p) {
+// openPolicyModal changes a rule, or makes a new one; preset names whom a
+// new rule starts out for.
+function openPolicyModal(p, preset) {
   editingPolicyId = p ? p.id : null;
   $('vpnpolicy-modal-title').textContent = p ? `Change the rule "${p.name}"` : 'Add a rule';
   setError('vpnpolicy-error', null);
   $('vp-name').value = p ? p.name : '';
-  readPolicySubject = makeSubjectPicker($('vp-subject'), p ? p.subject : null, true);
+  readPolicySubject = makeSubjectPicker($('vp-subject'), p ? p.subject : (preset || null), true);
   $('vp-routes').textContent = '';
   $('vp-check').textContent = '';
   for (const r of (p && p.routes) || [null]) addDestRow('vp-routes', r, checkPolicyDests);

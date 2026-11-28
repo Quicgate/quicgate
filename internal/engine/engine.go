@@ -134,6 +134,11 @@ func (t *routingTable) lookup(hostport string) *route {
 
 // Engine owns the routing table and all data-plane listeners.
 type Engine struct {
+	// seen is when each VPN device's last handshake was written to the
+	// database (see rememberSeen).
+	seenMu sync.Mutex
+	seen   map[int64]time.Time
+
 	cfg   Config
 	store *store.Store
 	table atomic.Pointer[routingTable]
@@ -1398,6 +1403,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	}()
 
 	e.traffic.start(ctx)
+	go e.rememberSeenLoop(ctx)
 
 	httpHandler := e.acme.HTTPChallengeHandler(e.wrapRealIP(e.ban.wrap(e.accessLog.wrap(e.serveHTTP))))
 	httpSrv := newPublicServer(e.cfg.HTTPAddr, httpHandler, nil)
@@ -1446,6 +1452,9 @@ func (e *Engine) Run(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		log.Printf("engine: shutting down (draining connections for up to 5s)")
+		// What the VPN devices were last seen at would be lost with the
+		// process: write it down once more. One small update per device.
+		e.rememberSeen(e.wg.DeviceStatus())
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = httpSrv.Shutdown(shutdownCtx)

@@ -242,6 +242,7 @@
     </div>
 
     <div id="page-vpn" hidden>
+      <div id="vpn-main">
       <div class="pagehead">
         <div><h1 class="pagehead__title">VPN</h1><p class="pagehead__sub">A private way in. Your devices reach the hosts and addresses you choose, from anywhere, and nothing else.</p></div>
         <div class="pagehead__actions vpnstate">
@@ -296,37 +297,29 @@
         </div>
       </div>
 
-      <div class="card card--flush" id="vpn-devices-card">
-        <div class="sectionhead"><h2>Devices <span class="sectionhead__hint">phones and laptops that may use the VPN</span></h2>
+      <div class="card card--flush" id="vpn-people-card">
+        <div class="sectionhead"><h2>People and devices <span class="sectionhead__hint">who is on the VPN, and with what. Click a row for the devices.</span></h2>
           <button id="btn-add-wgdevice" class="btn btn--secondary btn--sm">Add a device</button></div>
-        <table class="table" id="wgdevices-table">
-          <thead><tr><th>Device</th><th>Added by</th><th>May reach</th><th>Last seen</th><th>Allowed</th><th></th></tr></thead>
-          <tbody id="wgdevices-body"></tbody>
-        </table>
-        <div id="wgdevices-empty" class="emptyline" hidden></div>
-        <details class="fold fold--info" id="vpn-devices-info">
-          <summary><span class="fold__info">i</span>What a device can reach, and what it never can</summary>
-          <div class="fold__body">
-            <ul>
-              <li><b>Private hosts</b> are the proxy hosts you marked "VPN only". Every device reaches them by their normal name. To the rest of the world those names do not exist.</li>
-              <li><b>Addresses on your local network</b> (a NAS, a printer, a server) only when you named them for that device, or for the person who added it, and only while local network access is switched on under VPN settings. quicgate connects on the device's behalf, so the NAS sees quicgate's address, not the phone's. Ping does not work, and only IPv4.</li>
-              <li><b>Never:</b> the internet through quicgate, other devices on the VPN, streams, quicgate's own admin page, and the addresses listed under "Addresses nobody may reach".</li>
-              <li><b>A device you add yourself has no login behind it.</b> Whoever holds its setup file can use it until you remove the device or its end date passes. That is why local addresses for such a device cost your password and a two-factor code.</li>
-              <li><b>Removing a device is final.</b> Its setup file stops working and cannot be used again. Switch "Allowed" off to pause it instead.</li>
-              <li><b>The setup file is shown once.</b> quicgate never has the device's private key, so it cannot show the file again. Lost it? Remove the device and add it again.</li>
-            </ul>
+        <div class="toolbar toolbar--inset" id="vpn-people-tools" hidden>
+          <input type="search" class="search" id="vpn-people-search" placeholder="Search a name, a group or a device" autocomplete="off" spellcheck="false" aria-label="Search people and devices">
+          <div class="segmented" id="vpn-people-filter" role="group" aria-label="Show">
+            <button type="button" class="is-active" data-filter="">Everybody</button>
+            <button type="button" data-filter="connected">Connected now</button>
+            <button type="button" data-filter="ended">Login ended</button>
+            <button type="button" data-filter="blocked">Blocked</button>
           </div>
-        </details>
-      </div>
-
-      <div class="card card--flush" style="margin-top:var(--sp-5)" id="vpn-people-card">
-        <div class="sectionhead"><h2>People who log in <span class="sectionhead__hint" id="vpn-people-hint">family or colleagues add their own devices</span></h2>
-          <button id="btn-add-vpnpolicy" class="btn btn--secondary btn--sm">Add a rule</button></div>
-        <p class="intro" id="vpn-people-intro">People sign in at a login page with their own account and get a setup file for their phone or laptop. When their account is switched off at the login provider, their devices stop within minutes. You do not hand out files yourself.</p>
+        </div>
+        <div class="tablewrap">
+          <table class="table table--people table--stack" id="vpn-people-table">
+            <thead><tr><th>Person</th><th class="col-wide">Devices</th><th>Connected</th><th class="col-wide">May reach</th><th>Login</th><th></th></tr></thead>
+            <tbody id="vpn-people-body"></tbody>
+          </table>
+        </div>
+        <div id="vpn-people-empty" class="emptyline" hidden></div>
         <ul class="needs" id="vpn-people-steps">
           <li id="vp-step-provider">
             <div class="goal__mark">1</div>
-            <div><p class="needs__t">A login provider</p><p class="needs__d"></p></div>
+            <div><p class="needs__t">A login provider, so other people can log in</p><p class="needs__d"></p></div>
             <div class="goal__next"><span class="goal__where"></span><button type="button" class="btn btn--secondary btn--sm">Add a login provider</button></div>
           </li>
           <li id="vp-step-portal">
@@ -334,23 +327,16 @@
             <div><p class="needs__t">A login page</p><p class="needs__d"></p></div>
             <div class="goal__next"><span class="goal__where"></span><button type="button" class="btn btn--secondary btn--sm">Add the login page</button></div>
           </li>
-          <li id="vp-step-rules">
-            <div class="goal__mark">3</div>
-            <div><p class="needs__t">What they may reach</p><p class="needs__d"></p></div>
-            <div class="goal__next"><span class="goal__where"></span><button type="button" class="btn btn--secondary btn--sm">Add a rule</button></div>
-          </li>
         </ul>
-        <table class="table" id="vpnpolicies-table">
-          <thead><tr><th>Who</th><th>May reach on the local network</th><th></th></tr></thead>
-          <tbody id="vpnpolicies-body"></tbody>
-        </table>
-        <div id="vpnpolicies-empty" class="emptyline" hidden></div>
-        <table class="table" id="vpnsessions-table">
-          <thead><tr><th>Person</th><th>Devices</th><th>Login</th><th>Log in again by</th><th></th></tr></thead>
-          <tbody id="vpnsessions-body"></tbody>
-        </table>
-        <div id="vpnsessions-empty" class="emptyline" hidden></div>
-        <div id="vpnblocked" class="tablenote" hidden></div>
+        <div class="pager" id="vpn-people-pager" hidden>
+          <label class="pager__size">Rows <select id="vpn-people-pagesize"><option>10</option><option selected>25</option><option>50</option><option>100</option></select></label>
+          <div class="pager__nav">
+            <button type="button" class="btn btn--ghost btn--sm" id="vpn-people-prev">Previous</button>
+            <span class="mono" id="vpn-people-page"></span>
+            <button type="button" class="btn btn--ghost btn--sm" id="vpn-people-next">Next</button>
+          </div>
+        </div>
+        <div id="vpn-people-note" class="tablenote" hidden></div>
         <details class="fold" id="vpn-lease-fold">
           <summary>Login rules <span class="fold__sum" id="vpn-lease-summary"></span></summary>
           <form id="vpn-lease-form">
@@ -377,17 +363,40 @@
             <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
           </form>
         </details>
-        <details class="fold fold--info">
-          <summary><span class="fold__info">i</span>What the login provider has to support, and what "End login" and "Block" do</summary>
+        <details class="fold fold--info" id="vpn-people-info">
+          <summary><span class="fold__info">i</span>What a device can reach, what the login provider has to support, and what "End login" and "Block" do</summary>
           <div class="fold__body">
             <ul>
-              <li>The provider lets quicgate ask again later whether the account still exists, without the person being there. In Keycloak: give the client the scope <code>offline_access</code>.</li>
-              <li>It makes the person sign in again when quicgate asks for a fresh login, and says when they did (<code>max_age</code> and <code>auth_time</code>; Keycloak does both by default).</li>
-              <li>For rules by group: it sends the person's groups. In Keycloak: a Group Membership mapper.</li>
-              <li>The login page has to be reachable without the VPN, over HTTPS: it is where people go to get the VPN back.</li>
+              <li><b>Private hosts</b> are the proxy hosts you marked "VPN only". Every device reaches them by their normal name. To the rest of the world those names do not exist.</li>
+              <li><b>Addresses on your local network</b> (a NAS, a printer, a server) only when they were named: on the device itself for a device added here, or in a rule for the person who added it. And only while local network access is switched on under VPN settings. quicgate connects on the device's behalf, so the NAS sees quicgate's address, not the phone's. Ping does not work, and only IPv4.</li>
+              <li><b>Never:</b> the internet through quicgate, other devices on the VPN, streams, quicgate's own admin page, and the addresses listed under "Addresses nobody may reach".</li>
+              <li><b>"Added here"</b> holds the devices an admin added on this page. No login stands behind them: whoever holds a setup file can use it until you remove the device or its end date passes. That is why local addresses for such a device cost your password and a two-factor code.</li>
+              <li><b>Removing a device is final.</b> Its setup file stops working and cannot be used again. Switch "Allowed" off to pause it instead. The setup file is shown once: lost it, then remove the device and add it again.</li>
+              <li><b>The login provider</b> has to let quicgate ask again later whether the account still exists (in Keycloak: the scope <code>offline_access</code>), make the person sign in again when quicgate asks for a fresh login and say when they did (<code>max_age</code> and <code>auth_time</code>), and send the person's groups for rules by group (in Keycloak: a Group Membership mapper).</li>
+              <li><b>The login page</b> has to be reachable without the VPN, over HTTPS: it is where people go to get the VPN back.</li>
+              <li><b>"End login"</b> stops a person's devices until they log in again. <b>"Block"</b> keeps them off whatever the login provider says, until you lift it.</li>
+              <li><b>Last seen</b> is the last time the device and quicgate shook hands. quicgate writes it down about once a minute, so it survives a restart. Traffic counts start again at every restart.</li>
+            </ul>
+          </div>
+        </details>
+      </div>
+
+      <div class="card card--flush" style="margin-top:var(--sp-5)" id="vpn-rules-card">
+        <div class="sectionhead"><h2>Rules for the local network <span class="sectionhead__hint">what people who log in may reach there, on top of private hosts</span></h2>
+          <button id="btn-add-vpnpolicy" class="btn btn--secondary btn--sm">Add a rule</button></div>
+        <table class="table table--stack" id="vpnpolicies-table">
+          <thead><tr><th>Who</th><th>May reach on the local network</th><th>Applies to</th><th></th></tr></thead>
+          <tbody id="vpnpolicies-body"></tbody>
+        </table>
+        <div id="vpnpolicies-empty" class="emptyline" hidden></div>
+        <details class="fold fold--info">
+          <summary><span class="fold__info">i</span>How rules work</summary>
+          <div class="fold__body">
+            <ul>
+              <li>A rule names a group, one person, or everybody from a login provider. So a rule belongs to no single person; each person's page shows the rules that apply to them, and why.</li>
               <li>A person gets what every rule that names them allows. There are no "deny" rules: what no rule allows is refused.</li>
+              <li>A device added here gets its addresses on the device itself, not from a rule.</li>
               <li>A device that was set up before a rule existed needs its setup file again, or the new address added by hand in the WireGuard app: the allowed addresses are written into the file when it is made.</li>
-              <li>"End login" stops a person's devices until they log in again. "Block" keeps them off whatever the login provider says, until you lift it.</li>
             </ul>
           </div>
         </details>
@@ -457,6 +466,8 @@
           <div class="panel__foot"><span class="panel__status" data-status hidden></span><button type="submit" class="btn btn--primary">Save</button></div>
         </form>
       </details>
+      </div>
+      <div id="vpn-person" hidden></div>
     </div>
 
     <div id="page-docker" hidden>

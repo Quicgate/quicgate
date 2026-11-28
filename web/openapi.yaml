@@ -296,7 +296,7 @@ paths:
       parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
       responses: { "200": { description: deleted } }
   /api/wg/status:
-    get: { summary: "WireGuard endpoint status: running, port, tunnel network, public key, per-site and per-device handshake and traffic. Never a private or preshared key.", responses: { "200": { description: OK } } }
+    get: { summary: "WireGuard endpoint status: running, port, tunnel network, public key, per-site and per-device handshake and traffic (both since the last start), and seenSince: from when quicgate keeps the devices' last seen across restarts. Never a private or preshared key.", responses: { "200": { description: OK } } }
   /api/wg/sites:
     get: { summary: List WireGuard sites (without preshared keys), responses: { "200": { description: OK } } }
     post:
@@ -307,7 +307,7 @@ paths:
     put: { summary: "Update a site (the key and the address cannot change)", parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], responses: { "200": { description: ok } } }
     delete: { summary: "Delete a site; 409 while a host or stream still reaches something through it", parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], responses: { "204": { description: deleted }, "409": { description: in use } } }
   /api/wg/devices:
-    get: { summary: "List VPN devices, revoked ones included (without preshared keys)", responses: { "200": { description: OK } } }
+    get: { summary: "List VPN devices, revoked ones included (without preshared keys). Each has addedBy (the admin account that added it, or token; empty before 1.21.0 and for a person's device), firstSeenAt and lastSeenAt (the first and the latest WireGuard handshake on record, kept across restarts; empty when none was recorded).", responses: { "200": { description: OK } } }
     post:
       summary: "Add a device. Without routes it reaches quicgate's hosts in the tunnel and nothing else. With routes it also reaches those addresses on the local network, with no login behind it: that needs the admin's password, a two-factor code (two-factor must be on for the account) and an end date, or neverExpires. An API token cannot do that part. The response carries the preshared key, this once."
       requestBody: { content: { application/json: { schema: { type: object, properties: { name: {type: string}, publicKey: {type: string}, routes: {type: array, items: { $ref: '#/components/schemas/VPNRoute' }}, expiresAt: {type: string, format: date-time, description: 'With routes: the moment the device stops working'}, neverExpires: {type: boolean}, password: {type: string}, code: {type: string} } } } } }
@@ -320,6 +320,11 @@ paths:
       parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
       requestBody: { content: { application/json: { schema: { type: object, properties: { routes: {type: array, items: { $ref: '#/components/schemas/VPNRoute' }}, expiresAt: {type: string, format: date-time}, neverExpires: {type: boolean}, password: {type: string}, code: {type: string} } } } } }
       responses: { "200": { description: the device as it is now }, "400": { description: refused by validation }, "401": { description: wrong password or code }, "404": { description: no such device, or revoked } }
+  /api/wg/devices/{id}/flows:
+    get:
+      summary: "The latest connections of one device to the local network, from the connection log (logs/vpn-flows.log), newest first. Bounded: at most 200 records, only the last 4 MB of the current log file is read (truncated says so), rotated files are not read. A record belongs to the device by its peer id (device:<id>), not by the name in it. Session or full-access token; a monitoring or switch token gets 403."
+      parameters: [ { name: id, in: path, required: true, schema: { type: integer } }, { name: n, in: query, schema: { type: integer, default: 50, maximum: 200 } } ]
+      responses: { "200": { description: '{flows: [{ts, peer, device, owner, src, dst, proto, verdict (allow, deny or end), reason, bytesUp, bytesDown, seconds}], truncated}. reason is free text: show it as text.' }, "404": { description: no such device } }
   /api/wg/devices/{id}:
     delete: { summary: "Revoke a device. Final: the key can never be registered again.", parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], responses: { "204": { description: revoked } } }
   /api/wg/breakglass:

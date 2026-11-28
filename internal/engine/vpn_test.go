@@ -390,3 +390,60 @@ func TestAnEmptyTunnelNetworkSettingMeansTheDefault(t *testing.T) {
 		t.Fatal("a network that is not one was accepted")
 	}
 }
+
+// When a device was last seen is kept in the database, so that it is still
+// known after a restart. It is written when the time has really moved, and
+// not more often than once a minute per device.
+func TestDeviceLastSeenIsRememberedAcrossRestarts(t *testing.T) {
+	t.Setenv("QG_SECRET_KEY", "")
+	t.Setenv("QG_SECRET_KEY_FILE", "")
+	e, st := newTestEngine(t)
+	_, network, _, err := WGSettings(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(name string) store.WGDevice {
+		d := store.WGDevice{Name: name, Kind: "admin", PublicKey: newTunnelClient(t).pub, Enabled: true}
+		psk, err := wg.NewPresharedKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.CreateWGDevice(&d, network, psk, 0); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	phone, laptop := mk("phone"), mk("laptop")
+	t0 := time.Date(2026, 11, 28, 10, 0, 0, 0, time.UTC)
+	seen := func(id int64) string { d, _ := st.GetWGDevice(id); return d.LastSeenAt }
+	status := func(ts time.Time) []wg.PeerStatus {
+		return []wg.PeerStatus{{ID: phone.ID, LastHandshake: ts}, {ID: laptop.ID}}
+	}
+
+	if n := e.rememberSeen(status(t0)); n != 1 || seen(phone.ID) != "2026-11-28T10:00:00Z" {
+		t.Fatalf("first contact: %d writes, stored %q", n, seen(phone.ID))
+	}
+	if seen(laptop.ID) != "" {
+		t.Fatalf("a device that was never seen has a time: %q", seen(laptop.ID))
+	}
+	// The same handshake again, and one a few seconds later: nothing to write.
+	if n := e.rememberSeen(status(t0)); n != 0 {
+		t.Fatalf("the same handshake was written again: %d writes", n)
+	}
+	if n := e.rememberSeen(status(t0.Add(20 * time.Second))); n != 0 || seen(phone.ID) != "2026-11-28T10:00:00Z" {
+		t.Fatalf("a handshake 20 s later: %d writes, stored %q, want none within a minute", n, seen(phone.ID))
+	}
+	if n := e.rememberSeen(status(t0.Add(2 * time.Minute))); n != 1 || seen(phone.ID) != "2026-11-28T10:02:00Z" {
+		t.Fatalf("two minutes later: %d writes, stored %q", n, seen(phone.ID))
+	}
+	// A restart: a new engine on the same database knows it still, and an
+	// engine that has seen nothing yet does not wipe it.
+	e2 := New(Config{DisableTLS: true, DataDir: t.TempDir()}, st)
+	t.Cleanup(func() { _ = e2.accessLog.Close(); _ = e2.ban.closePersist() })
+	if n := e2.rememberSeen([]wg.PeerStatus{{ID: phone.ID}, {ID: laptop.ID}}); n != 0 || seen(phone.ID) != "2026-11-28T10:02:00Z" {
+		t.Fatalf("after a restart: %d writes, stored %q", n, seen(phone.ID))
+	}
+	if d, _ := st.GetWGDevice(phone.ID); d.FirstSeenAt != "2026-11-28T10:00:00Z" {
+		t.Fatalf("first seen = %q", d.FirstSeenAt)
+	}
+}

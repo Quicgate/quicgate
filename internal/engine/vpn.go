@@ -545,6 +545,56 @@ func (e *Engine) wgDevices(now time.Time, lanAccess bool) ([]wg.Device, map[int6
 	return out, owners
 }
 
+// seenEvery is how often the devices' last handshakes are looked at, and so
+// the most often one device's row is written.
+const seenEvery = time.Minute
+
+// rememberSeenLoop keeps "last seen" of the VPN devices in the database, so
+// that it is still known after a restart: the WireGuard device itself only
+// has it in memory.
+func (e *Engine) rememberSeenLoop(ctx context.Context) {
+	t := time.NewTicker(seenEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			e.rememberSeen(e.wg.DeviceStatus())
+		}
+	}
+}
+
+// rememberSeen writes down the handshake times that moved since they were
+// last written, and returns how many rows it wrote. A device is written at
+// most once per seenEvery, however often it shakes hands: a handshake less
+// than that after the one on record waits for a later round. The first look
+// after a start writes what is newer than the database has, which the store
+// decides.
+func (e *Engine) rememberSeen(statuses []wg.PeerStatus) int {
+	e.seenMu.Lock()
+	defer e.seenMu.Unlock()
+	if e.seen == nil {
+		e.seen = map[int64]time.Time{}
+	}
+	wrote := 0
+	for _, st := range statuses {
+		if st.LastHandshake.IsZero() {
+			continue
+		}
+		if last, ok := e.seen[st.ID]; ok && st.LastHandshake.Sub(last) < seenEvery {
+			continue
+		}
+		if err := e.store.MarkWGDeviceSeen(st.ID, st.LastHandshake); err != nil {
+			log.Printf("wireguard: remember when device %d was seen: %v", st.ID, err)
+			continue
+		}
+		e.seen[st.ID] = st.LastHandshake
+		wrote++
+	}
+	return wrote
+}
+
 func ownerKey(provider int64, sub string) string {
 	return strconv.FormatInt(provider, 10) + "/" + sub
 }

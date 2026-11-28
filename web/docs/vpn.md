@@ -6,13 +6,43 @@ built around four things you may want, and each one is off until you ask for it:
 
 | What you want | What it takes | Section on the page |
 |---|---|---|
-| Use my own phone or laptop away from home | a device, and a host marked "VPN only" | Devices |
-| Let one device reach something on my local network | a device with the addresses you name | Devices |
-| Let other people log in and add their own devices | a login provider and a login page | People who log in |
+| Use my own phone or laptop away from home | a device, and a host marked "VPN only" | People and devices |
+| Let one device reach something on my local network | a device with the addresses you name | People and devices |
+| Let other people log in and add their own devices | a login provider and a login page | People and devices, Rules for the local network |
 | Have quicgate use a service on another network | a router or small machine there | Other networks |
 
 The page opens with these four as a list. Each line says where it stands and has one button
 for the next step.
+
+## People, and their devices
+
+A device always belongs to somebody, so the page lists people. **People and devices** has one
+row per person who logged in at the login page, and one row called **Added here** for the
+devices an admin added on this page. A row says how many devices there are, whether one is
+connected now or when one was last seen, what they may reach in short, and how the login is
+doing. With more than ten rows a search box (name, group or device name), three filters
+(Connected now, Login ended, Blocked) and a page size appear.
+
+Click a row for **the person's page**: the login (with End login and Block), the devices, and
+the rules that apply to this person with the reason for each. Click a device to open it in
+place. It shows:
+
+- **Last contact** and **first seen.** quicgate writes these down about once a minute, so they
+  survive a restart. For a device that is older than this record, the page says "Not seen yet
+  since" the day quicgate began to keep it, and not "Never connected".
+- **Traffic** since quicgate last started, where the device **connects from**, and its address
+  inside the VPN.
+- **Who added it**, for a device added here: the admin's account, or "an API token". Devices
+  from before 1.21.0 have no such record.
+- **What it may reach, and why**: private hosts, and each local address with where it comes
+  from (given to this device itself, or from which rule and through which group).
+- **Its latest connections to the local network**, read from the connection log
+  (`logs/vpn-flows.log`): when, where to, and whether it was allowed, refused (with the reason)
+  or ended (with how much was sent and received). Only the latest part of the log is read.
+  Visits to private hosts are in the normal request log, not here.
+
+The address in the browser follows along (`#/vpn/person/...`), so the Back button works and a
+view can be bookmarked.
 
 Other networks are described in the [Streams & port forwards](streams.md) guide (there they
 are the "Reach through" choice of a host or a stream). This guide is about the other three.
@@ -55,8 +85,8 @@ The second step of the dialog lists what to do on the device: install the WireGu
 download the **setup file** and open it in the app, switch the tunnel on. The setup file is
 shown **once** and is not stored anywhere: when it is lost, remove the device and add it again.
 
-The Devices table shows every device, yours and those people added themselves, with what each
-may reach and when it was last seen. The "Allowed" switch pauses a device.
+The device appears under **Added here** in "People and devices". The "Allowed" switch on its
+row pauses it.
 
 **Removing a device is final.** Its key cannot be registered again, open connections are
 closed at once, and its address inside the VPN stays out of use so that nothing of the old
@@ -90,7 +120,8 @@ it off. That is why it costs more than a plain device:
 - the Overview page keeps reminding you that such devices exist;
 - an API token cannot do it.
 
-**Changing it later.** "Change access" on the device's row opens the same choices and asks for
+**Changing it later.** Open the device (People and devices, Added here, the device). "Change
+access" there opens the same choices and asks for
 the same confirmation, also when you only take addresses away. On quicgate's side the change is
 in force at once. The device itself still has its old setup file, and quicgate cannot make a
 new one because it never has the device's private key. So the page shows the one line to put
@@ -102,7 +133,7 @@ phone it is often easier to remove the device and add it again.
 
 Before 1.20 there was a separate kind of device for this, the break-glass device, and there
 could be two. They are now ordinary devices with local addresses: the ones you have keep
-working and show up in the Devices table, and there is no limit of two. One use for them
+working and show up under "Added here", and there is no limit of two. One use for them
 stays worth remembering: if your login provider itself is behind the VPN, an outage locks
 everybody out, you included. A device of your own with the addresses you need to repair it is
 the way back in. Keep its setup file offline.
@@ -131,7 +162,7 @@ Requests from inside the VPN are not counted toward automatic bans.
 ## People who log in
 
 For family or colleagues: they sign in with their own account and add their own devices. You
-do not hand out files. The section on the VPN page walks three steps:
+do not hand out files. Until it is set up, "People and devices" shows what it takes:
 
 1. **A login provider.** The service people sign in with, such as Keycloak or Authentik. Add
    it on the Access control page, where it is called an identity provider.
@@ -150,7 +181,7 @@ proxy has to be listed under trusted proxies and send `X-Forwarded-Proto: https`
 
 What a person sees: log in, name a device, download the setup file. What quicgate does with
 that login is stricter than an ordinary web login, because a setup file outlives a browser
-session. The settings named here are under **Login rules** in the section:
+session. The settings named here are under **Login rules** in "People and devices":
 
 - **The login has to be fresh.** quicgate asks the provider to authenticate the person now
   (`max_age`) and checks the `auth_time` the provider states. A browser that was still logged in
@@ -175,11 +206,15 @@ session. The settings named here are under **Login rules** in the section:
 - A device keeps its setup file across all of this. After a lapse the person logs in at the
   login page and the same device works again.
 
-The section lists every person with their devices and the state of their login. **End login**
-takes a person's devices off until they log in again. **Block** keeps them off whatever the
-provider says, until you lift it.
+Each person who logged in has a row in "People and devices", and a page of their own behind
+it. **End login** there takes a person's devices off until they log in again. **Block** keeps
+them off whatever the provider says, until you lift it on the same page.
 
 ### Rules: what people may reach on your local network
+
+Rules have a section of their own, **Rules for the local network**, because a rule can name a
+group and so belongs to no single person. Its "Applies to" column says how many people and
+devices a rule reaches today, and a person's page lists the rules that apply to them.
 
 A rule says *for whom* (a group, a person, everybody from one login provider) and *may reach*
 (the same lines as for a device: name, address, what for). A person gets what every rule that
